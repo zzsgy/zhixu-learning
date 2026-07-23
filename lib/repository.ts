@@ -18,6 +18,14 @@ import {
 import type { AuthenticatedUser } from "@/lib/auth";
 import { STARTER_CARDS } from "@/lib/starter-cards";
 
+/**
+ * 每批写入的起始卡片数量。
+ *
+ * 一张卡片当前会绑定 13 个 SQL 参数；Cloudflare D1 单条语句最多允许
+ * 100 个绑定参数，因此每批限制为 4 张，为以后增加字段保留余量。
+ */
+const STARTER_CARD_INSERT_BATCH_SIZE = 4;
+
 /** 网页启动接口返回的完整数据结构。 */
 export type BootstrapData = {
   /** 当前账号。 */
@@ -64,7 +72,22 @@ export async function ensureStarterCards(): Promise<void> {
     origin: "seed",
   }));
 
-  await db.insert(cards).values(starterRows).onConflictDoNothing();
+  /**
+   * batchStart 是当前小批次在 starterRows 中的起始下标。
+   * 拆分写入可以保证每条 INSERT 都低于 D1 的参数数量上限。
+   */
+  for (
+    let batchStart = 0;
+    batchStart < starterRows.length;
+    batchStart += STARTER_CARD_INSERT_BATCH_SIZE
+  ) {
+    /** batchRows 是本轮写入数据库的少量起始卡片。 */
+    const batchRows = starterRows.slice(
+      batchStart,
+      batchStart + STARTER_CARD_INSERT_BATCH_SIZE,
+    );
+    await db.insert(cards).values(batchRows).onConflictDoNothing();
+  }
 }
 
 /** 确保用户拥有一条默认设置记录，并返回当前设置。 */

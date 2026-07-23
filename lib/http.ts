@@ -20,6 +20,15 @@ export function errorMessage(error: unknown): string {
 
 /** 返回统一的服务端错误响应，同时避免向客户端泄露堆栈。 */
 export function serverErrorResponse(error: unknown): Response {
+  /**
+   * diagnosticError 只写入受控的服务端生产日志，便于定位 D1 或运行时错误；
+   * 客户端仍只接收不包含调用栈的可读错误消息。
+   */
+  const diagnosticError =
+    error instanceof Error
+      ? { name: error.name, message: error.message, stack: error.stack }
+      : { name: "UnknownError", message: String(error) };
+  console.error("API request failed", diagnosticError);
   return Response.json(
     {
       error: "server_error",

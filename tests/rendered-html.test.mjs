@@ -64,3 +64,18 @@ test("migration contains all cross-device persistence tables", async () => {
     assert.match(migration, new RegExp(`CREATE TABLE \\\`${table}\\\``));
   }
 });
+
+/** 起始卡片必须拆分写入，避免超过 Cloudflare D1 单条语句的绑定参数上限。 */
+test("starter cards are inserted in bounded batches", async () => {
+  /** repositorySource 是数据访问层的 TypeScript 源码。 */
+  const repositorySource = await readFile(
+    new URL("../lib/repository.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(repositorySource, /STARTER_CARD_INSERT_BATCH_SIZE = 4/);
+  assert.match(repositorySource, /starterRows\.slice\(/);
+  assert.doesNotMatch(
+    repositorySource,
+    /insert\(cards\)\.values\(starterRows\)/,
+  );
+});

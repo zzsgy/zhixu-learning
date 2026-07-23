@@ -772,7 +772,7 @@ export function Dashboard(): React.ReactNode {
       setOffline(false);
       setUnauthorized(false);
       await writeOfflineSnapshot(payload);
-    } catch {
+    } catch (error) {
       /** cached 是最近一次成功同步的浏览器离线快照。 */
       const cached = await readOfflineSnapshot().catch(() => null);
       if (cached) {
@@ -780,7 +780,12 @@ export function Dashboard(): React.ReactNode {
         setSettingsDraft(cached.settings);
         setOffline(true);
       } else {
-        setNotice("暂时无法连接云端，请检查网络后刷新。");
+        /** failureMessage 区分云端接口故障与真正的浏览器网络故障。 */
+        const failureMessage =
+          error instanceof Error && error.message
+            ? `云端数据加载失败：${error.message}`
+            : "暂时无法连接云端，请检查网络后刷新。";
+        setNotice(failureMessage);
       }
     } finally {
       setLoading(false);
