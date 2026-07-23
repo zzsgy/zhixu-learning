@@ -8,6 +8,7 @@ import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
   aiMessages,
+  articles,
   cards,
   deepDives,
   deviceTokens,
@@ -32,6 +33,8 @@ export type BootstrapData = {
   user: AuthenticatedUser;
   /** 当前账号可见卡片。 */
   cards: Array<typeof cards.$inferSelect>;
+  /** 当前账号保存的外部文章。 */
+  articles: Array<typeof articles.$inferSelect>;
   /** 阅读进度。 */
   progress: Array<typeof progress.$inferSelect>;
   /** 收藏记录。 */
@@ -121,6 +124,7 @@ export async function loadBootstrapData(
   /** 并行读取互不依赖的数据集合，减少接口等待时间。 */
   const [
     visibleCards,
+    userArticles,
     userProgress,
     userFavorites,
     userDeepDives,
@@ -134,6 +138,11 @@ export async function loadBootstrapData(
         or(isNull(cards.ownerUserId), eq(cards.ownerUserId, user.id)),
       )
       .orderBy(desc(cards.createdAt), cards.domain, cards.sequence),
+    db
+      .select()
+      .from(articles)
+      .where(eq(articles.userId, user.id))
+      .orderBy(desc(articles.updatedAt)),
     db
       .select()
       .from(progress)
@@ -172,6 +181,7 @@ export async function loadBootstrapData(
   return {
     user,
     cards: visibleCards,
+    articles: userArticles,
     progress: userProgress,
     favorites: userFavorites,
     deepDives: userDeepDives,
@@ -179,6 +189,96 @@ export async function loadBootstrapData(
     settings: userSettings,
     devices: userDevices,
   };
+}
+
+/** 保存解析并清洗后的公开文章；重复网址会更新原记录。 */
+export async function saveArticle(input: {
+  /** 当前用户 ID。 */
+  userId: string;
+  /** 新文章 ID。 */
+  id: string;
+  /** 重定向后的最终公开网址。 */
+  url: string;
+  /** 普通网页或微信公众号来源。 */
+  sourceType: "web" | "wechat";
+  /** 原网页标题。 */
+  title: string;
+  /** 自动生成的文章简介。 */
+  summary: string;
+  /** 自动识别的文章领域。 */
+  domain: "AI" | "BIO" | "DB" | "OTHER";
+  /** 可选作者或公众号名称。 */
+  author: string | null;
+  /** 可选发布时间。 */
+  publishedAt: string | null;
+  /** 可选封面图绝对地址。 */
+  coverImageUrl: string | null;
+  /** 经过安全过滤的正文 HTML。 */
+  contentHtml: string;
+  /** 纯文本正文。 */
+  contentText: string;
+  /** 正文字数。 */
+  wordCount: number;
+  /** 自动生成的主题标签。 */
+  tags: string[];
+}): Promise<typeof articles.$inferSelect> {
+  /** db 是 D1 的 Drizzle 客户端。 */
+  const db = getDb();
+  /** now 是本次解析完成时间。 */
+  const now = new Date().toISOString();
+  await db
+    .insert(articles)
+    .values({
+      id: input.id,
+      userId: input.userId,
+      url: input.url,
+      sourceType: input.sourceType,
+      title: input.title,
+      summary: input.summary,
+      domain: input.domain,
+      author: input.author,
+      publishedAt: input.publishedAt,
+      coverImageUrl: input.coverImageUrl,
+      contentHtml: input.contentHtml,
+      contentText: input.contentText,
+      wordCount: input.wordCount,
+      tagsJson: JSON.stringify(input.tags),
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [articles.userId, articles.url],
+      set: {
+        sourceType: input.sourceType,
+        title: input.title,
+        summary: input.summary,
+        domain: input.domain,
+        author: input.author,
+        publishedAt: input.publishedAt,
+        coverImageUrl: input.coverImageUrl,
+        contentHtml: input.contentHtml,
+        contentText: input.contentText,
+        wordCount: input.wordCount,
+        tagsJson: JSON.stringify(input.tags),
+        updatedAt: now,
+      },
+    });
+
+  /** rows 最多包含当前用户与网址对应的一篇文章。 */
+  const rows = await db
+    .select()
+    .from(articles)
+    .where(
+      and(
+        eq(articles.userId, input.userId),
+        eq(articles.url, input.url),
+      ),
+    )
+    .limit(1);
+  /** row 缺失表示数据库没有返回刚刚保存的文章。 */
+  const row = rows[0];
+  if (!row) throw new Error("文章保存失败，请稍后重试。");
+  return row;
 }
 
 /** 把卡片标记为阅读中或已完成，并合并累计阅读时长。 */

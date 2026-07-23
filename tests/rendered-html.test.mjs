@@ -41,19 +41,33 @@ test("build contains the Zhixu application and sync routes", async () => {
   assert.match(buildText, /api\/devices\/pair/);
   assert.match(buildText, /api\/generate\/deep-dive/);
   assert.match(buildText, /api\/import/);
+  assert.match(buildText, /api\/articles\/parse/);
+  assert.match(buildText, /article-detail-page/);
+  assert.doesNotMatch(buildText, /reader-backdrop/);
   assert.doesNotMatch(buildText, /Your site is taking shape|Building your site/);
 });
 
 /** 数据库迁移应包含账号、卡片、深度内容、设备和 AI 对话表。 */
 test("migration contains all cross-device persistence tables", async () => {
   /** migration 是当前生成的首个 D1 SQL 迁移。 */
-  const migration = await readFile(
-    new URL("../drizzle/0000_silly_typhoid_mary.sql", import.meta.url),
-    "utf8",
-  );
+  /** migrationDirectory 是保存全部 D1 SQL 迁移的目录。 */
+  const migrationDirectory = new URL("../drizzle/", import.meta.url);
+  /** migrationFiles 是按文件名排序后的全部 SQL 迁移文件。 */
+  const migrationFiles = (await readdir(migrationDirectory))
+    .filter((filename) => filename.endsWith(".sql"))
+    .sort();
+  /** migration 是按执行顺序合并后的完整数据库结构。 */
+  const migration = (
+    await Promise.all(
+      migrationFiles.map((filename) =>
+        readFile(new URL(filename, migrationDirectory), "utf8"),
+      ),
+    )
+  ).join("\n");
   for (const table of [
     "users",
     "cards",
+    "articles",
     "progress",
     "favorites",
     "deep_dives",
@@ -92,4 +106,18 @@ test("quick import preserves eligible long-form answers", async () => {
   assert.match(importRouteSource, /MIN_DEEP_DIVE_LENGTH = 2000/);
   assert.match(importRouteSource, /content\.length >= MIN_DEEP_DIVE_LENGTH/);
   assert.doesNotMatch(importRouteSource, /MAX_DEEP|5000/);
+});
+
+/** 文章解析必须包含链接限制、HTML 白名单与本地分类兜底。 */
+test("article parser applies security and classification safeguards", async () => {
+  /** parserSource 是文章解析服务的 TypeScript 源码。 */
+  const parserSource = await readFile(
+    new URL("../lib/article-parser.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(parserSource, /validatePublicUrl/);
+  assert.match(parserSource, /ALLOWED_TAGS/);
+  assert.match(parserSource, /element\.removeAttribute/);
+  assert.match(parserSource, /fallbackClassification/);
+  assert.match(parserSource, /mp\.weixin\.qq\.com/);
 });

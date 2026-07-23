@@ -1,5 +1,11 @@
 "use client";
 
+/*
+ * 外部文章图片来自任意公开域名，无法预先配置固定的 Next Image 主机白名单；
+ * 服务端已过滤图片协议和属性，因此这里使用原生懒加载图片元素。
+ */
+/* eslint-disable @next/next/no-img-element */
+
 /**
  * 知序网页端主界面。
  *
@@ -12,7 +18,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 type Domain = "AI" | "BIO" | "DB";
 
 /** 主导航页面。 */
-type ViewName = "today" | "library" | "deep" | "sync";
+type ViewName = "today" | "library" | "articles" | "deep" | "sync";
+
+/** 外部文章允许使用的一级领域。 */
+type ArticleDomain = Domain | "OTHER";
 
 /** 云端卡片结构。 */
 type Card = {
@@ -45,6 +54,42 @@ type Card = {
   /** 创建时间。 */
   createdAt: string;
   /** 更新时间。 */
+  updatedAt: string;
+};
+
+/** 解析并保存的外部文章结构。 */
+type Article = {
+  /** 稳定文章 ID。 */
+  id: string;
+  /** 当前用户 ID。 */
+  userId: string;
+  /** 重定向后的最终原文链接。 */
+  url: string;
+  /** 普通网页或微信公众号来源。 */
+  sourceType: "web" | "wechat";
+  /** 文章标题。 */
+  title: string;
+  /** 自动生成的简介。 */
+  summary: string;
+  /** 自动识别的文章领域。 */
+  domain: ArticleDomain;
+  /** 作者或公众号名称。 */
+  author: string | null;
+  /** 原文发布时间。 */
+  publishedAt: string | null;
+  /** 原文封面图。 */
+  coverImageUrl: string | null;
+  /** 经过服务端安全过滤的正文 HTML。 */
+  contentHtml: string;
+  /** 纯文本正文。 */
+  contentText: string;
+  /** 正文字数。 */
+  wordCount: number;
+  /** JSON 编码的主题标签。 */
+  tagsJson: string;
+  /** 首次保存时间。 */
+  createdAt: string;
+  /** 最近重新解析时间。 */
   updatedAt: string;
 };
 
@@ -149,6 +194,8 @@ type BootstrapData = {
   };
   /** 可见卡片。 */
   cards: Card[];
+  /** 当前账号保存的外部文章。 */
+  articles: Article[];
   /** 阅读进度。 */
   progress: Progress[];
   /** 收藏。 */
@@ -202,6 +249,7 @@ const NAV_ITEMS: Array<{
 }> = [
   { id: "today", label: "今日卡片", hint: "TODAY" },
   { id: "library", label: "知识库", hint: "LIBRARY" },
+  { id: "articles", label: "文章库", hint: "ARTICLES" },
   { id: "deep", label: "深度阅读", hint: "DEEP" },
   { id: "sync", label: "同步与导出", hint: "SYNC" },
 ];
@@ -220,6 +268,14 @@ const DOMAIN_NUMBERS: Record<Domain, string> = {
   DB: "03",
 };
 
+/** 文章领域中文标签。 */
+const ARTICLE_DOMAIN_LABELS: Record<ArticleDomain, string> = {
+  AI: "AI 技术",
+  BIO: "生物工程",
+  DB: "PostgreSQL",
+  OTHER: "其他",
+};
+
 /** 安全解析 JSON 字符串数组。 */
 function parseStringArray(value: string | null): string[] {
   if (!value) return [];
@@ -232,6 +288,14 @@ function parseStringArray(value: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+/** 为旧版离线快照补齐后来新增的数据集合。 */
+function normalizeBootstrapData(data: BootstrapData): BootstrapData {
+  return {
+    ...data,
+    articles: Array.isArray(data.articles) ? data.articles : [],
+  };
 }
 
 /** 把 ISO 时间格式化为简洁中文时间。 */
@@ -384,6 +448,24 @@ function snapshotToMarkdown(data: BootstrapData): string {
       "",
     ].join("\n");
   });
+  /** articleSections 是外部文章的 Markdown 备份段落。 */
+  const articleSections = data.articles.map((article) => {
+    /** tags 是当前文章的主题标签。 */
+    const tags = parseStringArray(article.tagsJson);
+    return [
+      `## ${article.title}`,
+      "",
+      `- 领域：${ARTICLE_DOMAIN_LABELS[article.domain]}`,
+      `- 作者：${article.author || "未标注"}`,
+      `- 原文：${article.url}`,
+      tags.length ? `- 标签：${tags.join("、")}` : "",
+      "",
+      `> ${article.summary}`,
+      "",
+      article.contentText,
+      "",
+    ].join("\n");
+  });
   return [
     "# 知序知识库导出",
     "",
@@ -391,6 +473,9 @@ function snapshotToMarkdown(data: BootstrapData): string {
     `导出时间：${new Date().toLocaleString("zh-CN")}`,
     "",
     ...sections,
+    "# 文章库",
+    "",
+    ...articleSections,
   ].join("\n");
 }
 
@@ -543,7 +628,7 @@ function CardTile({
   );
 }
 
-/** 右侧沉浸式阅读器。 */
+/** 站内卡片详情页。 */
 function Reader({
   card,
   deepDive,
@@ -566,7 +651,7 @@ function Reader({
   favorite: boolean;
   /** 正在执行的异步动作。 */
   busyAction: string | null;
-  /** 关闭阅读器。 */
+  /** 返回卡片列表。 */
   onClose: () => void;
   /** 切换收藏。 */
   onFavorite: () => void;
@@ -595,12 +680,7 @@ function Reader({
   }
 
   return (
-    <div className="reader-backdrop" role="presentation" onMouseDown={onClose}>
-      <article
-        aria-label={`${card.title} 阅读器`}
-        className="reader-panel"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
+    <article aria-label={`${card.title} 详情页`} className="reader-panel">
         <header className="reader-header">
           <div>
             <p className="eyebrow">
@@ -610,15 +690,19 @@ function Reader({
           </div>
           <div className="reader-actions">
             <button
+              className="reader-back-button"
+              onClick={onClose}
+              type="button"
+            >
+              ← 返回卡片列表
+            </button>
+            <button
               aria-label={favorite ? "取消收藏" : "收藏"}
               className={`icon-button ${favorite ? "is-active" : ""}`}
               onClick={onFavorite}
               type="button"
             >
               <Icon name="bookmark" />
-            </button>
-            <button aria-label="关闭" className="icon-button" onClick={onClose} type="button">
-              <Icon name="x" />
             </button>
           </div>
         </header>
@@ -737,8 +821,135 @@ function Reader({
             标记为已掌握
           </button>
         </footer>
-      </article>
-    </div>
+    </article>
+  );
+}
+
+/** 文章库中的单篇文章预览。 */
+function ArticleTile({
+  article,
+  onOpen,
+}: {
+  /** 当前文章。 */
+  article: Article;
+  /** 打开文章详情页。 */
+  onOpen: () => void;
+}): React.ReactNode {
+  /** tags 是从数据库 JSON 恢复的主题标签。 */
+  const tags = parseStringArray(article.tagsJson);
+  /** sourceHost 是用于界面展示的原文域名。 */
+  const sourceHost = new URL(article.url).hostname.replace(/^www\./, "");
+
+  return (
+    <button
+      className={`article-tile article-domain-${article.domain.toLowerCase()}`}
+      onClick={onOpen}
+      type="button"
+    >
+      {article.coverImageUrl ? (
+        <img
+          alt=""
+          className="article-tile-cover"
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          src={article.coverImageUrl}
+        />
+      ) : (
+        <span className="article-cover-fallback">
+          {ARTICLE_DOMAIN_LABELS[article.domain]}
+        </span>
+      )}
+      <div className="article-tile-body">
+        <div className="article-tile-meta">
+          <span>{ARTICLE_DOMAIN_LABELS[article.domain]}</span>
+          <span>{article.sourceType === "wechat" ? "微信公众号" : sourceHost}</span>
+        </div>
+        <h3>{article.title}</h3>
+        <p>{article.summary}</p>
+        <div className="article-tile-footer">
+          <span>
+            {article.author || "来源未标注"} ·{" "}
+            {Math.max(2, Math.ceil(article.wordCount / 420))} 分钟
+          </span>
+          <span>{tags.slice(0, 2).join(" · ") || "待读"}</span>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+/** 站内文章阅读详情页。 */
+function ArticleDetail({
+  article,
+  onClose,
+}: {
+  /** 当前阅读的文章。 */
+  article: Article;
+  /** 返回文章列表。 */
+  onClose: () => void;
+}): React.ReactNode {
+  /** tags 是从数据库 JSON 恢复的主题标签。 */
+  const tags = parseStringArray(article.tagsJson);
+  /** sourceHost 是用于界面展示的原文域名。 */
+  const sourceHost = new URL(article.url).hostname.replace(/^www\./, "");
+  /**
+   * safeArticleMarkup 只来自服务端白名单清洗后的 HTML。
+   * 外部网页的 script、style、事件属性和危险 URL 已在保存前删除。
+   */
+  const safeArticleMarkup = { __html: article.contentHtml };
+
+  return (
+    <article className="article-detail-page">
+      <header className="article-detail-header">
+        <button className="reader-back-button" onClick={onClose} type="button">
+          ← 返回文章库
+        </button>
+        <div className="article-detail-kicker">
+          <span>{ARTICLE_DOMAIN_LABELS[article.domain]}</span>
+          <span>{article.sourceType === "wechat" ? "微信公众号" : sourceHost}</span>
+          <span>{article.wordCount.toLocaleString("zh-CN")} 字</span>
+        </div>
+        <h2>{article.title}</h2>
+        <p>{article.summary}</p>
+        <div className="article-byline">
+          <span>{article.author || "原文作者未标注"}</span>
+          {article.publishedAt ? <span>{article.publishedAt}</span> : null}
+          <a href={article.url} rel="noopener noreferrer" target="_blank">
+            查看原文 ↗
+          </a>
+        </div>
+      </header>
+
+      {article.coverImageUrl ? (
+        <img
+          alt=""
+          className="article-detail-cover"
+          referrerPolicy="no-referrer"
+          src={article.coverImageUrl}
+        />
+      ) : null}
+
+      <div className="article-reading-layout">
+        <aside className="article-reading-aside">
+          <span>ARTICLE INDEX</span>
+          <strong>{ARTICLE_DOMAIN_LABELS[article.domain]}</strong>
+          {tags.map((tag) => (
+            <small key={tag}>#{tag}</small>
+          ))}
+        </aside>
+        <div
+          className="article-prose"
+          dangerouslySetInnerHTML={safeArticleMarkup}
+        />
+      </div>
+
+      <footer className="article-detail-footer">
+        <span>原文内容版权归原作者及发布平台所有。</span>
+        <a href={article.url} rel="noopener noreferrer" target="_blank">
+          回到 {sourceHost}
+        </a>
+      </footer>
+    </article>
   );
 }
 
@@ -750,6 +961,10 @@ export function Dashboard(): React.ReactNode {
   const [activeView, setActiveView] = useState<ViewName>("today");
   /** selectedCardId 是阅读器正在展示的卡片。 */
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  /** selectedArticleId 是文章详情页正在展示的文章。 */
+  const [selectedArticleId, setSelectedArticleId] = useState<string | null>(null);
+  /** articleUrl 是文章解析输入框中的链接。 */
+  const [articleUrl, setArticleUrl] = useState("");
   /** domainFilter 是知识库领域筛选。 */
   const [domainFilter, setDomainFilter] = useState<Domain | "ALL">("ALL");
   /** searchText 是知识库搜索词。 */
@@ -789,16 +1004,20 @@ export function Dashboard(): React.ReactNode {
       /** payload 是最新云端快照或错误。 */
       const payload = (await response.json()) as BootstrapData & ApiError;
       if (!response.ok) throw new Error(payload.message ?? "同步失败");
-      setData(payload);
+      /** normalizedPayload 为旧客户端结构补齐新增的数据集合。 */
+      const normalizedPayload = normalizeBootstrapData(payload);
+      setData(normalizedPayload);
       setSettingsDraft(payload.settings);
       setOffline(false);
       setUnauthorized(false);
-      await writeOfflineSnapshot(payload);
+      await writeOfflineSnapshot(normalizedPayload);
     } catch (error) {
       /** cached 是最近一次成功同步的浏览器离线快照。 */
       const cached = await readOfflineSnapshot().catch(() => null);
       if (cached) {
-        setData(cached);
+        /** normalizedCached 为旧版 IndexedDB 快照补齐文章数组。 */
+        const normalizedCached = normalizeBootstrapData(cached);
+        setData(normalizedCached);
         setSettingsDraft(cached.settings);
         setOffline(true);
       } else {
@@ -828,6 +1047,17 @@ export function Dashboard(): React.ReactNode {
     () => data?.cards.find((card) => card.id === selectedCardId),
     [data, selectedCardId],
   );
+  /** selectedArticle 是站内文章阅读页当前展示的文章。 */
+  const selectedArticle = useMemo(
+    () => data?.articles.find((article) => article.id === selectedArticleId),
+    [data, selectedArticleId],
+  );
+  /** pageTitle 是顶部工具栏当前显示的页面名称。 */
+  const pageTitle = selectedCard
+    ? "卡片详情"
+    : selectedArticle
+      ? "文章阅读"
+      : NAV_ITEMS.find((item) => item.id === activeView)?.label;
   /** favoriteIds 是收藏卡片 ID 集合。 */
   const favoriteIds = useMemo(
     () => new Set(data?.favorites.map((item) => item.cardId) ?? []),
@@ -865,6 +1095,27 @@ export function Dashboard(): React.ReactNode {
   const completionRate = data?.cards.length
     ? Math.round((completedIds.size / data.cards.length) * 100)
     : 0;
+
+  /** 打开站内卡片详情页，并关闭可能存在的文章详情页。 */
+  function openCard(cardId: string): void {
+    setSelectedArticleId(null);
+    setSelectedCardId(cardId);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  /** 打开站内文章详情页，并关闭可能存在的卡片详情页。 */
+  function openArticle(articleId: string): void {
+    setSelectedCardId(null);
+    setSelectedArticleId(articleId);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  /** 返回当前主导航页面。 */
+  function closeDetailPage(): void {
+    setSelectedCardId(null);
+    setSelectedArticleId(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 
   /** 在本地状态中乐观切换收藏，并同步到云端。 */
   async function toggleFavorite(cardId: string): Promise<void> {
@@ -926,7 +1177,7 @@ export function Dashboard(): React.ReactNode {
         body: JSON.stringify({}),
       });
       setData({ ...data, cards: [response.card, ...data.cards] });
-      setSelectedCardId(response.card.id);
+      openCard(response.card.id);
       setNotice("新卡片已实时生成并写入云端。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "卡片生成失败。");
@@ -1009,6 +1260,45 @@ export function Dashboard(): React.ReactNode {
     }
   }
 
+  /** 解析公开网页或微信公众号链接并保存到文章库。 */
+  async function parseArticleUrl(): Promise<void> {
+    if (!data || offline) return;
+    /** normalizedUrl 是移除首尾空白后的文章链接。 */
+    const normalizedUrl = articleUrl.trim();
+    if (!normalizedUrl) {
+      setNotice("请先输入文章链接。");
+      return;
+    }
+
+    setBusyAction("article");
+    try {
+      /** response 包含完成正文提取、分类和保存后的文章。 */
+      const response = await requestJson<{ article: Article }>(
+        "/api/articles/parse",
+        {
+          method: "POST",
+          body: JSON.stringify({ url: normalizedUrl }),
+        },
+      );
+      /** nextArticles 替换同一文章旧记录并把最新结果放到最前面。 */
+      const nextArticles = [
+        response.article,
+        ...data.articles.filter((article) => article.id !== response.article.id),
+      ];
+      /** nextData 是立即反映解析结果的界面快照。 */
+      const nextData = { ...data, articles: nextArticles };
+      setData(nextData);
+      await writeOfflineSnapshot(nextData);
+      setArticleUrl("");
+      openArticle(response.article.id);
+      setNotice("文章已解析、分类并保存到文章库。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "文章解析失败。");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   /** 读取系统剪贴板中的 Codex 或 ChatGPT 回答。 */
   async function readAnswerFromClipboard(): Promise<void> {
     try {
@@ -1061,7 +1351,7 @@ export function Dashboard(): React.ReactNode {
       };
       setData(nextData);
       await writeOfflineSnapshot(nextData);
-      setSelectedCardId(response.card.id);
+      openCard(response.card.id);
       setImportDraft({ ...importDraft, title: "", content: "" });
       setNotice(
         response.deepDive
@@ -1147,7 +1437,10 @@ export function Dashboard(): React.ReactNode {
             <button
               className={activeView === item.id ? "is-active" : ""}
               key={item.id}
-              onClick={() => setActiveView(item.id)}
+              onClick={() => {
+                setActiveView(item.id);
+                closeDetailPage();
+              }}
               type="button"
             >
               <span>{item.hint}</span>
@@ -1187,7 +1480,7 @@ export function Dashboard(): React.ReactNode {
                 weekday: "long",
               }).format(new Date())}
             </p>
-            <h1>{NAV_ITEMS.find((item) => item.id === activeView)?.label}</h1>
+            <h1>{pageTitle}</h1>
           </div>
           <div className={`sync-state ${offline ? "is-offline" : ""}`}>
             <Icon name={offline ? "cloud" : "sync"} />
@@ -1202,7 +1495,24 @@ export function Dashboard(): React.ReactNode {
           </button>
         ) : null}
 
-        {activeView === "today" ? (
+        {selectedCard ? (
+          <Reader
+            busyAction={busyAction}
+            card={selectedCard}
+            deepDive={data.deepDives.find((item) => item.cardId === selectedCard.id)}
+            favorite={favoriteIds.has(selectedCard.id)}
+            messages={data.aiMessages.filter((item) => item.cardId === selectedCard.id)}
+            onAsk={(question) => void askAi(selectedCard.id, question)}
+            onClose={closeDetailPage}
+            onComplete={() => void markCompleted(selectedCard.id)}
+            onFavorite={() => void toggleFavorite(selectedCard.id)}
+            onGenerateDeep={() => void generateDeepDive(selectedCard.id)}
+          />
+        ) : selectedArticle ? (
+          <ArticleDetail article={selectedArticle} onClose={closeDetailPage} />
+        ) : null}
+
+        {!selectedCard && !selectedArticle && activeView === "today" ? (
           <>
             <section className="hero-strip">
               <div>
@@ -1234,7 +1544,11 @@ export function Dashboard(): React.ReactNode {
                   <p className="eyebrow">TODAY&apos;S SEQUENCE</p>
                   <h2>今天的知识序列</h2>
                 </div>
-                <button className="text-button" onClick={() => setActiveView("library")} type="button">
+                <button
+                  className="text-button"
+                  onClick={() => setActiveView("library")}
+                  type="button"
+                >
                   查看全部 <Icon name="arrow" />
                 </button>
               </div>
@@ -1246,7 +1560,7 @@ export function Dashboard(): React.ReactNode {
                     favorite={favoriteIds.has(card.id)}
                     key={card.id}
                     onFavorite={() => void toggleFavorite(card.id)}
-                    onOpen={() => setSelectedCardId(card.id)}
+                    onOpen={() => openCard(card.id)}
                   />
                 ))}
               </div>
@@ -1254,7 +1568,7 @@ export function Dashboard(): React.ReactNode {
           </>
         ) : null}
 
-        {activeView === "library" ? (
+        {!selectedCard && !selectedArticle && activeView === "library" ? (
           <section className="section-block library-block">
             <div className="library-tools">
               <div className="filter-tabs">
@@ -1288,14 +1602,78 @@ export function Dashboard(): React.ReactNode {
                   favorite={favoriteIds.has(card.id)}
                   key={card.id}
                   onFavorite={() => void toggleFavorite(card.id)}
-                  onOpen={() => setSelectedCardId(card.id)}
+                  onOpen={() => openCard(card.id)}
                 />
               ))}
             </div>
           </section>
         ) : null}
 
-        {activeView === "deep" ? (
+        {!selectedCard && !selectedArticle && activeView === "articles" ? (
+          <section className="article-library-page">
+            <div className="article-import-hero">
+              <div>
+                <p className="eyebrow">ARTICLE INBOX</p>
+                <h2>把公开文章，整理成自己的长期阅读库。</h2>
+                <p>
+                  支持普通网页和微信公众号文章。系统会提取正文、过滤脚本，
+                  再生成简介、主题标签并自动归入对应领域。
+                </p>
+              </div>
+              <div className="article-import-panel">
+                <label htmlFor="article-url">文章链接</label>
+                <div className="article-url-row">
+                  <input
+                    id="article-url"
+                    onChange={(event) => setArticleUrl(event.target.value)}
+                    placeholder="https://... 或 mp.weixin.qq.com/s/..."
+                    type="url"
+                    value={articleUrl}
+                  />
+                  <button
+                    className="primary-button"
+                    disabled={busyAction === "article" || offline || !articleUrl.trim()}
+                    onClick={() => void parseArticleUrl()}
+                    type="button"
+                  >
+                    {busyAction === "article" ? "正在解析…" : "解析并保存"}
+                  </button>
+                </div>
+                <p>
+                  仅支持无需登录即可公开访问的正文；付费墙、登录页或强反爬页面可能无法读取。
+                </p>
+              </div>
+            </div>
+
+            <div className="article-library-heading">
+              <div>
+                <p className="eyebrow">SAVED READING</p>
+                <h2>我的文章库</h2>
+              </div>
+              <span>{data.articles.length} 篇已保存文章</span>
+            </div>
+
+            {data.articles.length ? (
+              <div className="article-grid">
+                {data.articles.map((article) => (
+                  <ArticleTile
+                    article={article}
+                    key={article.id}
+                    onOpen={() => openArticle(article.id)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state article-empty-state">
+                <span>文</span>
+                <h3>文章库还是空的</h3>
+                <p>把一篇公开文章链接粘贴到上方，即可开始整理。</p>
+              </div>
+            )}
+          </section>
+        ) : null}
+
+        {!selectedCard && !selectedArticle && activeView === "deep" ? (
           <section className="section-block">
             <div className="section-title-row">
               <div>
@@ -1314,7 +1692,7 @@ export function Dashboard(): React.ReactNode {
                     <button
                       className="deep-list-item"
                       key={deepDive.id}
-                      onClick={() => setSelectedCardId(card.id)}
+                      onClick={() => openCard(card.id)}
                       type="button"
                     >
                       <span>{String(index + 1).padStart(2, "0")}</span>
@@ -1338,7 +1716,10 @@ export function Dashboard(): React.ReactNode {
           </section>
         ) : null}
 
-        {activeView === "sync" && settingsDraft ? (
+        {!selectedCard &&
+        !selectedArticle &&
+        activeView === "sync" &&
+        settingsDraft ? (
           <section className="settings-grid">
             <article className="settings-card import-card">
               <div className="import-card-heading">
@@ -1576,20 +1957,6 @@ export function Dashboard(): React.ReactNode {
         ) : null}
       </main>
 
-      {selectedCard ? (
-        <Reader
-          busyAction={busyAction}
-          card={selectedCard}
-          deepDive={data.deepDives.find((item) => item.cardId === selectedCard.id)}
-          favorite={favoriteIds.has(selectedCard.id)}
-          messages={data.aiMessages.filter((item) => item.cardId === selectedCard.id)}
-          onAsk={(question) => void askAi(selectedCard.id, question)}
-          onClose={() => setSelectedCardId(null)}
-          onComplete={() => void markCompleted(selectedCard.id)}
-          onFavorite={() => void toggleFavorite(selectedCard.id)}
-          onGenerateDeep={() => void generateDeepDive(selectedCard.id)}
-        />
-      ) : null}
     </div>
   );
 }

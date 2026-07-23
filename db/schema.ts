@@ -86,6 +86,55 @@ export const cards = sqliteTable(
   ],
 );
 
+/** 文章收藏表：保存公开网页或微信公众号文章的清洗后正文与分类结果。 */
+export const articles = sqliteTable(
+  "articles",
+  {
+    /** 跨会话保持稳定的文章 ID。 */
+    id: text("id").primaryKey(),
+    /** 文章所属用户，确保不同账号的数据彼此隔离。 */
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** 用户提交并经过重定向解析后的最终公开网址。 */
+    url: text("url").notNull(),
+    /** web 表示普通网页，wechat 表示微信公众号文章。 */
+    sourceType: text("source_type").notNull().default("web"),
+    /** 原网页标题。 */
+    title: text("title").notNull(),
+    /** DeepSeek 或本地规则生成的简介。 */
+    summary: text("summary").notNull(),
+    /** AI、BIO、DB 或 OTHER。 */
+    domain: text("domain").notNull(),
+    /** 原网页作者或公众号名称。 */
+    author: text("author"),
+    /** 原网页声明的发布时间。 */
+    publishedAt: text("published_at"),
+    /** 原网页封面图的绝对 HTTPS 地址。 */
+    coverImageUrl: text("cover_image_url"),
+    /** 仅包含允许标签和安全属性的正文 HTML。 */
+    contentHtml: text("content_html").notNull(),
+    /** 纯文本正文，用于检索、分类和字数统计。 */
+    contentText: text("content_text").notNull(),
+    /** 正文字数。 */
+    wordCount: integer("word_count").notNull().default(0),
+    /** JSON 编码的主题标签。 */
+    tagsJson: text("tags_json").notNull().default("[]"),
+    /** 首次保存时间。 */
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    /** 最近重新解析时间。 */
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    /** 同一用户重复导入同一最终网址时更新原记录。 */
+    uniqueIndex("articles_user_url_unique").on(table.userId, table.url),
+    /** 支持按用户与更新时间读取文章库。 */
+    index("articles_user_updated_idx").on(table.userId, table.updatedAt),
+    /** 支持按用户与领域筛选文章。 */
+    index("articles_user_domain_idx").on(table.userId, table.domain),
+  ],
+);
+
 /** 阅读进度表：一名用户对一张卡片只有一条当前状态。 */
 export const progress = sqliteTable(
   "progress",
