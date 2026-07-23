@@ -120,4 +120,7 @@ test("article parser applies security and classification safeguards", async () =
   assert.match(parserSource, /element\.removeAttribute/);
   assert.match(parserSource, /fallbackClassification/);
   assert.match(parserSource, /mp\.weixin\.qq\.com/);
+  assert.match(parserSource, /MAX_SOURCE_BYTES = 3_000_000/);
+  assert.match(parserSource, /MAX_WECHAT_SOURCE_BYTES = 10_000_000/);
+  assert.match(parserSource, /sourceByteLimitForUrl\(currentUrl\)/);
 });

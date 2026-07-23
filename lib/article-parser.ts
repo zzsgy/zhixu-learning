@@ -59,8 +59,10 @@ type NormalizedArticleClassification = {
   tags: string[];
 };
 
-/** 单篇原始网页允许读取的最大字节数。 */
+/** 单篇普通网页允许读取的最大字节数。 */
 const MAX_SOURCE_BYTES = 3_000_000;
+/** 单篇微信公众号文章允许读取的最大字节数。 */
+const MAX_WECHAT_SOURCE_BYTES = 10_000_000;
 /** 单篇文章允许持久化的最大安全 HTML 字符数。 */
 const MAX_STORED_HTML_LENGTH = 500_000;
 /** 单篇文章允许持久化的最大纯文本字符数。 */
@@ -71,6 +73,22 @@ const MIN_ARTICLE_TEXT_LENGTH = 200;
 const MAX_REDIRECTS = 5;
 /** 单次抓取允许等待的最大毫秒数。 */
 const FETCH_TIMEOUT_MS = 20_000;
+
+/** 根据文章来源返回本次抓取允许读取的最大字节数。 */
+function sourceByteLimitForUrl(url: URL): number {
+  /** hostname 是统一转为小写后的文章来源域名。 */
+  const hostname = url.hostname.toLowerCase();
+  return hostname === "mp.weixin.qq.com"
+    ? MAX_WECHAT_SOURCE_BYTES
+    : MAX_SOURCE_BYTES;
+}
+
+/** 根据文章来源生成便于用户理解的网页过大提示。 */
+function sourceTooLargeMessage(url: URL): string {
+  return url.hostname.toLowerCase() === "mp.weixin.qq.com"
+    ? "微信公众号文章网页超过 10 MB，暂不支持自动解析。"
+    : "文章网页超过 3 MB，暂不支持自动解析。";
+}
 
 /** 安全正文允许保留的 HTML 标签。 */
 const ALLOWED_TAGS = new Set([
@@ -317,16 +335,18 @@ async function fetchPublicHtml(
       throw new Error("该链接不是可解析的网页文章。");
     }
 
+    /** sourceByteLimit 是当前文章来源允许读取的最大字节数。 */
+    const sourceByteLimit = sourceByteLimitForUrl(currentUrl);
     /** declaredLength 是网页声明的原始响应字节数。 */
     const declaredLength = Number(response.headers.get("content-length") ?? 0);
-    if (declaredLength > MAX_SOURCE_BYTES) {
-      throw new Error("文章网页过大，暂不支持自动解析。");
+    if (declaredLength > sourceByteLimit) {
+      throw new Error(sourceTooLargeMessage(currentUrl));
     }
 
     /** bodyBytes 是解压后的网页响应字节。 */
     const bodyBytes = new Uint8Array(await response.arrayBuffer());
-    if (bodyBytes.byteLength > MAX_SOURCE_BYTES) {
-      throw new Error("文章网页过大，暂不支持自动解析。");
+    if (bodyBytes.byteLength > sourceByteLimit) {
+      throw new Error(sourceTooLargeMessage(currentUrl));
     }
     /** html 是按 UTF-8 解码的网页源码。 */
     const html = new TextDecoder("utf-8").decode(bodyBytes);
