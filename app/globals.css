@@ -973,6 +973,111 @@ a {
   line-height: 1.8;
 }
 
+/* 快速收录区横跨设置页两列。 */
+.import-card {
+  grid-column: 1 / -1;
+  min-height: 0;
+}
+
+/* 快速收录区标题与说明。 */
+.import-card-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.8fr);
+  align-items: end;
+  gap: 36px;
+  margin-bottom: 28px;
+}
+
+/* 快速收录区主标题。 */
+.import-card-heading h2 {
+  margin-bottom: 0;
+}
+
+/* 快速收录区说明文字。 */
+.import-card-heading > p {
+  margin: 0;
+  color: var(--ink-soft);
+  line-height: 1.8;
+}
+
+/* 快速收录表单。 */
+.import-form {
+  display: grid;
+  gap: 16px;
+}
+
+/* 来源、领域与标题字段行。 */
+.import-meta-row {
+  display: grid;
+  grid-template-columns: 150px 170px minmax(260px, 1fr);
+  gap: 12px;
+}
+
+/* 快速收录字段。 */
+.import-meta-row label,
+.import-content-field {
+  display: grid;
+  gap: 8px;
+}
+
+/* 快速收录字段标签。 */
+.import-meta-row span,
+.import-content-field > span {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+/* 快速收录输入控件。 */
+.import-meta-row input,
+.import-meta-row select,
+.import-content-field textarea {
+  width: 100%;
+  border: 1px solid var(--line-dark);
+  border-radius: 0;
+  outline: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+
+/* 快速收录单行输入与选择框。 */
+.import-meta-row input,
+.import-meta-row select {
+  min-height: 44px;
+  padding: 0 12px;
+}
+
+/* 快速收录正文编辑区。 */
+.import-content-field textarea {
+  min-height: 230px;
+  resize: vertical;
+  padding: 16px;
+  line-height: 1.75;
+}
+
+/* 快速收录输入控件的键盘焦点。 */
+.import-meta-row input:focus,
+.import-meta-row select:focus,
+.import-content-field textarea:focus {
+  box-shadow: inset 0 0 0 1px var(--blue);
+}
+
+/* 快速收录字数与操作按钮行。 */
+.import-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+/* 快速收录当前字数。 */
+.import-actions > span {
+  margin-right: auto;
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
 /* 导出区横跨两列。 */
 .export-card {
   grid-column: 1 / -1;
@@ -1495,8 +1600,23 @@ a {
     grid-template-columns: 1fr;
   }
 
+  .import-card,
   .export-card {
     grid-column: auto;
+  }
+
+  .import-card-heading,
+  .import-meta-row {
+    grid-template-columns: 1fr;
+  }
+
+  .import-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .import-actions > span {
+    margin-right: 0;
   }
 
   .library-tools {

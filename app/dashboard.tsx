@@ -169,6 +169,21 @@ type ApiError = {
   message?: string;
 };
 
+/** 快速收录支持标记的回答来源。 */
+type ImportSource = "Codex" | "ChatGPT" | "其他";
+
+/** 快速收录表单的本地草稿结构。 */
+type ImportDraft = {
+  /** 可选标题；留空时服务端自动提取。 */
+  title: string;
+  /** 知识领域。 */
+  domain: Domain;
+  /** 回答来源。 */
+  source: ImportSource;
+  /** 从剪贴板读取或手动粘贴的完整回答。 */
+  content: string;
+};
+
 /** IndexedDB 数据库名。 */
 const CACHE_DATABASE_NAME = "zhixu-offline-cache";
 /** IndexedDB 对象仓库名。 */
@@ -753,6 +768,13 @@ export function Dashboard(): React.ReactNode {
   const [pairCode, setPairCode] = useState<string | null>(null);
   /** settingsDraft 是设置表单草稿。 */
   const [settingsDraft, setSettingsDraft] = useState<UserSettings | null>(null);
+  /** importDraft 是 Codex/ChatGPT 快速收录表单草稿。 */
+  const [importDraft, setImportDraft] = useState<ImportDraft>({
+    title: "",
+    domain: "AI",
+    source: "Codex",
+    content: "",
+  });
 
   /** loadData 从云端刷新，断网时回退到本地快照。 */
   const loadData = useCallback(async (): Promise<void> => {
@@ -982,6 +1004,72 @@ export function Dashboard(): React.ReactNode {
       setNotice("请在手机端输入配对码，十分钟内有效。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "配对码创建失败。");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  /** 读取系统剪贴板中的 Codex 或 ChatGPT 回答。 */
+  async function readAnswerFromClipboard(): Promise<void> {
+    try {
+      if (!navigator.clipboard?.readText) {
+        throw new Error("当前浏览器不支持直接读取剪贴板，请手动粘贴。");
+      }
+      /** clipboardText 是用户本次授权读取的纯文本内容。 */
+      const clipboardText = await navigator.clipboard.readText();
+      if (!clipboardText.trim()) {
+        throw new Error("剪贴板里没有可收录的文字。");
+      }
+      setImportDraft({ ...importDraft, content: clipboardText });
+      setNotice("已读取剪贴板，请确认标题和领域后保存。");
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "读取剪贴板失败，请在正文框内手动粘贴。",
+      );
+    }
+  }
+
+  /** 把快速收录草稿写入云端知识库。 */
+  async function importAnswer(): Promise<void> {
+    if (!data || offline) return;
+    if (importDraft.content.trim().length < 300) {
+      setNotice("收录内容至少需要 300 个字符。");
+      return;
+    }
+
+    setBusyAction("import");
+    try {
+      /** response 包含新卡片，以及可能自动建立的深度内容。 */
+      const response = await requestJson<{
+        card: Card;
+        deepDive: DeepDive | null;
+      }>("/api/import", {
+        method: "POST",
+        body: JSON.stringify(importDraft),
+      });
+      /** nextDeepDives 是加入本次长回答后的深度内容列表。 */
+      const nextDeepDives = response.deepDive
+        ? [response.deepDive, ...data.deepDives]
+        : data.deepDives;
+      /** nextData 是立即反映本次收录结果的界面快照。 */
+      const nextData = {
+        ...data,
+        cards: [response.card, ...data.cards],
+        deepDives: nextDeepDives,
+      };
+      setData(nextData);
+      await writeOfflineSnapshot(nextData);
+      setSelectedCardId(response.card.id);
+      setImportDraft({ ...importDraft, title: "", content: "" });
+      setNotice(
+        response.deepDive
+          ? "已保存为知识卡片，并同步加入深度阅读。"
+          : "已保存到知识库，手机端下次同步后也能看到。",
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "快速收录失败。");
     } finally {
       setBusyAction(null);
     }
@@ -1252,6 +1340,101 @@ export function Dashboard(): React.ReactNode {
 
         {activeView === "sync" && settingsDraft ? (
           <section className="settings-grid">
+            <article className="settings-card import-card">
+              <div className="import-card-heading">
+                <div>
+                  <p className="eyebrow">QUICK CAPTURE</p>
+                  <h2>快速收录 Codex / ChatGPT 回答</h2>
+                </div>
+                <p>
+                  复制一段满意的回答后读取剪贴板即可。正文不少于 300 字；
+                  达到 2000 字时会同时保存完整的深度内容，不设最大字数。
+                </p>
+              </div>
+              <div className="import-form">
+                <div className="import-meta-row">
+                  <label>
+                    <span>来源</span>
+                    <select
+                      onChange={(event) =>
+                        setImportDraft({
+                          ...importDraft,
+                          source: event.target.value as ImportSource,
+                        })
+                      }
+                      value={importDraft.source}
+                    >
+                      <option value="Codex">Codex</option>
+                      <option value="ChatGPT">ChatGPT</option>
+                      <option value="其他">其他</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>领域</span>
+                    <select
+                      onChange={(event) =>
+                        setImportDraft({
+                          ...importDraft,
+                          domain: event.target.value as Domain,
+                        })
+                      }
+                      value={importDraft.domain}
+                    >
+                      <option value="AI">AI 技术</option>
+                      <option value="BIO">生物工程</option>
+                      <option value="DB">PostgreSQL</option>
+                    </select>
+                  </label>
+                  <label className="import-title-field">
+                    <span>标题（可留空）</span>
+                    <input
+                      maxLength={42}
+                      onChange={(event) =>
+                        setImportDraft({ ...importDraft, title: event.target.value })
+                      }
+                      placeholder="留空时从正文第一行提取"
+                      value={importDraft.title}
+                    />
+                  </label>
+                </div>
+                <label className="import-content-field">
+                  <span>回答正文</span>
+                  <textarea
+                    onChange={(event) =>
+                      setImportDraft({ ...importDraft, content: event.target.value })
+                    }
+                    placeholder="先在 Codex 或 ChatGPT 中复制回答，再点击“读取剪贴板”；也可以直接粘贴到这里。"
+                    value={importDraft.content}
+                  />
+                </label>
+                <div className="import-actions">
+                  <span>
+                    {importDraft.content.trim().length.toLocaleString("zh-CN")} 字
+                  </span>
+                  <button
+                    className="secondary-button"
+                    disabled={busyAction === "import"}
+                    onClick={() => void readAnswerFromClipboard()}
+                    type="button"
+                  >
+                    读取剪贴板
+                  </button>
+                  <button
+                    className="primary-button"
+                    disabled={
+                      busyAction === "import" ||
+                      offline ||
+                      importDraft.content.trim().length < 300
+                    }
+                    onClick={() => void importAnswer()}
+                    type="button"
+                  >
+                    {busyAction === "import" ? "正在保存…" : "保存到知序"}
+                  </button>
+                </div>
+              </div>
+            </article>
+
             <article className="settings-card">
               <p className="eyebrow">ANDROID PAIRING</p>
               <h2>绑定你的 Mate 40 Pro</h2>

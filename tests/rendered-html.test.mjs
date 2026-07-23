@@ -40,6 +40,7 @@ test("build contains the Zhixu application and sync routes", async () => {
   assert.match(buildText, /api\/bootstrap/);
   assert.match(buildText, /api\/devices\/pair/);
   assert.match(buildText, /api\/generate\/deep-dive/);
+  assert.match(buildText, /api\/import/);
   assert.doesNotMatch(buildText, /Your site is taking shape|Building your site/);
 });
 
@@ -78,4 +79,17 @@ test("starter cards are inserted in bounded batches", async () => {
     repositorySource,
     /insert\(cards\)\.values\(starterRows\)/,
   );
+});
+
+/** 快速收录应保留长回答原文，并仅在达到最低字数时建立深度内容。 */
+test("quick import preserves eligible long-form answers", async () => {
+  /** importRouteSource 是快速收录 API 的 TypeScript 源码。 */
+  const importRouteSource = await readFile(
+    new URL("../app/api/import/route.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(importRouteSource, /MIN_IMPORT_CONTENT_LENGTH = 300/);
+  assert.match(importRouteSource, /MIN_DEEP_DIVE_LENGTH = 2000/);
+  assert.match(importRouteSource, /content\.length >= MIN_DEEP_DIVE_LENGTH/);
+  assert.doesNotMatch(importRouteSource, /MAX_DEEP|5000/);
 });
