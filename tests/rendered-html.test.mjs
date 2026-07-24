@@ -42,7 +42,13 @@ test("build contains the Zhixu application and sync routes", async () => {
   assert.match(buildText, /api\/generate\/deep-dive/);
   assert.match(buildText, /api\/import/);
   assert.match(buildText, /api\/articles\/parse/);
+  assert.match(buildText, /api\/knowledge\/state/);
+  assert.match(buildText, /api\/annotations/);
+  assert.match(buildText, /api\/collections\/items/);
   assert.match(buildText, /article-detail-page/);
+  assert.match(buildText, /全局搜索/);
+  assert.match(buildText, /个人批注/);
+  assert.match(buildText, /我的专题/);
   assert.doesNotMatch(buildText, /reader-backdrop/);
   assert.doesNotMatch(buildText, /Your site is taking shape|Building your site/);
 });
@@ -68,6 +74,10 @@ test("migration contains all cross-device persistence tables", async () => {
     "users",
     "cards",
     "articles",
+    "knowledge_states",
+    "annotations",
+    "collections",
+    "collection_items",
     "progress",
     "favorites",
     "deep_dives",
@@ -78,6 +88,20 @@ test("migration contains all cross-device persistence tables", async () => {
   ]) {
     assert.match(migration, new RegExp(`CREATE TABLE \\\`${table}\\\``));
   }
+});
+
+/** 完整本地备份必须包含个人状态、批注与专题关系。 */
+test("local backup includes personal knowledge management data", async () => {
+  /** dashboardSource 是网页端完整知识管理与导出实现。 */
+  const dashboardSource = await readFile(
+    new URL("../app/dashboard.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(dashboardSource, /format: "zhixu-knowledge-backup"/);
+  assert.match(dashboardSource, /knowledgeStates/);
+  assert.match(dashboardSource, /annotations/);
+  assert.match(dashboardSource, /collectionItems/);
+  assert.match(dashboardSource, /annotationMarkdown/);
 });
 
 /** 起始卡片必须拆分写入，避免超过 Cloudflare D1 单条语句的绑定参数上限。 */
