@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="知序电脑本地知识库：文档上传、正文提取、自动分类和全文检索。"
+    />
+    <title>知序｜本地知识库</title>
+    <link rel="stylesheet" href="/styles.css?v=20260724-14" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" aria-label="返回知序首页">
+          <span class="brand-mark">知</span>
+          <span><strong>知序</strong><small>LOCAL KNOWLEDGE</small></span>
+        </a>
+
+        <nav aria-label="主导航">
+          <button class="nav-item is-active" data-view="library" type="button">
+            <span>LIBRARY</span><strong>文档库</strong>
+          </button>
+          <button class="nav-item" data-view="papers" type="button">
+            <span>PAPERS</span><strong>论文库</strong>
+          </button>
+          <button class="nav-item" data-view="upload" type="button">
+            <span>IMPORT</span><strong>导入内容</strong>
+          </button>
+          <button class="nav-item" data-view="storage" type="button">
+            <span>LOCAL</span><strong>本地存储</strong>
+          </button>
+        </nav>
+
+        <div class="local-status">
+          <span class="status-dot"></span>
+          <div><strong>仅本机可访问</strong><small>SQLite + 本地附件</small></div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="page-eyebrow">DOCUMENT LIBRARY</p>
+            <h1 id="page-title">我的文档库</h1>
+          </div>
+          <div class="topbar-actions">
+            <span class="database-state">本地数据库已连接</span>
+            <button class="primary-button" id="top-upload-button" type="button">
+              上传文档
+            </button>
+          </div>
+        </header>
+
+        <section class="view is-active" id="library-view">
+          <div class="library-hero">
+            <div>
+              <h2>文件与网页文章，都汇入同一座知识库。</h2>
+            </div>
+            <div class="hero-stat">
+              <span id="document-total">0</span>
+              <small>全部内容</small>
+            </div>
+          </div>
+
+          <div class="library-toolbar">
+            <label class="search-field">
+              <span>全文检索</span>
+              <input
+                id="search-input"
+                type="search"
+                placeholder="搜索标题、摘要或正文……"
+                autocomplete="off"
+              />
+            </label>
+            <div class="library-filters">
+              <button
+                class="favorite-filter-button"
+                id="favorite-filter-button"
+                type="button"
+                aria-pressed="false"
+              >
+                ☆ 只看重点
+              </button>
+              <div class="category-tabs" id="category-tabs" aria-label="分类筛选"></div>
+            </div>
+          </div>
+
+          <div class="document-grid" id="document-grid"></div>
+          <div class="empty-state" id="empty-state" hidden>
+            <span>00</span>
+            <h3>文档库还是空的</h3>
+            <p>上传第一份文件或解析一篇公开网页，系统会自动提取正文并分类保存。</p>
+            <button class="primary-button" data-open-upload type="button">开始导入</button>
+          </div>
+        </section>
+
+        <section class="view" id="papers-view">
+          <div class="paper-library-hero">
+            <div>
+              <p class="eyebrow">WEEKLY RESEARCH</p>
+              <h2>每周只选一篇，慢慢建立自己的论文脉络。</h2>
+              <p>
+                系统每周准备数篇近期论文供你比较；只有你亲自选中的论文，
+                才会保存到这台电脑的论文库。
+              </p>
+            </div>
+            <div class="hero-stat">
+              <span id="paper-total">0</span>
+              <small>已选论文</small>
+            </div>
+          </div>
+          <div class="paper-library-heading">
+            <div>
+              <span>SELECTED PAPERS</span>
+              <h2>我的论文</h2>
+            </div>
+            <div class="paper-library-actions">
+              <button class="secondary-button" id="refresh-mli-papers-button" type="button">
+                同步李沐精读
+              </button>
+              <button class="secondary-button" id="check-paper-reminder-button" type="button">
+                查看本周候选
+              </button>
+            </div>
+          </div>
+          <div class="paper-source-tabs" id="paper-source-tabs">
+            <button class="is-active" data-paper-source="" type="button">全部</button>
+            <button data-paper-source="weekly" type="button">每周精选</button>
+            <button data-paper-source="mli" type="button">李沐精读</button>
+          </div>
+          <div class="paper-grid" id="paper-grid"></div>
+          <div class="empty-state" id="paper-empty-state">
+            <span>00</span>
+            <h3>论文库还没有内容</h3>
+            <p>从本周候选中选择第一篇论文后，它会永久保存在本地数据库。</p>
+            <button class="primary-button" id="empty-paper-reminder-button" type="button">
+              查看本周候选
+            </button>
+          </div>
+        </section>
+
+        <section class="view" id="upload-view">
+          <div class="upload-layout">
+            <div class="upload-intro">
+              <p class="eyebrow">DOCUMENT INBOX</p>
+              <h2>把分散的文件，整理成自己的长期知识。</h2>
+              <p>
+                原文件保存到本机附件目录，提取文本进入 SQLite
+                全文索引。DeepSeek 已配置时会辅助判断主题；不可用时仍可使用本地规则分类。
+              </p>
+              <ul>
+                <li>支持 PDF、DOCX、XLSX、PPTX</li>
+                <li>支持 TXT、Markdown、HTML、JSON、CSV 和代码文件</li>
+                <li>单个文件最大 <strong id="upload-limit-label">200 MB</strong></li>
+              </ul>
+            </div>
+            <div class="drop-zone" id="drop-zone" tabindex="0" role="button">
+              <input id="file-input" type="file" multiple hidden />
+              <span class="drop-number">01</span>
+              <h3>拖放文档到这里</h3>
+              <p>或者点击选择电脑中的一个或多个文件</p>
+              <button class="secondary-button" id="choose-files-button" type="button">
+                选择文档
+              </button>
+            </div>
+          </div>
+          <div class="upload-queue" id="upload-queue"></div>
+          <div class="article-import-layout">
+            <div class="article-import-copy">
+              <p class="eyebrow">ARTICLE INBOX</p>
+              <h2>也可以粘贴链接，保存公开网页正文。</h2>
+              <p>
+                输入普通网页或微信公众号文章链接。知序会提取正文、过滤脚本，
+                生成简介并自动归入对应技术领域。
+              </p>
+            </div>
+            <form class="article-import-form" id="article-import-form">
+              <label for="article-url-input">文章链接</label>
+              <textarea
+                id="article-url-input"
+                placeholder="https://mp.weixin.qq.com/s/…"
+                rows="4"
+              ></textarea>
+              <button class="primary-button" id="parse-article-button" type="submit">
+                解析并保存
+              </button>
+              <small>支持无需登录即可公开访问的正文；登录页和付费墙可能无法读取。</small>
+            </form>
+          </div>
+        </section>
+
+        <section class="view" id="storage-view">
+          <div class="storage-hero">
+            <p class="eyebrow">LOCAL FIRST</p>
+            <h2>数据由你掌控，网络只在需要 AI 时使用。</h2>
+            <p>
+              数据库、正文索引、原始文件和备份全部保存在本项目的
+              <code>desktop/data</code> 目录。删除程序前请先复制该目录。
+            </p>
+          </div>
+          <div class="storage-grid">
+            <article>
+              <span>01</span>
+              <h3>SQLite 主数据库</h3>
+              <p>保存标题、分类、摘要、提取正文和完整性摘要。</p>
+            </article>
+            <article>
+              <span>02</span>
+              <h3>本地原始附件</h3>
+              <p>上传文件不进入云端数据库，可随时下载原件。</p>
+            </article>
+            <article>
+              <span>03</span>
+              <h3>每日自动备份</h3>
+              <p>每天第一次变更后生成完整数据库备份，默认保留30天。</p>
+              <button class="secondary-button" id="backup-button" type="button">
+                立即确认备份
+              </button>
+            </article>
+          </div>
+        </section>
+
+        <section class="reader" id="reader" hidden aria-live="polite">
+          <header class="reader-header">
+            <button class="back-button" id="reader-back-button" type="button">
+              ← 返回文档库
+            </button>
+            <div class="reader-header-actions">
+              <div class="reader-mode-switch" id="reader-mode-switch" hidden>
+                <button class="is-active" data-reader-mode="original" type="button">
+                  原版预览
+                </button>
+                <button data-reader-mode="readable" type="button">清爽阅读</button>
+              </div>
+              <a class="primary-button" id="download-link" href="#">下载原文件</a>
+            </div>
+          </header>
+          <div class="reader-layout">
+            <article class="reader-article">
+              <p class="eyebrow" id="reader-meta"></p>
+              <h1 id="reader-title"></h1>
+              <p class="reader-summary" id="reader-summary"></p>
+              <div class="original-preview" id="original-preview" hidden>
+                <div class="preview-layout-toolbar">
+                  <span>PDF 原版阅读</span>
+                  <button
+                    id="wide-preview-button"
+                    type="button"
+                    aria-pressed="false"
+                  >
+                    ⇱ 展开至页面宽度
+                  </button>
+                </div>
+                <iframe
+                  id="original-preview-frame"
+                  title="原始文档预览"
+                  loading="eager"
+                ></iframe>
+              </div>
+              <div class="readable-content" id="reader-content"></div>
+            </article>
+            <aside class="reader-aside">
+              <label>
+                <span>文档分类</span>
+                <select id="reader-category"></select>
+              </label>
+              <dl>
+                <div><dt>原始文件</dt><dd id="reader-file-name"></dd></div>
+                <div><dt>文件大小</dt><dd id="reader-file-size"></dd></div>
+                <div><dt>提取状态</dt><dd id="reader-status"></dd></div>
+                <div><dt>分类方式</dt><dd id="reader-source"></dd></div>
+              </dl>
+            </aside>
+          </div>
+        </section>
+
+        <section class="article-reader" id="article-reader" hidden>
+          <header class="reader-header">
+            <button class="back-button" id="article-reader-back-button" type="button">
+              ← 返回文档库
+            </button>
+            <a
+              class="secondary-button"
+              id="article-source-link"
+              href="#"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              查看原网页
+            </a>
+          </header>
+          <article class="article-reading-page">
+            <header>
+              <p class="eyebrow" id="article-reader-meta"></p>
+              <h1 id="article-reader-title"></h1>
+              <p id="article-reader-summary"></p>
+            </header>
+            <div class="article-prose" id="article-reader-content"></div>
+          </article>
+        </section>
+
+        <section class="paper-reader" id="paper-reader" hidden>
+          <header class="reader-header">
+            <button class="back-button" id="paper-reader-back-button" type="button">
+              ← 返回论文库
+            </button>
+            <div class="paper-reader-links">
+              <a
+                class="secondary-button"
+                id="paper-source-link"
+                href="#"
+                target="_blank"
+                rel="noopener noreferrer"
+              >arXiv 原文</a>
+              <a
+                class="secondary-button"
+                id="paper-pdf-link"
+                href="#"
+                target="_blank"
+                rel="noopener noreferrer"
+              >英文 PDF</a>
+              <a
+                class="secondary-button"
+                id="paper-video-link"
+                href="#"
+                target="_blank"
+                rel="noopener noreferrer"
+                hidden
+              >中文视频</a>
+            </div>
+          </header>
+          <article class="paper-reading-page">
+            <header>
+              <p class="eyebrow" id="paper-reader-meta"></p>
+              <h1 id="paper-reader-title"></h1>
+              <p class="paper-reader-original-title" id="paper-reader-original-title"></p>
+              <p class="paper-reader-abstract" id="paper-reader-abstract"></p>
+            </header>
+            <div class="paper-reading-status" id="paper-reading-status"></div>
+            <div class="paper-prose" id="paper-reader-content"></div>
+          </article>
+        </section>
+
+        <dialog class="paper-reminder-dialog" id="paper-reminder-dialog">
+          <div class="paper-reminder-shell">
+            <header>
+              <div>
+                <p class="eyebrow">WEEKLY PAPER PICK</p>
+                <h2>本周想读哪一篇？</h2>
+                <p>先比较候选论文，选中后才会加入你的论文库。</p>
+              </div>
+              <button
+                class="dialog-close-button"
+                id="paper-reminder-close-button"
+                type="button"
+                aria-label="关闭，稍后再提醒"
+              >
+                ×
+              </button>
+            </header>
+            <div class="paper-candidate-grid" id="paper-candidate-grid"></div>
+            <footer>
+              <button class="secondary-button" id="paper-snooze-button" type="button">
+                明天再提醒
+              </button>
+              <button class="text-button" id="paper-dismiss-button" type="button">
+                本周不选
+              </button>
+            </footer>
+          </div>
+        </dialog>
+
+        <div class="toast" id="toast" hidden role="status"></div>
+      </main>
+    </div>
+    <script type="module" src="/app.js?v=20260724-14"></script>
+  </body>
+</html>

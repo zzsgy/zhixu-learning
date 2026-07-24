@@ -1,0 +1,21 @@
+{
+  "name": "zhixu-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "知序电脑本地知识库：SQLite、文档解析、自动分类与本地备份。",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.mjs",
+    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@mozilla/readability": "0.6.0",
+    "jszip": "3.10.1",
+    "linkedom": "0.18.13",
+    "mammoth": "1.11.0",
+    "pdf-parse": "1.1.1"
+  }
+}
