@@ -9,6 +9,9 @@
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.mjs",
+    "test:ui": "node --disable-warning=ExperimentalWarning --test tests/server-integration.test.mjs tests/article-translation.test.mjs",
+    "test:import": "node --disable-warning=ExperimentalWarning --test tests/article-parser.test.mjs tests/docsify-importer.test.mjs tests/mli-paper-service.test.mjs tests/paper-library.test.mjs",
+    "test:database": "node --disable-warning=ExperimentalWarning --test tests/ai-history.test.mjs tests/paper-library.test.mjs tests/server-integration.test.mjs",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.mjs"
   },
   "dependencies": {
@@ -16,6 +19,8 @@
     "jszip": "3.10.1",
     "linkedom": "0.18.13",
     "mammoth": "1.11.0",
-    "pdf-parse": "1.1.1"
+    "marked": "^16.4.2",
+    "pdf-parse": "1.1.1",
+    "undici": "8.10.0"
   }
 }

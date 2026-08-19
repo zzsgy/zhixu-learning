@@ -9,6 +9,8 @@ import { spawn } from "node:child_process";
 const localUrl = "http://127.0.0.1:47821";
 /** healthUrl 是判断占用端口的进程是否为知序的健康接口。 */
 const healthUrl = `${localUrl}/api/health`;
+/** serviceStartupTimeoutMilliseconds 是后台服务启动的最长等待时间。 */
+const serviceStartupTimeoutMilliseconds = 15_000;
 
 /**
  * 使用 Windows 默认浏览器打开知序页面。
@@ -60,6 +62,21 @@ async function isZhixuAlreadyRunning() {
 }
 
 /**
+ * 等待后台守护进程把知序服务启动到健康状态。
+ *
+ * @returns {Promise<boolean>} 超时前服务是否已健康。
+ */
+async function waitForZhixuHealth() {
+  /** deadline 是等待服务启动的最终毫秒时间戳。 */
+  const deadline = Date.now() + serviceStartupTimeoutMilliseconds;
+  while (Date.now() < deadline) {
+    if (await isZhixuAlreadyRunning()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
+}
+
+/**
  * 执行“复用现有服务或启动新服务”的完整流程。
  *
  * @returns {Promise<void>}
@@ -71,24 +88,25 @@ async function launchZhixu() {
     return;
   }
 
-  console.log("正在启动知序本地知识库……");
-  /** serverProcess 是继承当前窗口输出的新服务进程。 */
-  const serverProcess = spawn(
+  console.log("正在后台启动知序本地知识库……");
+  /** runnerProcess 是脱离当前窗口运行的本地服务守护进程。 */
+  const runnerProcess = spawn(
     process.execPath,
-    ["--disable-warning=ExperimentalWarning", "server.mjs"],
+    ["--disable-warning=ExperimentalWarning", "service-runner.mjs"],
     {
       cwd: import.meta.dirname,
       env: process.env,
-      stdio: "inherit",
-      windowsHide: false,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
     },
   );
-  /** exitCode 是服务关闭时返回给批处理脚本的状态码。 */
-  const exitCode = await new Promise((resolve) => {
-    serverProcess.once("error", () => resolve(1));
-    serverProcess.once("exit", (code) => resolve(code ?? 1));
-  });
-  process.exitCode = exitCode;
+  runnerProcess.unref();
+  if (!(await waitForZhixuHealth())) {
+    throw new Error("知序后台服务启动超时，请查看 work 目录中的服务日志。");
+  }
+  console.log("知序已经启动，正在打开浏览器……");
+  openDefaultBrowser();
 }
 
 await launchZhixu();

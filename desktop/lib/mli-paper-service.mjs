@@ -5,6 +5,7 @@
  */
 import crypto from "node:crypto";
 import { upsertCuratedPaper } from "./database.mjs";
+import { fetchExternalResource } from "./article-parser.mjs";
 
 /** mliReadmeUrl 是李沐论文精读目录的公开原始 Markdown 地址。 */
 const mliReadmeUrl =
@@ -131,13 +132,13 @@ export function parseMliPaperReadme(readmeText) {
  */
 export async function refreshMliPaperLibrary() {
   /** response 是 GitHub 原始 README 响应。 */
-  const response = await fetch(mliReadmeUrl, {
+  const response = await fetchExternalResource(new URL(mliReadmeUrl), {
     headers: {
       Accept: "text/plain",
       "User-Agent": "ZhixuLocalKnowledge/1.0",
     },
     signal: AbortSignal.timeout(mliRequestTimeoutMilliseconds),
-  });
+  }, "李沐精读目录");
   if (!response.ok) {
     throw new Error(`李沐精读目录暂时不可用（${response.status}）。`);
   }

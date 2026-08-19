@@ -7,6 +7,7 @@ import dns from "node:dns/promises";
 import net from "node:net";
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
+import { EnvHttpProxyAgent, fetch as undiciFetch } from "undici";
 import { classifyDocument } from "./classifier.mjs";
 
 /** ordinarySourceLimit 是普通网页允许下载的最大字节数。 */
@@ -19,8 +20,135 @@ const minimumArticleLength = 180;
 const maximumRedirects = 5;
 /** fetchTimeoutMilliseconds 是单次文章抓取超时时间。 */
 const fetchTimeoutMilliseconds = 25_000;
+/** fetchAttemptLimit 是网络瞬断时允许执行的最大请求次数。 */
+const fetchAttemptLimit = 3;
 /** maximumImageBytes 是单张文章图片允许缓存的最大容量。 */
 const maximumImageBytes = 12_000_000;
+/** externalRequestDispatcher 根据 HTTP_PROXY、HTTPS_PROXY 和 NO_PROXY 选择连接路径。 */
+const externalRequestDispatcher = new EnvHttpProxyAgent();
+
+/** retryDelayMilliseconds 是每次网络重试前使用的递增等待时间。 */
+const retryDelayMilliseconds = [250, 750];
+
+/**
+ * 等待指定时长后继续，用于避免网络瞬断时立即连续请求。
+ *
+ * @param {number} milliseconds 等待毫秒数。
+ * @returns {Promise<void>} 等待完成信号。
+ */
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * 从 Fetch 异常链中读取底层网络错误代码。
+ *
+ * @param {unknown} error Fetch 抛出的异常。
+ * @returns {string} ECONNRESET、ETIMEDOUT 等错误代码；不存在时返回空字符串。
+ */
+export function readNetworkErrorCode(error) {
+  /** visited 用于防止非标准 cause 链意外形成循环。 */
+  const visited = new Set();
+  /** current 是当前检查的异常或 cause。 */
+  let current = error;
+  while (current && typeof current === "object" && !visited.has(current)) {
+    visited.add(current);
+    if (typeof current.code === "string") return current.code;
+    current = current.cause;
+  }
+  return "";
+}
+
+/**
+ * 把底层网络异常转换为用户能够采取行动的中文提示。
+ *
+ * @param {unknown} error Fetch 抛出的异常。
+ * @param {string} resourceLabel 正在读取的资源名称。
+ * @returns {Error} 适合返回给本地网页的错误。
+ */
+export function createExternalFetchError(error, resourceLabel = "网页") {
+  /** code 是底层 socket、DNS 或代理连接错误代码。 */
+  const code = readNetworkErrorCode(error);
+  /** errorName 是 AbortSignal 超时时常见的异常名称。 */
+  const errorName = error instanceof Error ? error.name : "";
+  if (code === "ECONNRESET") {
+    return new Error(`${resourceLabel}连接被中途重置，请检查网络或代理后重试。`);
+  }
+  if (code === "ECONNREFUSED") {
+    return new Error(`${resourceLabel}连接被拒绝，请检查代理是否正在运行。`);
+  }
+  if (["ENOTFOUND", "EAI_AGAIN"].includes(code)) {
+    return new Error(`${resourceLabel}域名解析失败，请检查 DNS 或网络连接。`);
+  }
+  if (
+    ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT"].includes(code) ||
+    ["AbortError", "TimeoutError"].includes(errorName)
+  ) {
+    return new Error(`${resourceLabel}连接超时，请稍后重试或检查代理设置。`);
+  }
+  return new Error(`${resourceLabel}暂时无法连接，请检查网络或代理后重试。`);
+}
+
+/**
+ * 根据正文中的汉字和拉丁词密度识别文章原始语言。
+ *
+ * 技术文章会保留模型名、代码和英文缩写，因此不能仅按是否出现英文判断。
+ *
+ * @param {string} text 已清洗的文章纯文本。
+ * @returns {"zh" | "en" | "mixed" | "unknown"} 标准语言代码。
+ */
+export function detectArticleLanguage(text) {
+  /** normalizedText 是去除多余空白后的语言识别样本。 */
+  const normalizedText = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalizedText) return "unknown";
+  /** hanCount 是正文中的中日韩统一表意文字数量。 */
+  const hanCount = (normalizedText.match(/[\u3400-\u9fff]/g) || []).length;
+  /** latinWordCount 是长度至少为两个字符的拉丁单词数量。 */
+  const latinWordCount = (
+    normalizedText.match(/[A-Za-z][A-Za-z'’-]{1,}/g) || []
+  ).length;
+  /** latinLetterCount 用于区分英文主体与仅含大量技术缩写的中文主体。 */
+  const latinLetterCount = (normalizedText.match(/[A-Za-z]/g) || []).length;
+  /** visibleLength 是排除空白后的正文长度。 */
+  const visibleLength = normalizedText.replace(/\s/g, "").length;
+  /** hanRatio 是汉字在全部可见字符中的比例。 */
+  const hanRatio = visibleLength > 0 ? hanCount / visibleLength : 0;
+  if (hanCount >= 80 && hanRatio >= 0.08) {
+    return latinWordCount >= 120 && hanRatio < 0.22 && latinLetterCount > hanCount * 1.35
+      ? "mixed"
+      : "zh";
+  }
+  if (latinWordCount >= 40 && hanRatio < 0.03) return "en";
+  if (hanCount >= 20 && latinWordCount >= 40) return "mixed";
+  return hanCount > latinWordCount ? "zh" : latinWordCount > 0 ? "en" : "unknown";
+}
+
+/**
+ * 使用环境代理访问外部资源，并对临时网络错误进行有限次数重试。
+ *
+ * @param {URL} url 已经过公网地址校验的目标 URL。
+ * @param {Record<string, unknown>} options Undici Fetch 请求参数。
+ * @param {string} resourceLabel 用户提示中的资源名称。
+ * @returns {Promise<Response>} 外部资源响应。
+ */
+export async function fetchExternalResource(url, options, resourceLabel) {
+  /** lastError 保存最后一次网络失败，用于生成准确的最终提示。 */
+  let lastError;
+  for (let attempt = 1; attempt <= fetchAttemptLimit; attempt += 1) {
+    try {
+      return await undiciFetch(url, {
+        ...options,
+        dispatcher: externalRequestDispatcher,
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt < fetchAttemptLimit) {
+        await wait(retryDelayMilliseconds[attempt - 1] ?? 750);
+      }
+    }
+  }
+  throw createExternalFetchError(lastError, resourceLabel);
+}
 
 /** allowedTags 是清洗后可以保留的正文 HTML 标签。 */
 const allowedTags = new Set([
@@ -165,9 +293,9 @@ function sourceLimitForUrl(url) {
  * 跟随受控重定向并读取公开 HTML。
  *
  * @param {string} inputUrl 用户输入链接。
- * @returns {Promise<{ html: string, finalUrl: URL }>} 网页源码和最终地址。
+ * @returns {Promise<{ text: string, finalUrl: URL, contentType: string }>} 公开文本、最终地址和类型。
  */
-async function fetchPublicHtml(inputUrl) {
+export async function fetchPublicSource(inputUrl) {
   /** currentUrl 是每轮请求前都重新校验的公开地址。 */
   let currentUrl = await validatePublicUrl(inputUrl);
   for (
@@ -176,17 +304,17 @@ async function fetchPublicHtml(inputUrl) {
     redirectCount += 1
   ) {
     /** response 是不自动跟随重定向的网页响应。 */
-    const response = await fetch(currentUrl, {
+    const response = await fetchExternalResource(currentUrl, {
       method: "GET",
       redirect: "manual",
       headers: {
-        Accept: "text/html,application/xhtml+xml;q=0.9,text/plain;q=0.8",
+        Accept: "text/html,application/xhtml+xml;q=0.9,text/markdown;q=0.9,text/plain;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36 ZhixuReader/1.0",
       },
       signal: AbortSignal.timeout(fetchTimeoutMilliseconds),
-    });
+    }, "文章网页");
     /** redirectLocation 是服务器声明的下一跳地址。 */
     const redirectLocation = response.headers.get("location");
     if (response.status >= 300 && response.status < 400 && redirectLocation) {
@@ -207,6 +335,7 @@ async function fetchPublicHtml(inputUrl) {
       contentType &&
       !contentType.includes("text/html") &&
       !contentType.includes("application/xhtml+xml") &&
+      !contentType.includes("text/markdown") &&
       !contentType.includes("text/plain")
     ) {
       throw new Error("该链接不是可解析的网页文章。");
@@ -224,8 +353,9 @@ async function fetchPublicHtml(inputUrl) {
       throw new Error(`文章网页超过 ${Math.round(sourceLimit / 1_000_000)} MB。`);
     }
     return {
-      html: new TextDecoder("utf-8").decode(bodyBytes),
+      text: new TextDecoder("utf-8").decode(bodyBytes),
       finalUrl: currentUrl,
+      contentType,
     };
   }
   throw new Error("文章链接重定向失败。");
@@ -248,11 +378,11 @@ export async function fetchPublicImage(inputUrl) {
     redirectCount += 1
   ) {
     /** response 是不自动跟随重定向的图片响应。 */
-    const response = await fetch(currentUrl, {
+    const response = await fetchExternalResource(currentUrl, {
       method: "GET",
       redirect: "manual",
       headers: {
-        Accept: "image/avif,image/webp,image/png,image/jpeg,image/gif;q=0.9",
+        Accept: "image/avif,image/webp,image/png,image/jpeg,image/gif,image/svg+xml;q=0.9",
         Referer:
           currentUrl.hostname.toLowerCase() === "mmbiz.qpic.cn"
             ? "https://mp.weixin.qq.com/"
@@ -261,7 +391,7 @@ export async function fetchPublicImage(inputUrl) {
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36 ZhixuReader/1.0",
       },
       signal: AbortSignal.timeout(fetchTimeoutMilliseconds),
-    });
+    }, "文章图片");
     /** redirectLocation 是图片服务器声明的下一跳。 */
     const redirectLocation = response.headers.get("location");
     if (response.status >= 300 && response.status < 400 && redirectLocation) {
@@ -276,10 +406,10 @@ export async function fetchPublicImage(inputUrl) {
     if (!response.ok) {
       throw new Error(`文章图片返回 ${response.status}。`);
     }
-    /** contentType 是仅允许常见位图格式的响应类型。 */
+    /** contentType 是仅允许常见文章图片格式的响应类型。 */
     const contentType =
       response.headers.get("content-type")?.split(";")[0].toLowerCase() ?? "";
-    if (!["image/jpeg", "image/png", "image/gif", "image/webp"].includes(contentType)) {
+    if (!["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"].includes(contentType)) {
       throw new Error("远程资源不是支持的文章图片。");
     }
     /** declaredLength 是图片服务器声明的容量。 */
@@ -288,9 +418,21 @@ export async function fetchPublicImage(inputUrl) {
       throw new Error("文章图片超过 12 MB 本地缓存上限。");
     }
     /** bytes 是下载完成的图片二进制数据。 */
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    let bytes = new Uint8Array(await response.arrayBuffer());
     if (bytes.byteLength > maximumImageBytes) {
       throw new Error("文章图片超过 12 MB 本地缓存上限。");
+    }
+    if (contentType === "image/svg+xml") {
+      /** svgText 是准备移除脚本、事件处理器和外部嵌入的矢量图源码。 */
+      const svgText = new TextDecoder("utf-8").decode(bytes);
+      if (!/<svg\b/i.test(svgText)) throw new Error("远程 SVG 图片格式无效。");
+      /** sanitizedSvg 是只能作为静态图片显示的安全 SVG。 */
+      const sanitizedSvg = svgText
+        .replace(/<script\b[\s\S]*?<\/script\s*>/gi, "")
+        .replace(/<foreignObject\b[\s\S]*?<\/foreignObject\s*>/gi, "")
+        .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+        .replace(/\s+(?:href|xlink:href)\s*=\s*(["'])\s*(?:javascript:|https?:|\/\/)[\s\S]*?\1/gi, "");
+      bytes = new TextEncoder().encode(sanitizedSvg);
     }
     return { bytes, contentType };
   }
@@ -345,7 +487,7 @@ function resolveSafeUrl(value, baseUrl, forceHttps) {
  * @param {URL} baseUrl 文章最终地址。
  * @returns {{ html: string, text: string }} 安全正文与纯文本。
  */
-function sanitizeArticleHtml(rawHtml, baseUrl) {
+export function sanitizeArticleHtml(rawHtml, baseUrl) {
   /** parsedDocument 是专门用于清洗的隔离文档。 */
   const { document: parsedDocument } = parseHTML(
     `<body><article>${rawHtml}</article></body>`,
@@ -418,6 +560,18 @@ function sanitizeArticleHtml(rawHtml, baseUrl) {
       }
     }
   }
+  /** emptyListItems 是网页解析时产生、但不包含文字或有效媒体的空列表项。 */
+  const emptyListItems = Array.from(root.querySelectorAll("li")).filter(
+    (listItem) =>
+      !(listItem.textContent ?? "").trim() &&
+      !listItem.querySelector("img, pre, code, table"),
+  );
+  for (const emptyListItem of emptyListItems) emptyListItem.remove();
+  /** emptyLists 是清理空列表项后已经没有实际内容的列表容器。 */
+  const emptyLists = Array.from(root.querySelectorAll("ul, ol")).filter(
+    (list) => !list.querySelector("li"),
+  );
+  for (const emptyList of emptyLists) emptyList.remove();
   /** text 是用于搜索和分类的纯文本正文。 */
   const text = (root.textContent ?? "")
     .replace(/\u00a0/g, " ")
@@ -436,9 +590,9 @@ function sanitizeArticleHtml(rawHtml, baseUrl) {
  */
 export async function parseAndClassifyArticle(inputUrl) {
   /** source 是抓取到的网页源码和最终地址。 */
-  const source = await fetchPublicHtml(inputUrl);
+  const source = await fetchPublicSource(inputUrl);
   /** originalDocument 保留页面元数据和公众号专用节点。 */
-  const { document: originalDocument } = parseHTML(source.html);
+  const { document: originalDocument } = parseHTML(source.text);
   /** sourceType 用于区分微信公众号和普通网页。 */
   const sourceType =
     source.finalUrl.hostname.toLowerCase() === "mp.weixin.qq.com"
@@ -513,6 +667,8 @@ export async function parseAndClassifyArticle(inputUrl) {
   });
   /** summarySource 是压缩空白后的正文开头。 */
   const summarySource = sanitized.text.replace(/\s+/g, " ").trim();
+  /** sourceLanguage 是决定是否提供 Codex 中文翻译入口的原文语言。 */
+  const sourceLanguage = detectArticleLanguage(sanitized.text);
   return {
     url: source.finalUrl.href,
     sourceType,
@@ -526,6 +682,9 @@ export async function parseAndClassifyArticle(inputUrl) {
     coverImageUrl,
     contentHtml: sanitized.html,
     contentText: sanitized.text,
+    sourceLanguage,
+    translationStatus:
+      ["en", "mixed"].includes(sourceLanguage) ? "not_requested" : "not_required",
     wordCount: sanitized.text.length,
   };
 }

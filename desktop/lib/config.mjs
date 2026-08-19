@@ -115,6 +115,8 @@ export const serverConfig = Object.freeze({
   ),
   /** deepSeekApiKey 是仅在本机服务端读取的 DeepSeek 密钥。 */
   deepSeekApiKey: process.env.DEEPSEEK_API_KEY?.trim() || "",
+  /** deepSeekModel 是有出处问答使用的模型名称，可在本机环境文件中覆盖。 */
+  deepSeekModel: process.env.DEEPSEEK_MODEL?.trim() || "deepseek-chat",
 });
 
 /** publicDirectory 是本地网页静态文件所在目录。 */

@@ -8,6 +8,10 @@ import path from "node:path";
 import pdfParse from "pdf-parse/lib/pdf-parse.js";
 import { paperDirectory } from "./config.mjs";
 import {
+  detectArticleLanguage,
+  fetchExternalResource,
+} from "./article-parser.mjs";
+import {
   getPaperById,
   markPaperExtractionFailed,
   updatePaperSourceText,
@@ -19,6 +23,51 @@ const maximumPaperPdfBytes = 80 * 1024 * 1024;
 const paperDownloadTimeoutMilliseconds = 45_000;
 /** extractionPromises 防止同一篇论文被重复并发下载。 */
 const extractionPromises = new Map();
+
+/**
+ * 校验、缓存并提取用户上传或远程下载的论文 PDF。
+ *
+ * @param {string} paperId 论文稳定本地 ID。
+ * @param {Buffer} pdfBytes PDF 二进制内容。
+ * @returns {Promise<Record<string, unknown> | null>} 更新后的论文。
+ */
+export async function preparePaperFullTextFromBuffer(paperId, pdfBytes) {
+  if (
+    !Buffer.isBuffer(pdfBytes) ||
+    pdfBytes.length === 0 ||
+    pdfBytes.length > maximumPaperPdfBytes ||
+    pdfBytes.subarray(0, 4).toString("ascii") !== "%PDF"
+  ) {
+    throw new Error("文件不是有效 PDF，或容量超过 80 MB。");
+  }
+  /** cachedPdfPath 是按照论文 ID 命名的本地原文缓存。 */
+  const cachedPdfPath = path.join(paperDirectory, `${paperId}.pdf`);
+  fs.writeFileSync(cachedPdfPath, pdfBytes);
+  try {
+    /** parsedPaper 是 pdf-parse 提取出的页数与纯文本。 */
+    const parsedPaper = await pdfParse(pdfBytes);
+    /** sourceText 是规范空白后的论文正文。 */
+    const sourceText = String(parsedPaper.text || "")
+      .replace(/\u0000/g, "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    if (sourceText.length < 1_000) {
+      throw new Error("PDF 中未提取到足够的可读正文。");
+    }
+    /** wordCount 是正文翻译与展示的近似工作量。 */
+    const wordCount = sourceText.split(/\s+/).filter(Boolean).length;
+    return updatePaperSourceText(paperId, {
+      sourceText,
+      wordCount,
+      sourceLanguage: detectArticleLanguage(sourceText),
+    });
+  } catch (error) {
+    markPaperExtractionFailed(paperId, error.message);
+    throw error;
+  }
+}
 
 /**
  * 校验论文 PDF 地址，只允许公开 HTTPS 资源。
@@ -45,14 +94,14 @@ async function downloadPaperPdf(pdfUrl) {
   /** requestUrl 是已通过协议校验的公开地址。 */
   const requestUrl = validatePaperPdfUrl(pdfUrl);
   /** response 是远程 PDF 响应。 */
-  const response = await fetch(requestUrl, {
+  const response = await fetchExternalResource(requestUrl, {
     headers: {
       Accept: "application/pdf",
       "User-Agent": "ZhixuLocalKnowledge/1.0",
     },
     redirect: "follow",
     signal: AbortSignal.timeout(paperDownloadTimeoutMilliseconds),
-  });
+  }, "论文 PDF");
   if (!response.ok) {
     throw new Error(`论文 PDF 下载失败（${response.status}）。`);
   }
@@ -89,24 +138,7 @@ export async function preparePaperFullText(paperId) {
     try {
       /** pdfBytes 是从公开来源下载的原始论文。 */
       const pdfBytes = await downloadPaperPdf(paper.pdfUrl);
-      /** cachedPdfPath 是论文 PDF 的本地缓存路径。 */
-      const cachedPdfPath = path.join(paperDirectory, `${paper.id}.pdf`);
-      fs.writeFileSync(cachedPdfPath, pdfBytes);
-      /** parsedPaper 是 pdf-parse 提取出的页数与纯文本。 */
-      const parsedPaper = await pdfParse(pdfBytes);
-      /** sourceText 是规范空白后的英文论文正文。 */
-      const sourceText = String(parsedPaper.text || "")
-        .replace(/\u0000/g, "")
-        .replace(/\r\n?/g, "\n")
-        .replace(/[ \t]+\n/g, "\n")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim();
-      if (sourceText.length < 1_000) {
-        throw new Error("PDF 中未提取到足够的可读正文。");
-      }
-      /** wordCount 是用于判断翻译工作量的近似英文词数。 */
-      const wordCount = sourceText.split(/\s+/).filter(Boolean).length;
-      return updatePaperSourceText(paperId, { sourceText, wordCount });
+      return await preparePaperFullTextFromBuffer(paperId, pdfBytes);
     } catch (error) {
       markPaperExtractionFailed(paperId, error.message);
       throw error;

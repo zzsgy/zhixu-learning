@@ -11,30 +11,69 @@ import { spawn } from "node:child_process";
 import {
   articleImageDirectory,
   attachmentDirectory,
+  paperDirectory,
   publicDirectory,
   serverConfig,
 } from "./lib/config.mjs";
 import {
+  addContentTag,
+  addTopicItem,
+  assignContentToFolder,
+  backfillArticleLanguages,
+  createFolder,
+  createReadingAnnotation,
   createDailyBackup,
+  createKnowledgeCard,
+  createTopic,
+  clearPaperLibrary,
+  deleteEmptyFolder,
+  deleteKnowledgeCard,
+  deleteKnowledgeTarget,
+  deleteReadingAnnotation,
   dismissPaperReminder,
   getArticleById,
+  getAiConversation,
   getDocumentById,
   getDocumentStatistics,
   getPaperById,
+  getReadingWorkspace,
+  getContentOrganization,
   insertDocument,
+  ensureFolderPath,
   listArticles,
+  listAiConversations,
   listDocuments,
+  listFolders,
+  listKnowledgeCards,
   listPaperCandidates,
   listPendingPaperTranslations,
   listPendingFullPaperTranslations,
+  listPendingArticleTranslations,
   listPapers,
+  listContentTags,
+  listTags,
+  listTopicItems,
+  listTopics,
   saveArticle,
+  saveAiExchange,
+  searchKnowledgeBase,
   selectPaperCandidate,
   setFavorite,
   snoozePaperReminder,
   updatePaperCandidateTranslation,
+  updatePaperCategory,
+  upsertImportedPaper,
   updatePaperFullTranslation,
+  requestArticleTranslation,
+  retryPaperFullTranslation,
+  updateArticleTranslation,
   updateDocumentCategory,
+  updateReadingAnnotation,
+  updateReadingState,
+  removeContentTag,
+  removeTopicItem,
+  renameFolder,
+  reviewKnowledgeCard,
 } from "./lib/database.mjs";
 import {
   classifyDocument,
@@ -47,22 +86,66 @@ import {
   extractWordHtml,
 } from "./lib/extractor.mjs";
 import {
+  detectArticleLanguage,
   fetchPublicImage,
   parseAndClassifyArticle,
 } from "./lib/article-parser.mjs";
 import {
-  ensureWeeklyPaperCandidates,
-  getIsoWeekKey,
-  getWeeklyPaperReminder,
+  ensureDailyClassicPaperCandidate,
+  fetchArxivPaperByUrl,
+  getDailyClassicPaperReminder,
+  getDailyPaperKey,
 } from "./lib/paper-service.mjs";
 import {
   getCachedPaperPdfPath,
   preparePaperFullText,
+  preparePaperFullTextFromBuffer,
 } from "./lib/paper-fulltext.mjs";
 import { refreshMliPaperLibrary } from "./lib/mli-paper-service.mjs";
+import { answerFromSources } from "./lib/ai-service.mjs";
+import {
+  getCodexPaperTranslationWorkerStatus,
+  initializeCodexPaperTranslationWorker,
+  triggerCodexPaperTranslationWorker,
+} from "./lib/codex-paper-translator.mjs";
+import {
+  inspectDocsifySource,
+  parseDocsifyChapter,
+} from "./lib/docsify-importer.mjs";
 
 /** paperScheduleIntervalMilliseconds 是后台检查新自然周的间隔。 */
 const paperScheduleIntervalMilliseconds = 6 * 60 * 60 * 1000;
+/** backfilledArticleCount 是本次启动补齐语言状态的历史文章数量。 */
+const backfilledArticleCount = backfillArticleLanguages(detectArticleLanguage);
+if (backfilledArticleCount > 0) {
+  console.log(`已识别 ${backfilledArticleCount} 篇历史文章的原文语言。`);
+}
+
+/**
+ * 在 HTTP 响应之外下载、提取并分类论文 PDF，避免用户等待远程站点。
+ *
+ * @param {Record<string, unknown>} paper 已保存且包含 PDF 地址的论文记录。
+ * @returns {void}
+ */
+function queuePaperPdfProcessing(paper) {
+  if (!paper?.id || !paper?.pdfUrl) return;
+  /** processingTask 是单篇论文的后台提取、分类和翻译唤醒流程。 */
+  const processingTask = preparePaperFullText(paper.id)
+    .then(async (extractedPaper) => {
+      if (!extractedPaper?.sourceText) return extractedPaper;
+      /** classification 是依据完整英文正文生成的技术分类。 */
+      const classification = await classifyDocument({
+        fileName: extractedPaper.title,
+        text: extractedPaper.sourceText,
+      });
+      return updatePaperCategory(extractedPaper.id, classification.category);
+    })
+    .then(() => triggerCodexPaperTranslationWorker())
+    .catch((error) => {
+      console.error(`论文后台解析失败：${error.message}`);
+    });
+  void processingTask;
+}
 
 /** staticMimeTypes 是本地网页静态资源扩展名到 MIME 的映射。 */
 const staticMimeTypes = Object.freeze({
@@ -139,6 +222,21 @@ function sanitizeFileName(rawName) {
 }
 
 /**
+ * 判断候选文件是否严格位于允许删除的本地目录中。
+ *
+ * @param {string} candidatePath 候选文件绝对或相对路径。
+ * @param {string} allowedDirectory 允许删除文件的目录。
+ * @returns {boolean} 是否位于目录内部。
+ */
+function isPathInsideDirectory(candidatePath, allowedDirectory) {
+  /** resolvedCandidate 是标准化后的候选绝对路径。 */
+  const resolvedCandidate = path.resolve(candidatePath);
+  /** resolvedRootWithSeparator 是避免同名前缀误判的目录前缀。 */
+  const resolvedRootWithSeparator = `${path.resolve(allowedDirectory)}${path.sep}`;
+  return resolvedCandidate.startsWith(resolvedRootWithSeparator);
+}
+
+/**
  * 从文件名生成适合知识库展示的标题。
  *
  * @param {string} originalName 原始文件名。
@@ -161,7 +259,7 @@ function deriveDocumentTitle(originalName) {
 function toDocumentListItem(document) {
   /** extractedText 被排除，避免文档列表响应随着知识库增长而过大。 */
   const { extractedText: _extractedText, ...listItem } = document;
-  return listItem;
+  return { ...listItem, tags: listContentTags("document", document.id) };
 }
 
 /**
@@ -175,9 +273,11 @@ function toArticleListItem(article) {
   const {
     contentHtml: _contentHtml,
     contentText: _contentText,
+    translatedHtml: _translatedHtml,
+    translatedText: _translatedText,
     ...listItem
   } = article;
-  return listItem;
+  return { ...listItem, tags: listContentTags("article", article.id) };
 }
 
 /**
@@ -203,6 +303,549 @@ async function handleApiRequest(request, response, url) {
     return true;
   }
 
+  if (request.method === "GET" && url.pathname === "/api/folders") {
+    sendJson(response, 200, { folders: listFolders() });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/folders") {
+    /** requestBuffer 是新文件夹名称和父级信息。 */
+    const requestBuffer = await readRequestBuffer(request, 128 * 1024);
+    /** payload 是浏览器提交的新文件夹参数。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** folder 是本地数据库创建后的文件夹。 */
+    const folder = createFolder(payload);
+    createDailyBackup();
+    sendJson(response, 201, { folder, folders: listFolders() });
+    return true;
+  }
+
+  /** folderMatch 匹配单个文件夹的重命名或删除地址。 */
+  const folderMatch = url.pathname.match(/^\/api\/folders\/([^/]+)$/);
+  if (request.method === "PATCH" && folderMatch) {
+    /** requestBuffer 是文件夹新名称请求。 */
+    const requestBuffer = await readRequestBuffer(request, 128 * 1024);
+    /** payload 是文件夹修改参数。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** folder 是修改后的文件夹。 */
+    const folder = renameFolder(decodeURIComponent(folderMatch[1]), payload.name);
+    createDailyBackup();
+    sendJson(response, 200, { folder, folders: listFolders() });
+    return true;
+  }
+
+  if (request.method === "DELETE" && folderMatch) {
+    /** deleted 表示空文件夹已经从本地数据库移除。 */
+    const deleted = deleteEmptyFolder(decodeURIComponent(folderMatch[1]));
+    createDailyBackup();
+    sendJson(response, 200, { deleted, folders: listFolders() });
+    return true;
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/folder-items") {
+    /** requestBuffer 是内容移动到目标文件夹的请求。 */
+    const requestBuffer = await readRequestBuffer(request, 128 * 1024);
+    /** payload 是目标内容和文件夹 ID。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** assignment 是保存后的唯一主要目录关系。 */
+    const assignment = assignContentToFolder(
+      payload.targetType,
+      payload.targetId,
+      payload.folderId,
+    );
+    createDailyBackup();
+    sendJson(response, 200, { assignment, folders: listFolders() });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/docsify/inspect") {
+    /** requestBuffer 是待识别文档站地址。 */
+    const requestBuffer = await readRequestBuffer(request, 128 * 1024);
+    /** payload 是浏览器提交的站点地址。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** inputUrl 是去除首尾空白后的根站或章节地址。 */
+    const inputUrl = String(payload.url || "").trim();
+    if (!inputUrl) throw new Error("请输入文档站链接。");
+    /** inspection 是目录、有效章节和推荐文件夹预览。 */
+    const inspection = await inspectDocsifySource(inputUrl);
+    sendJson(response, 200, { inspection });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/docsify/import") {
+    /** requestBuffer 是整站导入地址和可选章节范围。 */
+    const requestBuffer = await readRequestBuffer(request, 512 * 1024);
+    /** payload 是浏览器确认后的导入参数。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** inputUrl 是重新检查的公开 Docsify 地址。 */
+    const inputUrl = String(payload.url || "").trim();
+    if (!inputUrl) throw new Error("请输入文档站链接。");
+    /** inspection 在真正写入前重新验证目录，避免信任浏览器提交的源地址。 */
+    const inspection = await inspectDocsifySource(inputUrl);
+    /** selectedRoutes 是用户在预览中保留的章节路由；空数组表示全部。 */
+    const selectedRoutes = new Set(
+      Array.isArray(payload.routes) ? payload.routes.map((route) => String(route)) : [],
+    );
+    /** chapters 是最终允许写入的同源有效章节。 */
+    const chapters = inspection.chapters.filter(
+      (chapter) => selectedRoutes.size === 0 || selectedRoutes.has(chapter.route),
+    );
+    if (chapters.length === 0) throw new Error("没有选择可导入章节。");
+    /** folderPathNames 是服务端检查结果给出的可信推荐路径。 */
+    const folderPathNames = inspection.recommendedFolderPath;
+    /** folderPath 是已经创建或复用的完整文件夹路径。 */
+    const folderPath = ensureFolderPath(folderPathNames);
+    /** importedArticles 保存成功写入的章节摘要。 */
+    const importedArticles = [];
+    /** failures 保存单章失败原因，避免一章故障使整站全部回滚。 */
+    const failures = [];
+    for (const chapter of chapters) {
+      try {
+        /** parsedArticle 是 Markdown 转换并安全清洗后的文章对象。 */
+        const parsedArticle = await parseDocsifyChapter(chapter, {
+          categoryHint: folderPathNames[0],
+        });
+        /** now 是当前章节保存时间。 */
+        const now = new Date().toISOString();
+        /** article 是新增或按 URL 更新后的本地文章。 */
+        const article = saveArticle({
+          id: `article_${crypto.randomUUID()}`,
+          ...parsedArticle,
+          createdAt: now,
+          updatedAt: now,
+        });
+        /** chapterFolderPath 是站点目录、章级分组组成的最终文件夹路径。 */
+        const chapterFolderPath = chapter.groupTitle
+          ? ensureFolderPath(
+            [...folderPathNames, chapter.groupTitle],
+            [0, 0, 0, chapter.groupOrder],
+          )
+          : folderPath;
+        /** chapterFolder 是当前小节实际进入的章级文件夹或站点根文件夹。 */
+        const chapterFolder = chapterFolderPath.at(-1);
+        assignContentToFolder(
+          "article",
+          article.id,
+          chapterFolder.id,
+          chapter.groupItemOrder || chapter.order,
+        );
+        for (const tagName of folderPathNames.slice(1)) {
+          addContentTag("article", article.id, tagName);
+        }
+        importedArticles.push(toArticleListItem(getArticleById(article.id)));
+      } catch (error) {
+        failures.push({
+          route: chapter.route,
+          title: chapter.title,
+          message: error instanceof Error ? error.message : "章节导入失败",
+        });
+      }
+    }
+    createDailyBackup();
+    sendJson(response, failures.length === chapters.length ? 422 : 201, {
+      siteTitle: inspection.siteTitle,
+      folderPath,
+      importedCount: importedArticles.length,
+      skippedCount: inspection.skipped.length,
+      articles: importedArticles,
+      failures,
+    });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/ai/sources") {
+    /** sources 是可以被用户主动选入 AI 问答的本地内容摘要。 */
+    const sources = [
+      ...listDocuments({ limit: 1000 }).map((item) => ({
+        targetType: "document", targetId: item.id, title: item.title,
+        category: item.category, summary: item.summary,
+      })),
+      ...listArticles({ limit: 1000 }).map((item) => ({
+        targetType: "article", targetId: item.id, title: item.title,
+        category: item.category, summary: item.summary,
+      })),
+      ...listPapers().map((item) => ({
+        targetType: "paper", targetId: item.id, title: item.titleZh || item.title,
+        category: item.category, summary: item.abstractZh || item.abstract || item.curatorNote,
+      })),
+    ];
+    sendJson(response, 200, {
+      configured: Boolean(serverConfig.deepSeekApiKey),
+      model: serverConfig.deepSeekModel,
+      sources,
+    });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/ai/conversations") {
+    /** conversations 是可搜索的本地 AI 问答历史摘要。 */
+    const conversations = listAiConversations({
+      query: url.searchParams.get("q") ?? "",
+      targetType: url.searchParams.get("targetType") ?? "",
+      targetId: url.searchParams.get("targetId") ?? "",
+    });
+    sendJson(response, 200, { conversations });
+    return true;
+  }
+
+  /** aiConversationMatch 匹配一条完整本地 AI 会话。 */
+  const aiConversationMatch = url.pathname.match(/^\/api\/ai\/conversations\/([^/]+)$/);
+  if (request.method === "GET" && aiConversationMatch) {
+    /** conversationId 是地址中经过解码的会话 ID。 */
+    const conversationId = decodeURIComponent(aiConversationMatch[1]);
+    /** conversation 是包含全部问答消息的本地会话。 */
+    const conversation = getAiConversation(conversationId);
+    if (!conversation) {
+      sendJson(response, 404, { message: "找不到这条问答记录。" });
+      return true;
+    }
+    sendJson(response, 200, { conversation });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/ai/ask") {
+    /** requestBuffer 是问题、模式和用户主动选择来源的 JSON。 */
+    const requestBuffer = await readRequestBuffer(request, 512 * 1024);
+    /** payload 是经过 JSON 解析的问答参数。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** requestedSources 是最多六份用户明确选择的本地来源。 */
+    const requestedSources = Array.isArray(payload.sources)
+      ? payload.sources.slice(0, 6)
+      : [];
+    /** resolvedSources 是从 SQLite 重新读取的真实正文，绝不信任浏览器提交正文。 */
+    const resolvedSources = requestedSources.flatMap((sourceReference, index) => {
+      /** targetType 是限定在三类内容中的来源类型。 */
+      const targetType = ["document", "article", "paper"].includes(sourceReference?.targetType)
+        ? sourceReference.targetType
+        : "";
+      /** targetId 是来源在本地数据库中的稳定 ID。 */
+      const targetId = String(sourceReference?.targetId ?? "").trim();
+      /** sourceKey 是本次请求内用于引用的短编号。 */
+      const sourceKey = `S${index + 1}`;
+      if (targetType === "document") {
+        /** documentItem 是本地数据库中的完整文档。 */
+        const documentItem = getDocumentById(targetId);
+        return documentItem ? [{ sourceKey, targetType, targetId, title: documentItem.title, text: documentItem.extractedText || documentItem.summary }] : [];
+      }
+      if (targetType === "article") {
+        /** articleItem 是本地数据库中的完整网页文章。 */
+        const articleItem = getArticleById(targetId);
+        return articleItem ? [{ sourceKey, targetType, targetId, title: articleItem.title, text: articleItem.contentText || articleItem.summary }] : [];
+      }
+      if (targetType === "paper") {
+        /** paperItem 是本地数据库中的完整论文及可用译文。 */
+        const paperItem = getPaperById(targetId);
+        return paperItem ? [{ sourceKey, targetType, targetId, title: paperItem.titleZh || paperItem.title, text: paperItem.fullTranslationHtml || paperItem.sourceText || paperItem.abstractZh || paperItem.abstract }] : [];
+      }
+      return [];
+    });
+    if (resolvedSources.length !== requestedSources.length) {
+      sendJson(response, 422, { message: "部分所选资料已不存在，请刷新资料列表后重试。" });
+      return true;
+    }
+    /** existingConversation 是连续追问时的本地上下文。 */
+    const existingConversation = payload.conversationId
+      ? getAiConversation(String(payload.conversationId))
+      : null;
+    if (payload.conversationId && !existingConversation) {
+      sendJson(response, 404, { message: "找不到要继续的问答记录。" });
+      return true;
+    }
+    /** result 是 DeepSeek 回答及经过本地逐字校验的引用。 */
+    const result = await answerFromSources({
+      apiKey: serverConfig.deepSeekApiKey,
+      model: serverConfig.deepSeekModel,
+      question: payload.question,
+      mode: payload.mode,
+      sources: resolvedSources,
+      selectedQuote: payload.selectedQuote,
+      conversationMessages: existingConversation?.messages ?? [],
+    });
+    /** sourceReferenceMap 用于把引用短编号恢复为可打开的本地内容地址。 */
+    const sourceReferenceMap = new Map(resolvedSources.map((source) => [source.sourceKey, source]));
+    /** citations 是只包含已验证引文和本地跳转信息的前端响应。 */
+    const citations = result.citations.map((citation) => {
+      /** source 是该引文经过服务端确认的真实资料。 */
+      const source = sourceReferenceMap.get(citation.sourceKey);
+      return { ...citation, targetType: source.targetType, targetId: source.targetId };
+    });
+    /** savedConversation 是写入本机 SQLite 后的完整问答记录。 */
+    const savedConversation = saveAiExchange({
+      conversationId: existingConversation?.id,
+      mode: payload.mode,
+      sources: resolvedSources.map((source) => ({
+        targetType: source.targetType,
+        targetId: source.targetId,
+        title: source.title,
+      })),
+      question: payload.question,
+      selectedQuote: payload.selectedQuote,
+      answer: result.answer,
+      citations,
+      insufficientEvidence: result.insufficientEvidence,
+    });
+    createDailyBackup();
+    sendJson(response, 200, {
+      ...result,
+      citations,
+      conversationId: savedConversation.id,
+      conversation: savedConversation,
+    });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/search") {
+    /** results 是跨内容正文、阅读笔记和高亮批注的统一搜索结果。 */
+    const results = searchKnowledgeBase({
+      query: url.searchParams.get("q") ?? "",
+      targetType: url.searchParams.get("targetType") ?? "",
+      category: url.searchParams.get("category") ?? "",
+      tagName: url.searchParams.get("tagName") ?? "",
+    });
+    sendJson(response, 200, { results });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/tags") {
+    sendJson(response, 200, { tags: listTags() });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/content-organization") {
+    /** organization 是当前内容的标签和专题信息。 */
+    const organization = getContentOrganization(
+      url.searchParams.get("targetType") ?? "",
+      url.searchParams.get("targetId") ?? "",
+    );
+    if (!organization) {
+      sendJson(response, 404, { message: "找不到对应内容。" });
+      return true;
+    }
+    sendJson(response, 200, { organization });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/content-tags") {
+    /** requestBuffer 是新增标签的 JSON 请求正文。 */
+    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
+    /** payload 是标签和目标内容信息。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** tags 是保存后的最新标签列表。 */
+    const tags = addContentTag(payload.targetType, payload.targetId, payload.tagName);
+    createDailyBackup();
+    sendJson(response, 201, { tags });
+    return true;
+  }
+
+  if (request.method === "DELETE" && url.pathname === "/api/content-tags") {
+    /** tags 是移除关联后的最新标签列表。 */
+    const tags = removeContentTag(
+      url.searchParams.get("targetType") ?? "",
+      url.searchParams.get("targetId") ?? "",
+      url.searchParams.get("tagName") ?? "",
+    );
+    createDailyBackup();
+    sendJson(response, 200, { tags });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/topics") {
+    sendJson(response, 200, { topics: listTopics() });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/topics") {
+    /** requestBuffer 是新专题的 JSON 请求正文。 */
+    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
+    /** payload 是专题名称和说明。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** topic 是创建后的本地专题。 */
+    const topic = createTopic(payload);
+    createDailyBackup();
+    sendJson(response, 201, { topic });
+    return true;
+  }
+
+  /** topicItemsMatch 匹配某个专题的内容列表地址。 */
+  const topicItemsMatch = url.pathname.match(/^\/api\/topics\/([^/]+)\/items$/);
+  if (request.method === "GET" && topicItemsMatch) {
+    /** topicId 是地址中的专题 ID。 */
+    const topicId = decodeURIComponent(topicItemsMatch[1]);
+    sendJson(response, 200, { items: listTopicItems(topicId) });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/topic-items") {
+    /** requestBuffer 是专题内容关联的 JSON 请求正文。 */
+    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
+    /** payload 是专题和目标内容信息。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** items 是专题更新后的内容列表。 */
+    const items = addTopicItem(payload.topicId, payload.targetType, payload.targetId);
+    createDailyBackup();
+    sendJson(response, 201, { items });
+    return true;
+  }
+
+  if (request.method === "DELETE" && url.pathname === "/api/topic-items") {
+    /** items 是移除关联后的专题内容列表。 */
+    const items = removeTopicItem(
+      url.searchParams.get("topicId") ?? "",
+      url.searchParams.get("targetType") ?? "",
+      url.searchParams.get("targetId") ?? "",
+    );
+    createDailyBackup();
+    sendJson(response, 200, { items });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/knowledge-cards") {
+    /** dueOnly 表示是否只返回已经到期的今日复习卡片。 */
+    const dueOnly = url.searchParams.get("due") === "1";
+    /** cards 是符合筛选条件的本地来源卡片。 */
+    const cards = listKnowledgeCards({ dueOnly });
+    sendJson(response, 200, { cards });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/knowledge-cards") {
+    /** requestBuffer 是新卡片的 JSON 请求正文。 */
+    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
+    /** payload 是用户确认的问题、答案和来源锚点。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** card 是已保存到 SQLite 的来源卡片。 */
+    const card = createKnowledgeCard(payload);
+    createDailyBackup();
+    sendJson(response, 201, { card });
+    return true;
+  }
+
+  /** cardReviewMatch 匹配单张卡片的复习调度地址。 */
+  const cardReviewMatch = url.pathname.match(
+    /^\/api\/knowledge-cards\/([^/]+)\/review$/,
+  );
+  if (request.method === "POST" && cardReviewMatch) {
+    /** cardId 是地址中经过解码的卡片 ID。 */
+    const cardId = decodeURIComponent(cardReviewMatch[1]);
+    /** requestBuffer 是复习结果的 JSON 请求正文。 */
+    const requestBuffer = await readRequestBuffer(request, 32 * 1024);
+    /** payload 是 again、hard、good 或 easy 评价。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** card 是完成下一次调度后的卡片。 */
+    const card = reviewKnowledgeCard(cardId, String(payload.rating || "good"));
+    if (!card) {
+      sendJson(response, 404, { message: "找不到这张知识卡片。" });
+      return true;
+    }
+    createDailyBackup();
+    sendJson(response, 200, { card });
+    return true;
+  }
+
+  /** cardDetailMatch 匹配单张知识卡片地址。 */
+  const cardDetailMatch = url.pathname.match(/^\/api\/knowledge-cards\/([^/]+)$/);
+  if (request.method === "DELETE" && cardDetailMatch) {
+    /** cardId 是地址中经过解码的卡片 ID。 */
+    const cardId = decodeURIComponent(cardDetailMatch[1]);
+    createDailyBackup();
+    /** deleted 表示是否实际删除了卡片。 */
+    const deleted = deleteKnowledgeCard(cardId);
+    if (!deleted) {
+      sendJson(response, 404, { message: "找不到这张知识卡片。" });
+      return true;
+    }
+    sendJson(response, 200, { deleted: true });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/reading-workspace") {
+    /** targetType 是当前阅读内容所属的固定类型。 */
+    const targetType = url.searchParams.get("targetType")?.trim() ?? "";
+    /** targetId 是当前阅读内容的本地 ID。 */
+    const targetId = url.searchParams.get("targetId")?.trim() ?? "";
+    /** workspace 是该内容已经保存的阅读状态、笔记和批注。 */
+    const workspace = getReadingWorkspace(targetType, targetId);
+    if (!workspace) {
+      sendJson(response, 404, { message: "找不到对应的阅读内容。" });
+      return true;
+    }
+    sendJson(response, 200, { workspace });
+    return true;
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/reading-workspace") {
+    /** requestBuffer 是阅读状态的 JSON 请求正文。 */
+    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
+    /** payload 是浏览器提交的进度、状态或个人笔记。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** state 是写入数据库后的最新阅读状态。 */
+    const state = updateReadingState(
+      String(payload.targetType ?? ""),
+      String(payload.targetId ?? ""),
+      payload,
+    );
+    if (!state) {
+      sendJson(response, 404, { message: "找不到对应的阅读内容。" });
+      return true;
+    }
+    sendJson(response, 200, { state });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/reading-annotations") {
+    /** requestBuffer 是新高亮批注的 JSON 请求正文。 */
+    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
+    /** payload 是浏览器选区及高亮颜色。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** annotation 是成功保存的本地高亮批注。 */
+    const annotation = createReadingAnnotation(
+      String(payload.targetType ?? ""),
+      String(payload.targetId ?? ""),
+      payload,
+    );
+    if (!annotation) {
+      sendJson(response, 404, { message: "找不到对应的阅读内容。" });
+      return true;
+    }
+    createDailyBackup();
+    sendJson(response, 201, { annotation });
+    return true;
+  }
+
+  /** annotationMatch 匹配单条高亮批注的修改和删除地址。 */
+  const annotationMatch = url.pathname.match(/^\/api\/reading-annotations\/([^/]+)$/);
+  if (request.method === "PATCH" && annotationMatch) {
+    /** annotationId 是地址中经过解码的批注 ID。 */
+    const annotationId = decodeURIComponent(annotationMatch[1]);
+    /** requestBuffer 是批注修改请求的 JSON 正文。 */
+    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
+    /** payload 是新批注正文或高亮颜色。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** annotation 是修改后的完整批注。 */
+    const annotation = updateReadingAnnotation(annotationId, payload);
+    if (!annotation) {
+      sendJson(response, 404, { message: "找不到这条批注。" });
+      return true;
+    }
+    createDailyBackup();
+    sendJson(response, 200, { annotation });
+    return true;
+  }
+
+  if (request.method === "DELETE" && annotationMatch) {
+    /** annotationId 是地址中经过解码的批注 ID。 */
+    const annotationId = decodeURIComponent(annotationMatch[1]);
+    /** deleted 表示本次是否真正删除了批注记录。 */
+    const deleted = deleteReadingAnnotation(annotationId);
+    if (!deleted) {
+      sendJson(response, 404, { message: "找不到这条批注。" });
+      return true;
+    }
+    createDailyBackup();
+    sendJson(response, 200, { deleted: true });
+    return true;
+  }
+
   if (request.method === "GET" && url.pathname === "/api/papers") {
     /** sourceType 是可选的论文来源过滤值。 */
     const sourceType = url.searchParams.get("source") ?? "";
@@ -214,7 +857,7 @@ async function handleApiRequest(request, response, url) {
         fullTranslationHtml: _fullTranslationHtml,
         ...listItem
       } = paper;
-      return listItem;
+      return { ...listItem, tags: listContentTags("paper", paper.id) };
     });
     sendJson(response, 200, { papers });
     return true;
@@ -235,6 +878,16 @@ async function handleApiRequest(request, response, url) {
     /** papers 是已经提取英文全文但等待 Codex 中文翻译的论文。 */
     const papers = listPendingFullPaperTranslations();
     sendJson(response, 200, { papers });
+    return true;
+  }
+
+  if (
+    request.method === "GET" &&
+    url.pathname === "/api/paper-translation-worker/status"
+  ) {
+    /** worker 是本机 Codex 后台翻译器的实时状态。 */
+    const worker = getCodexPaperTranslationWorkerStatus();
+    sendJson(response, 200, { worker });
     return true;
   }
 
@@ -296,9 +949,9 @@ async function handleApiRequest(request, response, url) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/paper-reminder") {
-    /** reminder 是当前自然周的候选论文和提醒状态。 */
-    const reminder = await getWeeklyPaperReminder();
-    /** force 表示用户主动要求查看本周候选，即使已经延后或跳过。 */
+    /** reminder 是今天的经典论文和提醒状态。 */
+    const reminder = await getDailyClassicPaperReminder();
+    /** force 表示用户主动要求查看今日推荐，即使已经延后或跳过。 */
     const force = url.searchParams.get("force") === "1";
     if (force && reminder.candidates.length === 0) {
       reminder.candidates = listPaperCandidates(reminder.weekKey);
@@ -325,12 +978,167 @@ async function handleApiRequest(request, response, url) {
       return true;
     }
     /** fullTextTask 在响应后继续下载并提取公开 PDF，不阻塞用户操作。 */
-    const fullTextTask = preparePaperFullText(paper.id).catch((error) => {
-      console.error(`论文全文提取失败：${error.message}`);
-    });
+    const fullTextTask = preparePaperFullText(paper.id)
+      .then(() => triggerCodexPaperTranslationWorker())
+      .catch((error) => {
+        console.error(`论文全文提取失败：${error.message}`);
+      });
     void fullTextTask;
     createDailyBackup();
     sendJson(response, 201, { paper });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/papers/import/file") {
+    /** originalName 是经过安全清理的本地论文文件名。 */
+    const originalName = sanitizeFileName(String(request.headers["x-file-name"] ?? ""));
+    if (path.extname(originalName).toLowerCase() !== ".pdf") {
+      sendJson(response, 415, { message: "论文文件导入目前只支持 PDF。" });
+      return true;
+    }
+    /** pdfBytes 是受上传上限约束的完整本地 PDF。 */
+    const pdfBytes = await readRequestBuffer(
+      request,
+      Math.min(serverConfig.maxUploadBytes, 80 * 1024 * 1024),
+    );
+    /** sha256 是文件去重与稳定外部编号。 */
+    const sha256 = crypto.createHash("sha256").update(pdfBytes).digest("hex");
+    /** paperId 是在写入数据库前生成的稳定本地 ID。 */
+    const paperId = `paper_${crypto.randomUUID()}`;
+    /** initialPaper 是保存 PDF 缓存前的本地论文记录。 */
+    const initialPaper = upsertImportedPaper({
+      id: paperId,
+      externalId: `manual-pdf:${sha256}`,
+      title: path.basename(originalName, path.extname(originalName)),
+      category: "其它",
+      sourceUrl: `/api/papers/${encodeURIComponent(paperId)}/pdf`,
+      sourceLanguage: "unknown",
+    });
+    /** extractedPaper 是从 PDF 完整提取正文后的记录。 */
+    const extractedPaper = await preparePaperFullTextFromBuffer(initialPaper.id, pdfBytes);
+    /** classification 是依据论文正文得到的自动技术分类。 */
+    const classification = await classifyDocument({
+      fileName: originalName,
+      text: extractedPaper.sourceText,
+    });
+    /** paper 是完成分类后的最终论文。 */
+    const paper = updatePaperCategory(initialPaper.id, classification.category);
+    void triggerCodexPaperTranslationWorker();
+    createDailyBackup();
+    sendJson(response, 201, { paper });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/papers/import/url") {
+    /** requestBuffer 是论文链接导入请求。 */
+    const requestBuffer = await readRequestBuffer(request, 32 * 1024);
+    /** payload 是浏览器提交的论文链接对象。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** inputUrl 是清理后的公开论文链接。 */
+    const inputUrl = String(payload.url || "").trim();
+    if (!inputUrl) {
+      sendJson(response, 400, { message: "请输入论文链接。" });
+      return true;
+    }
+    /** parsedUrl 用于区分 arXiv、直接 PDF 与普通论文网页。 */
+    const parsedUrl = new URL(inputUrl);
+    if (!/^https?:$/.test(parsedUrl.protocol)) {
+      sendJson(response, 400, { message: "论文链接必须使用 HTTP 或 HTTPS。" });
+      return true;
+    }
+    /** arxivPaper 是通过官方接口读取的可选 arXiv 元数据。 */
+    const arxivPaper = await fetchArxivPaperByUrl(inputUrl);
+    /** isDirectPdf 表示链接直接指向 PDF 文件。 */
+    const isDirectPdf = /\.pdf$/i.test(parsedUrl.pathname);
+    let paper;
+    if (arxivPaper) {
+      paper = upsertImportedPaper({
+        ...arxivPaper,
+        sourceLanguage: "en",
+      });
+      queuePaperPdfProcessing(paper);
+    } else if (isDirectPdf) {
+      /** paperId 是直接 PDF 的本地稳定 ID。 */
+      const paperId = `paper_${crypto.randomUUID()}`;
+      paper = upsertImportedPaper({
+        id: paperId,
+        externalId: `manual-url:${parsedUrl.href}`,
+        title: decodeURIComponent(path.basename(parsedUrl.pathname, ".pdf")) || "未命名论文",
+        category: "其它",
+        sourceUrl: parsedUrl.href,
+        pdfUrl: parsedUrl.href,
+        sourceLanguage: "unknown",
+      });
+      queuePaperPdfProcessing(paper);
+    } else {
+      /** parsedArticle 复用经过安全校验的网页正文解析能力。 */
+      const parsedArticle = await parseAndClassifyArticle(inputUrl);
+      paper = upsertImportedPaper({
+        externalId: `manual-url:${parsedArticle.url}`,
+        title: parsedArticle.title,
+        abstract: parsedArticle.summary,
+        authors: parsedArticle.author ? [parsedArticle.author] : [],
+        category: parsedArticle.category,
+        publishedAt: parsedArticle.publishedAt,
+        sourceUrl: parsedArticle.url,
+        sourceText: parsedArticle.contentText,
+        sourceLanguage: parsedArticle.sourceLanguage,
+        curatorNote: "从公开论文网页导入",
+      });
+    }
+    if (!paper.pdfUrl) void triggerCodexPaperTranslationWorker();
+    createDailyBackup();
+    sendJson(response, paper.pdfUrl ? 202 : 201, {
+      paper,
+      processing: Boolean(paper.pdfUrl && !paper.sourceText),
+    });
+    return true;
+  }
+
+  /** paperExtractionRetryMatch 匹配失败论文重新下载和解析 PDF 的地址。 */
+  const paperExtractionRetryMatch = url.pathname.match(
+    /^\/api\/papers\/([^/]+)\/retry-extraction$/,
+  );
+  if (request.method === "POST" && paperExtractionRetryMatch) {
+    /** paperId 是需要重新处理的本地论文 ID。 */
+    const paperId = decodeURIComponent(paperExtractionRetryMatch[1]);
+    /** paper 是必须包含公开 PDF 地址的现有论文。 */
+    const paper = getPaperById(paperId);
+    if (!paper) {
+      sendJson(response, 404, { message: "论文不存在。" });
+      return true;
+    }
+    if (!paper.pdfUrl) {
+      sendJson(response, 400, { message: "该论文没有可重试的公开 PDF 地址。" });
+      return true;
+    }
+    queuePaperPdfProcessing(paper);
+    sendJson(response, 202, { paper, processing: true });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/papers/reset") {
+    /** requestBuffer 是防止误触的清空确认请求。 */
+    const requestBuffer = await readRequestBuffer(request, 16 * 1024);
+    /** payload 是必须包含固定确认短语的请求对象。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    if (payload.confirm !== "DELETE_ALL_PAPERS") {
+      sendJson(response, 400, { message: "缺少清空论文库确认。" });
+      return true;
+    }
+    createDailyBackup();
+    /** currentPapers 是删除前用于精确定位 PDF 缓存的论文集合。 */
+    const currentPapers = listPapers();
+    /** result 是数据库论文、关联数据和旧推荐状态的清理结果。 */
+    const result = clearPaperLibrary();
+    for (const paper of currentPapers) {
+      /** cachedPdfPath 是当前论文的精确 PDF 缓存路径。 */
+      const cachedPdfPath = getCachedPaperPdfPath(paper.id);
+      if (cachedPdfPath && isPathInsideDirectory(cachedPdfPath, paperDirectory)) {
+        fs.rmSync(cachedPdfPath, { force: true });
+      }
+    }
+    sendJson(response, 200, result);
     return true;
   }
 
@@ -379,9 +1187,48 @@ async function handleApiRequest(request, response, url) {
     return true;
   }
 
+  /** paperTranslationRetryMatch 匹配单篇论文重新加入 Codex 队列的地址。 */
+  const paperTranslationRetryMatch = url.pathname.match(
+    /^\/api\/papers\/([^/]+)\/translation\/retry$/,
+  );
+  if (request.method === "POST" && paperTranslationRetryMatch) {
+    /** paperId 是用户要求重新翻译的论文 ID。 */
+    const paperId = decodeURIComponent(paperTranslationRetryMatch[1]);
+    /** paper 是重新排队后的论文；缺少正文时不能开始翻译。 */
+    const paper = retryPaperFullTranslation(paperId);
+    if (!paper) {
+      sendJson(response, 404, { message: "论文不存在或尚未提取出可翻译正文。" });
+      return true;
+    }
+    void triggerCodexPaperTranslationWorker();
+    sendJson(response, 200, { paper });
+    return true;
+  }
+  if (request.method === "DELETE" && paperDetailMatch) {
+    /** paperId 是用户确认要永久删除的论文 ID。 */
+    const paperId = decodeURIComponent(paperDetailMatch[1]);
+    /** cachedPdfPath 是删除数据库前读取到的可选本地 PDF 路径。 */
+    const cachedPdfPath = getCachedPaperPdfPath(paperId);
+    createDailyBackup();
+    /** deletedTarget 是已删除论文的摘要。 */
+    const deletedTarget = deleteKnowledgeTarget("paper", paperId);
+    if (!deletedTarget) {
+      sendJson(response, 404, { message: "找不到这篇论文。" });
+      return true;
+    }
+    if (
+      cachedPdfPath &&
+      isPathInsideDirectory(cachedPdfPath, paperDirectory)
+    ) {
+      fs.rmSync(cachedPdfPath, { force: true });
+    }
+    sendJson(response, 200, { deleted: deletedTarget });
+    return true;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/paper-reminder/snooze") {
-    /** weekKey 是只允许延后当前自然周的周标识。 */
-    const weekKey = getIsoWeekKey();
+    /** weekKey 复用旧字段名保存当天的推荐键。 */
+    const weekKey = getDailyPaperKey();
     /** snoozedUntil 是从当前时间起延后一天的提醒时间。 */
     const snoozedUntil = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     /** reminder 是更新后的本周提醒状态。 */
@@ -392,9 +1239,9 @@ async function handleApiRequest(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/paper-reminder/dismiss") {
-    /** weekKey 是当前自然周标识。 */
-    const weekKey = getIsoWeekKey();
-    /** reminder 是已经跳过的本周提醒状态。 */
+    /** weekKey 复用旧字段名保存当天的推荐键。 */
+    const weekKey = getDailyPaperKey();
+    /** reminder 是已经跳过的今日提醒状态。 */
     const reminder = dismissPaperReminder(weekKey);
     createDailyBackup();
     sendJson(response, 200, { reminder });
@@ -441,6 +1288,7 @@ async function handleApiRequest(request, response, url) {
       [".png", "image/png"],
       [".gif", "image/gif"],
       [".webp", "image/webp"],
+      [".svg", "image/svg+xml"],
     ]);
     /** cachedPath 是已经存在的本地图片缓存路径。 */
     let cachedPath = null;
@@ -464,6 +1312,7 @@ async function handleApiRequest(request, response, url) {
         "image/png": ".png",
         "image/gif": ".gif",
         "image/webp": ".webp",
+        "image/svg+xml": ".svg",
       };
       /** imageExtension 是远程图片实际格式对应的扩展名。 */
       const imageExtension = extensionByType[downloadedImage.contentType];
@@ -478,6 +1327,9 @@ async function handleApiRequest(request, response, url) {
       "Content-Length": imageSize,
       "Cache-Control": "private, max-age=31536000, immutable",
       "X-Content-Type-Options": "nosniff",
+      ...(cachedContentType === "image/svg+xml"
+        ? { "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'" }
+        : {}),
     });
     fs.createReadStream(cachedPath).pipe(response);
     return true;
@@ -507,6 +1359,60 @@ async function handleApiRequest(request, response, url) {
     });
     createDailyBackup();
     sendJson(response, 201, { article });
+    return true;
+  }
+
+  if (
+    request.method === "GET" &&
+    url.pathname === "/api/article-translations/pending"
+  ) {
+    /** articles 是用户已经明确加入 Codex 翻译队列的英文文章。 */
+    const articles = listPendingArticleTranslations();
+    sendJson(response, 200, { articles });
+    return true;
+  }
+
+  /** articleTranslationMatch 匹配单篇文章的 Codex 中文译文写回地址。 */
+  const articleTranslationMatch = url.pathname.match(
+    /^\/api\/article-translations\/([^/]+)$/,
+  );
+  if (request.method === "PATCH" && articleTranslationMatch) {
+    /** articleId 是地址中经过解码的文章 ID。 */
+    const articleId = decodeURIComponent(articleTranslationMatch[1]);
+    /** requestBuffer 是完整文章中文译文的 JSON 请求正文。 */
+    const requestBuffer = await readRequestBuffer(request, 12 * 1024 * 1024);
+    /** payload 是 Codex 生成的中文标题、简介和安全语义 HTML。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** article 是写入中文译文后的最新文章。 */
+    const article = updateArticleTranslation(articleId, {
+      translatedTitle: payload.translatedTitle,
+      translatedSummary: payload.translatedSummary,
+      translatedHtml: payload.translatedHtml,
+    });
+    if (!article) {
+      sendJson(response, 404, { message: "找不到待翻译的文章。" });
+      return true;
+    }
+    createDailyBackup();
+    sendJson(response, 200, { article });
+    return true;
+  }
+
+  /** articleTranslationRequestMatch 匹配用户主动加入 Codex 翻译队列的地址。 */
+  const articleTranslationRequestMatch = url.pathname.match(
+    /^\/api\/articles\/([^/]+)\/translation-request$/,
+  );
+  if (request.method === "POST" && articleTranslationRequestMatch) {
+    /** articleId 是用户正在阅读的英文文章 ID。 */
+    const articleId = decodeURIComponent(articleTranslationRequestMatch[1]);
+    /** article 是进入等待状态后的完整文章。 */
+    const article = requestArticleTranslation(articleId);
+    if (!article) {
+      sendJson(response, 404, { message: "找不到这篇文章。" });
+      return true;
+    }
+    createDailyBackup();
+    sendJson(response, 200, { article });
     return true;
   }
 
@@ -542,6 +1448,19 @@ async function handleApiRequest(request, response, url) {
       return true;
     }
     sendJson(response, 200, { article });
+    return true;
+  }
+  if (request.method === "DELETE" && articleDetailMatch) {
+    /** articleId 是用户确认要永久删除的文章 ID。 */
+    const articleId = decodeURIComponent(articleDetailMatch[1]);
+    createDailyBackup();
+    /** deletedTarget 是已删除文章的摘要。 */
+    const deletedTarget = deleteKnowledgeTarget("article", articleId);
+    if (!deletedTarget) {
+      sendJson(response, 404, { message: "找不到这篇文章。" });
+      return true;
+    }
+    sendJson(response, 200, { deleted: deletedTarget });
     return true;
   }
 
@@ -639,6 +1558,29 @@ async function handleApiRequest(request, response, url) {
       }
     }
     sendJson(response, 200, { document });
+    return true;
+  }
+  if (request.method === "DELETE" && detailMatch) {
+    /** documentId 是用户确认要永久删除的文档 ID。 */
+    const documentId = decodeURIComponent(detailMatch[1]);
+    /** existingDocument 是删除前用于定位附件的文档记录。 */
+    const existingDocument = getDocumentById(documentId);
+    if (!existingDocument) {
+      sendJson(response, 404, { message: "找不到这份文档。" });
+      return true;
+    }
+    createDailyBackup();
+    /** deletedTarget 是已删除文档的摘要。 */
+    const deletedTarget = deleteKnowledgeTarget("document", documentId);
+    /** attachmentPath 是该文档的本地原始附件路径。 */
+    const attachmentPath = path.resolve(
+      attachmentDirectory,
+      existingDocument.storedName,
+    );
+    if (isPathInsideDirectory(attachmentPath, attachmentDirectory)) {
+      fs.rmSync(attachmentPath, { force: true });
+    }
+    sendJson(response, 200, { deleted: deletedTarget });
     return true;
   }
 
@@ -774,8 +1716,8 @@ function serveStaticFile(request, response, url) {
   response.writeHead(200, {
     "Content-Type": contentType,
     "Content-Length": stat.size,
-    "Cache-Control":
-      fileExtension === ".html" ? "no-cache" : "public, max-age=3600",
+    // 本地个人应用优先保证修改立即可见，避免 HTML 与旧 CSS/JS 混用。
+    "Cache-Control": "no-store",
     "Content-Security-Policy":
       "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     "X-Content-Type-Options": "nosniff",
@@ -850,7 +1792,7 @@ function openDefaultBrowser(url) {
 createDailyBackup();
 
 /**
- * 在本地服务运行期间预先准备当前周的候选论文。
+ * 在本地服务运行期间预先准备当天的经典论文。
  *
  * 网络暂时不可用不会影响知识库其他功能；下一次计划检查会自动重试。
  *
@@ -858,11 +1800,11 @@ createDailyBackup();
  */
 async function runPaperSchedule() {
   try {
-    await ensureWeeklyPaperCandidates();
+    await ensureDailyClassicPaperCandidate();
   } catch (error) {
     /** message 是仅写入本地终端的候选更新失败原因。 */
     const message = error instanceof Error ? error.message : "未知错误";
-    console.warn(`本周论文候选暂未更新：${message}`);
+    console.warn(`今日经典论文暂未更新：${message}`);
   }
 }
 
@@ -873,6 +1815,14 @@ const paperScheduleTimer = setInterval(
 );
 paperScheduleTimer.unref();
 void runPaperSchedule();
+
+/** codexWorkerTimer 定期检查登录恢复和未完成队列。 */
+const codexWorkerTimer = setInterval(
+  () => void triggerCodexPaperTranslationWorker(),
+  60 * 1000,
+);
+codexWorkerTimer.unref();
+initializeCodexPaperTranslationWorker();
 
 /** server 是只监听本机回环地址的 HTTP 服务。 */
 const server = http.createServer((request, response) => {
