@@ -42,6 +42,12 @@ database.exec(`
     summary TEXT NOT NULL DEFAULT '',
     extracted_text TEXT NOT NULL DEFAULT '',
     extraction_status TEXT NOT NULL DEFAULT 'pending',
+    ocr_status TEXT NOT NULL DEFAULT 'not_required',
+    ocr_error TEXT NOT NULL DEFAULT '',
+    ocr_language TEXT NOT NULL DEFAULT '',
+    ocr_page_count INTEGER NOT NULL DEFAULT 0,
+    ocr_average_confidence REAL NOT NULL DEFAULT 0,
+    ocr_completed_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -61,6 +67,23 @@ database.exec(`
     extracted_text,
     tokenize = 'unicode61'
   );
+
+  CREATE TABLE IF NOT EXISTS document_pages (
+    document_id TEXT NOT NULL,
+    page_number INTEGER NOT NULL,
+    extraction_method TEXT NOT NULL DEFAULT 'ocr'
+      CHECK(extraction_method IN ('native', 'ocr')),
+    text TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 0,
+    layout_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(document_id, page_number),
+    FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS document_pages_document_idx
+    ON document_pages(document_id, page_number ASC);
 
   CREATE TABLE IF NOT EXISTS articles (
     id TEXT PRIMARY KEY,
@@ -343,6 +366,45 @@ database.exec(`
 
   CREATE INDEX IF NOT EXISTS ai_messages_conversation_idx
     ON ai_messages(conversation_id, created_at ASC);
+
+  CREATE TABLE IF NOT EXISTS import_jobs (
+    id TEXT PRIMARY KEY,
+    job_type TEXT NOT NULL,
+    source_label TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued'
+      CHECK(status IN ('queued', 'running', 'completed', 'failed')),
+    stage TEXT NOT NULL DEFAULT 'queued',
+    progress_percent REAL NOT NULL DEFAULT 0,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    target_type TEXT,
+    target_id TEXT,
+    error_message TEXT NOT NULL DEFAULT '',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS import_jobs_status_created_idx
+    ON import_jobs(status, created_at ASC);
+
+  CREATE INDEX IF NOT EXISTS import_jobs_type_updated_idx
+    ON import_jobs(job_type, updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS browser_clients (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    revoked_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS browser_clients_active_idx
+    ON browser_clients(revoked_at, created_at DESC);
 `);
 
 /**
@@ -375,6 +437,19 @@ const articleTranslationColumns = Object.freeze([
 ]);
 for (const [columnName, columnDefinition] of articleTranslationColumns) {
   ensureTableColumn("articles", columnName, columnDefinition);
+}
+
+/** documentOcrColumns 是扫描件 OCR 状态和结果摘要字段。 */
+const documentOcrColumns = Object.freeze([
+  ["ocr_status", "TEXT NOT NULL DEFAULT 'not_required'"],
+  ["ocr_error", "TEXT NOT NULL DEFAULT ''"],
+  ["ocr_language", "TEXT NOT NULL DEFAULT ''"],
+  ["ocr_page_count", "INTEGER NOT NULL DEFAULT 0"],
+  ["ocr_average_confidence", "REAL NOT NULL DEFAULT 0"],
+  ["ocr_completed_at", "TEXT"],
+]);
+for (const [columnName, columnDefinition] of documentOcrColumns) {
+  ensureTableColumn("documents", columnName, columnDefinition);
 }
 
 /** contentFolderColumns 是目录关系用于保存内容在文件夹内顺序的扩展字段。 */
@@ -498,6 +573,12 @@ function mapDocumentRow(row) {
     summary: row.summary,
     extractedText: row.extracted_text,
     extractionStatus: row.extraction_status,
+    ocrStatus: row.ocr_status || "not_required",
+    ocrError: row.ocr_error || "",
+    ocrLanguage: row.ocr_language || "",
+    ocrPageCount: Number(row.ocr_page_count) || 0,
+    ocrAverageConfidence: Number(row.ocr_average_confidence) || 0,
+    ocrCompletedAt: row.ocr_completed_at,
     isFavorite: Boolean(row.is_favorite),
     folderId: row.folder_id || null,
     folderSortOrder: Number(row.folder_sort_order) || 0,
@@ -542,6 +623,409 @@ function mapArticleRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * 安全解析数据库中的 JSON 对象；旧数据或异常值回退为空对象。
+ *
+ * @param {unknown} value SQLite 中保存的 JSON 文本。
+ * @returns {Record<string, unknown>} 可安全读取的普通对象。
+ */
+function parseStoredObject(value) {
+  try {
+    /** parsedValue 是 JSON 文本解析后的候选值。 */
+    const parsedValue = JSON.parse(String(value || "{}"));
+    return parsedValue && typeof parsedValue === "object" && !Array.isArray(parsedValue)
+      ? parsedValue
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 将后台导入任务行转换为 API 使用的驼峰对象。
+ *
+ * @param {Record<string, unknown>} row SQLite 导入任务行。
+ * @returns {Record<string, unknown> | null} 后台导入任务。
+ */
+function mapImportJobRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    jobType: row.job_type,
+    sourceLabel: row.source_label,
+    sourceUrl: row.source_url,
+    status: row.status,
+    stage: row.stage,
+    progressPercent: Number(row.progress_percent) || 0,
+    payload: parseStoredObject(row.payload_json),
+    result: parseStoredObject(row.result_json),
+    targetType: row.target_type || null,
+    targetId: row.target_id || null,
+    errorMessage: row.error_message || "",
+    attemptCount: Number(row.attempt_count) || 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+  };
+}
+
+/**
+ * 将浏览器客户端行转换为不包含令牌摘要的安全对象。
+ *
+ * @param {Record<string, unknown>} row SQLite 浏览器客户端行。
+ * @returns {Record<string, unknown> | null} 可展示的客户端信息。
+ */
+function mapBrowserClientRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    createdAt: row.created_at,
+    lastUsedAt: row.last_used_at,
+    revokedAt: row.revoked_at,
+    active: !row.revoked_at,
+  };
+}
+
+/**
+ * 创建一个可在服务重启后恢复的后台导入任务。
+ *
+ * @param {Record<string, unknown>} input 任务类型、来源和执行参数。
+ * @returns {Record<string, unknown>} 新建任务。
+ */
+export function createImportJob(input) {
+  /** jobType 是处理器注册时使用的稳定任务类型。 */
+  const jobType = String(input.jobType || "").trim().slice(0, 80);
+  if (!/^[a-z][a-z0-9_-]*$/i.test(jobType)) throw new TypeError("导入任务类型无效。");
+  /** now 是任务创建和首次更新时间。 */
+  const now = new Date().toISOString();
+  /** jobId 是仅在本机使用的任务 ID。 */
+  const jobId = `import_${crypto.randomUUID()}`;
+  database.prepare(`
+    INSERT INTO import_jobs(
+      id, job_type, source_label, source_url, status, stage,
+      progress_percent, payload_json, result_json, error_message,
+      attempt_count, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'queued', 'queued', 0, ?, '{}', '', 0, ?, ?)
+  `).run(
+    jobId,
+    jobType,
+    String(input.sourceLabel || "").replace(/\s+/g, " ").trim().slice(0, 240),
+    String(input.sourceUrl || "").trim().slice(0, 4096),
+    JSON.stringify(input.payload && typeof input.payload === "object" ? input.payload : {}),
+    now,
+    now,
+  );
+  return getImportJob(jobId);
+}
+
+/**
+ * 按 ID 读取后台导入任务。
+ *
+ * @param {string} jobId 任务 ID。
+ * @returns {Record<string, unknown> | null} 任务或空值。
+ */
+export function getImportJob(jobId) {
+  return mapImportJobRow(
+    database.prepare("SELECT * FROM import_jobs WHERE id = ? LIMIT 1").get(String(jobId || "")),
+  );
+}
+
+/**
+ * 查询最近的后台导入任务。
+ *
+ * @param {{ status?: string, jobType?: string, limit?: number }} filters 查询条件。
+ * @returns {Array<Record<string, unknown>>} 按更新时间倒序的任务。
+ */
+export function listImportJobs(filters = {}) {
+  /** status 是可选的固定任务状态。 */
+  const status = ["queued", "running", "completed", "failed"].includes(filters.status)
+    ? filters.status
+    : "";
+  /** jobType 是可选任务类型。 */
+  const jobType = String(filters.jobType || "").trim().slice(0, 80);
+  /** limit 避免任务历史响应无限增长。 */
+  const limit = Math.min(Math.max(Number(filters.limit) || 30, 1), 200);
+  return database.prepare(`
+    SELECT * FROM import_jobs
+    WHERE (? = '' OR status = ?) AND (? = '' OR job_type = ?)
+    ORDER BY updated_at DESC LIMIT ?
+  `).all(status, status, jobType, jobType, limit).map(mapImportJobRow);
+}
+
+/**
+ * 原子领取一个当前进程能够处理的排队任务。
+ *
+ * @param {Array<string>} jobTypes 已注册处理器的任务类型。
+ * @returns {Record<string, unknown> | null} 已切换为运行状态的任务。
+ */
+export function claimNextImportJob(jobTypes) {
+  /** normalizedTypes 是去重后的可信任务类型列表。 */
+  const normalizedTypes = [...new Set(
+    (Array.isArray(jobTypes) ? jobTypes : [])
+      .map((value) => String(value || "").trim())
+      .filter((value) => /^[a-z][a-z0-9_-]*$/i.test(value)),
+  )];
+  if (normalizedTypes.length === 0) return null;
+  /** placeholders 只包含与类型数量相同的 SQL 参数占位符。 */
+  const placeholders = normalizedTypes.map(() => "?").join(", ");
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    /** candidate 是最早进入队列且拥有处理器的任务。 */
+    const candidate = database.prepare(`
+      SELECT id FROM import_jobs
+      WHERE status = 'queued' AND job_type IN (${placeholders})
+      ORDER BY created_at ASC LIMIT 1
+    `).get(...normalizedTypes);
+    if (!candidate) {
+      database.exec("COMMIT;");
+      return null;
+    }
+    /** now 是本次执行开始时间。 */
+    const now = new Date().toISOString();
+    database.prepare(`
+      UPDATE import_jobs SET
+        status = 'running', stage = 'starting', progress_percent = MAX(progress_percent, 1),
+        error_message = '', attempt_count = attempt_count + 1,
+        started_at = ?, completed_at = NULL, updated_at = ?
+      WHERE id = ? AND status = 'queued'
+    `).run(now, now, candidate.id);
+    database.exec("COMMIT;");
+    return getImportJob(candidate.id);
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
+}
+
+/**
+ * 更新运行任务的阶段和进度。
+ *
+ * @param {string} jobId 任务 ID。
+ * @param {{ stage?: string, progressPercent?: number }} changes 进度变化。
+ * @returns {Record<string, unknown> | null} 更新后的任务。
+ */
+export function updateImportJobProgress(jobId, changes = {}) {
+  /** stage 是展示给用户的稳定阶段名称。 */
+  const stage = String(changes.stage || "running").trim().slice(0, 80) || "running";
+  /** progressPercent 被限制在未完成区间，完成时由专用函数写入100。 */
+  const progressPercent = Math.min(
+    Math.max(Number(changes.progressPercent) || 0, 0),
+    99,
+  );
+  database.prepare(`
+    UPDATE import_jobs SET stage = ?, progress_percent = ?, updated_at = ?
+    WHERE id = ? AND status = 'running'
+  `).run(stage, progressPercent, new Date().toISOString(), String(jobId || ""));
+  return getImportJob(jobId);
+}
+
+/**
+ * 将后台导入任务标记为成功，并保存目标内容与轻量结果。
+ *
+ * @param {string} jobId 任务 ID。
+ * @param {Record<string, unknown>} result 处理器返回结果。
+ * @returns {Record<string, unknown> | null} 完成后的任务。
+ */
+export function completeImportJob(jobId, result = {}) {
+  /** now 是任务完成时间。 */
+  const now = new Date().toISOString();
+  database.prepare(`
+    UPDATE import_jobs SET
+      status = 'completed', stage = 'completed', progress_percent = 100,
+      result_json = ?, target_type = ?, target_id = ?, error_message = '',
+      completed_at = ?, updated_at = ?
+    WHERE id = ?
+  `).run(
+    JSON.stringify(result && typeof result === "object" ? result : {}),
+    result.targetType ? String(result.targetType).slice(0, 40) : null,
+    result.targetId ? String(result.targetId).slice(0, 180) : null,
+    now,
+    now,
+    String(jobId || ""),
+  );
+  return getImportJob(jobId);
+}
+
+/**
+ * 将后台导入任务标记为失败并保留可操作错误信息。
+ *
+ * @param {string} jobId 任务 ID。
+ * @param {unknown} error 错误对象或消息。
+ * @returns {Record<string, unknown> | null} 失败后的任务。
+ */
+export function failImportJob(jobId, error) {
+  /** now 是本次失败完成时间。 */
+  const now = new Date().toISOString();
+  /** message 是限制长度后的本地错误说明。 */
+  const message = String(error instanceof Error ? error.message : error || "导入失败。")
+    .trim()
+    .slice(0, 2000);
+  /** stage 区分普通失败与必须由用户确认的无字幕视频。 */
+  const stage = error && typeof error === "object"
+    && error.code === "IMPORT_CONFIRMATION_REQUIRED"
+    ? "awaiting_confirmation"
+    : "failed";
+  database.prepare(`
+    UPDATE import_jobs SET
+      status = 'failed', stage = ?, error_message = ?, completed_at = ?, updated_at = ?
+    WHERE id = ?
+  `).run(stage, message || "导入失败。", now, now, String(jobId || ""));
+  return getImportJob(jobId);
+}
+
+/**
+ * 服务异常退出后把运行中任务放回队列。
+ *
+ * @returns {number} 恢复的任务数量。
+ */
+export function resetInterruptedImportJobs() {
+  /** now 是恢复任务的更新时间。 */
+  const now = new Date().toISOString();
+  const result = database.prepare(`
+    UPDATE import_jobs SET
+      status = 'queued', stage = 'queued', progress_percent = 0,
+      error_message = '', started_at = NULL, completed_at = NULL, updated_at = ?
+    WHERE status = 'running'
+  `).run(now);
+  return Number(result.changes) || 0;
+}
+
+/**
+ * 用户重试失败任务时将其重新放回队列。
+ *
+ * @param {string} jobId 任务 ID。
+ * @returns {Record<string, unknown> | null} 重新排队后的任务。
+ */
+export function retryImportJob(jobId) {
+  /** now 是重新排队时间。 */
+  const now = new Date().toISOString();
+  const result = database.prepare(`
+    UPDATE import_jobs SET
+      status = 'queued', stage = 'queued', progress_percent = 0,
+      error_message = '', started_at = NULL, completed_at = NULL, updated_at = ?
+    WHERE id = ? AND status = 'failed'
+  `).run(now, String(jobId || ""));
+  return Number(result.changes) > 0 ? getImportJob(jobId) : null;
+}
+
+/**
+ * 用户确认无字幕视频仅保存链接后，写入确认动作并重新排队。
+ *
+ * @param {string} jobId 视频导入任务 ID。
+ * @param {"save_link"} action 用户明确选择的动作。
+ * @returns {Record<string, unknown> | null} 重新排队的任务。
+ */
+export function confirmVideoImportJob(jobId, action) {
+  if (action !== "save_link") throw new TypeError("不支持的视频确认动作。");
+  /** existingJob 必须是正在等待确认的视频字幕任务。 */
+  const existingJob = getImportJob(jobId);
+  if (
+    !existingJob
+    || existingJob.jobType !== "video_transcript"
+    || existingJob.status !== "failed"
+    || existingJob.stage !== "awaiting_confirmation"
+  ) {
+    return null;
+  }
+  const nextPayload = {
+    ...existingJob.payload,
+    confirmationAction: action,
+  };
+  const now = new Date().toISOString();
+  database.prepare(`
+    UPDATE import_jobs SET
+      status = 'queued', stage = 'queued', progress_percent = 0,
+      payload_json = ?, error_message = '', started_at = NULL,
+      completed_at = NULL, updated_at = ?
+    WHERE id = ? AND status = 'failed' AND stage = 'awaiting_confirmation'
+  `).run(JSON.stringify(nextPayload), now, String(jobId || ""));
+  return getImportJob(jobId);
+}
+
+/**
+ * 保存一个已经完成配对的浏览器客户端。
+ *
+ * @param {{ name?: string, tokenHash: string }} input 客户端名称和令牌摘要。
+ * @returns {Record<string, unknown>} 新客户端。
+ */
+export function registerBrowserClient(input) {
+  /** tokenHash 只保存不可逆 SHA-256 摘要。 */
+  const tokenHash = String(input.tokenHash || "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(tokenHash)) throw new TypeError("浏览器令牌摘要无效。");
+  /** browserClientId 是客户端本地标识。 */
+  const browserClientId = `browser_${crypto.randomUUID()}`;
+  /** now 是配对完成时间。 */
+  const now = new Date().toISOString();
+  database.prepare(`
+    INSERT INTO browser_clients(id, name, token_hash, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run(
+    browserClientId,
+    String(input.name || "浏览器扩展").replace(/\s+/g, " ").trim().slice(0, 100) || "浏览器扩展",
+    tokenHash,
+    now,
+  );
+  return mapBrowserClientRow(
+    database.prepare("SELECT * FROM browser_clients WHERE id = ?").get(browserClientId),
+  );
+}
+
+/**
+ * 使用令牌摘要验证仍有效的浏览器客户端。
+ *
+ * @param {string} tokenHash SHA-256 令牌摘要。
+ * @returns {Record<string, unknown> | null} 客户端或空值。
+ */
+export function findBrowserClientByTokenHash(tokenHash) {
+  const row = database.prepare(`
+    SELECT * FROM browser_clients
+    WHERE token_hash = ? AND revoked_at IS NULL LIMIT 1
+  `).get(String(tokenHash || "").trim().toLowerCase());
+  return mapBrowserClientRow(row);
+}
+
+/**
+ * 记录浏览器客户端最近一次成功调用。
+ *
+ * @param {string} clientId 客户端 ID。
+ * @returns {void}
+ */
+export function touchBrowserClient(clientId) {
+  database.prepare(`
+    UPDATE browser_clients SET last_used_at = ?
+    WHERE id = ? AND revoked_at IS NULL
+  `).run(new Date().toISOString(), String(clientId || ""));
+}
+
+/**
+ * 查询全部浏览器客户端，不返回令牌摘要。
+ *
+ * @returns {Array<Record<string, unknown>>} 最近配对的客户端。
+ */
+export function listBrowserClients() {
+  return database.prepare(`
+    SELECT * FROM browser_clients ORDER BY created_at DESC
+  `).all().map(mapBrowserClientRow);
+}
+
+/**
+ * 撤销浏览器客户端访问权限。
+ *
+ * @param {string} clientId 客户端 ID。
+ * @returns {Record<string, unknown> | null} 撤销后的客户端。
+ */
+export function revokeBrowserClient(clientId) {
+  database.prepare(`
+    UPDATE browser_clients SET revoked_at = ?
+    WHERE id = ? AND revoked_at IS NULL
+  `).run(new Date().toISOString(), String(clientId || ""));
+  return mapBrowserClientRow(
+    database.prepare("SELECT * FROM browser_clients WHERE id = ? LIMIT 1").get(String(clientId || "")),
+  );
 }
 
 /**
@@ -1048,6 +1532,169 @@ export function getDocumentById(documentId) {
     `)
     .get(documentId);
   return row ? mapDocumentRow(row) : null;
+}
+
+/**
+ * 将支持的图片或扫描 PDF 标记为等待 OCR。
+ *
+ * @param {string} documentId 文档 ID。
+ * @returns {Record<string, unknown> | null} 更新后的文档。
+ */
+export function queueDocumentOcr(documentId) {
+  const result = database.prepare(`
+    UPDATE documents SET
+      ocr_status = 'queued', ocr_error = '', ocr_completed_at = NULL, updated_at = ?
+    WHERE id = ?
+  `).run(new Date().toISOString(), String(documentId || ""));
+  return Number(result.changes) > 0 ? getDocumentById(documentId) : null;
+}
+
+/**
+ * 后台处理器领取任务后把文档 OCR 状态切换为运行中。
+ *
+ * @param {string} documentId 文档 ID。
+ * @returns {Record<string, unknown> | null} 更新后的文档。
+ */
+export function startDocumentOcr(documentId) {
+  const result = database.prepare(`
+    UPDATE documents SET ocr_status = 'running', ocr_error = '', updated_at = ?
+    WHERE id = ?
+  `).run(new Date().toISOString(), String(documentId || ""));
+  return Number(result.changes) > 0 ? getDocumentById(documentId) : null;
+}
+
+/**
+ * 保存分页 OCR 结果，更新文档正文、摘要与全文索引。
+ *
+ * @param {string} documentId 文档 ID。
+ * @param {{ pages: Array<Record<string, unknown>>, language: string, averageConfidence: number, summary: string }} result OCR 结果。
+ * @returns {Record<string, unknown> | null} 完成后的文档。
+ */
+export function saveDocumentOcrResult(documentId, result) {
+  /** document 是写入前用于索引字段的原文档。 */
+  const document = getDocumentById(documentId);
+  if (!document) return null;
+  /** pages 是按页码排序且正文受限的 OCR 页面。 */
+  const pages = (Array.isArray(result.pages) ? result.pages : [])
+    .map((page, index) => ({
+      pageNumber: Math.max(1, Math.trunc(Number(page.pageNumber) || index + 1)),
+      text: String(page.text || "").trim(),
+      confidence: Math.min(Math.max(Number(page.confidence) || 0, 0), 100),
+      layout: Array.isArray(page.layout) ? page.layout : [],
+    }))
+    .filter((page) => page.text)
+    .sort((left, right) => left.pageNumber - right.pageNumber);
+  if (pages.length === 0) throw new Error("OCR 没有识别出可保存的文字。");
+  /** extractedText 以页标题分隔，便于阅读和引用页码。 */
+  const extractedText = pages
+    .map((page) => `第 ${page.pageNumber} 页\n${page.text}`)
+    .join("\n\n");
+  /** now 是分页结果和文档的统一更新时间。 */
+  const now = new Date().toISOString();
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    database.prepare("DELETE FROM document_pages WHERE document_id = ?").run(document.id);
+    /** insertPageStatement 是重复使用的分页结果写入语句。 */
+    const insertPageStatement = database.prepare(`
+      INSERT INTO document_pages(
+        document_id, page_number, extraction_method, text, confidence,
+        layout_json, created_at, updated_at
+      ) VALUES (?, ?, 'ocr', ?, ?, ?, ?, ?)
+    `);
+    for (const page of pages) {
+      insertPageStatement.run(
+        document.id,
+        page.pageNumber,
+        page.text,
+        page.confidence,
+        JSON.stringify(page.layout),
+        now,
+        now,
+      );
+    }
+    database.prepare(`
+      UPDATE documents SET
+        summary = ?, extracted_text = ?, extraction_status = 'complete:ocr',
+        ocr_status = 'completed', ocr_error = '', ocr_language = ?,
+        ocr_page_count = ?, ocr_average_confidence = ?, ocr_completed_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      String(result.summary || "").trim().slice(0, 500),
+      extractedText,
+      String(result.language || "").trim().slice(0, 80),
+      pages.length,
+      Math.min(Math.max(Number(result.averageConfidence) || 0, 0), 100),
+      now,
+      now,
+      document.id,
+    );
+    database.prepare("DELETE FROM document_search WHERE document_id = ?").run(document.id);
+    database.prepare(`
+      INSERT INTO document_search(
+        document_id, title, original_name, category, summary, extracted_text
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      document.id,
+      document.title,
+      document.originalName,
+      document.category,
+      String(result.summary || "").trim().slice(0, 500),
+      extractedText,
+    );
+    database.exec("COMMIT;");
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
+  return getDocumentById(document.id);
+}
+
+/**
+ * 保存 OCR 失败原因，让原始文件继续可下载并支持重试。
+ *
+ * @param {string} documentId 文档 ID。
+ * @param {unknown} error 错误对象或消息。
+ * @returns {Record<string, unknown> | null} 失败后的文档。
+ */
+export function failDocumentOcr(documentId, error) {
+  /** message 是展示给本地用户的受限错误信息。 */
+  const message = String(error instanceof Error ? error.message : error || "OCR 失败。")
+    .trim()
+    .slice(0, 2000);
+  database.prepare(`
+    UPDATE documents SET ocr_status = 'failed', ocr_error = ?, updated_at = ?
+    WHERE id = ?
+  `).run(message || "OCR 失败。", new Date().toISOString(), String(documentId || ""));
+  return getDocumentById(documentId);
+}
+
+/**
+ * 读取文档逐页 OCR 文本与版面坐标。
+ *
+ * @param {string} documentId 文档 ID。
+ * @returns {Array<Record<string, unknown>>} 按页码排序的结果。
+ */
+export function listDocumentPages(documentId) {
+  return database.prepare(`
+    SELECT * FROM document_pages WHERE document_id = ? ORDER BY page_number ASC
+  `).all(String(documentId || "")).map((row) => {
+    let layout = [];
+    try {
+      layout = JSON.parse(row.layout_json || "[]");
+    } catch {
+      layout = [];
+    }
+    return {
+      documentId: row.document_id,
+      pageNumber: Number(row.page_number),
+      extractionMethod: row.extraction_method,
+      text: row.text,
+      confidence: Number(row.confidence) || 0,
+      layout,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  });
 }
 
 /**

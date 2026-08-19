@@ -104,6 +104,12 @@ const applicationState = {
   aiConversations: [],
   /** aiHistoryTimer 用于合并连续输入产生的历史搜索请求。 */
   aiHistoryTimer: null,
+  /** importJobs 是任务中心最近的浏览器收藏、OCR 和视频导入记录。 */
+  importJobs: [],
+  /** importJobPollTimer 在存在排队或运行任务时刷新状态。 */
+  importJobPollTimer: null,
+  /** documentOcrPollTimer 在阅读页等待 OCR 完成时刷新文档。 */
+  documentOcrPollTimer: null,
 };
 
 /** dom 集中保存页面中会重复访问的元素。 */
@@ -136,10 +142,18 @@ const dom = {
   dropZone: document.querySelector("#drop-zone"),
   uploadQueue: document.querySelector("#upload-queue"),
   backupButton: document.querySelector("#backup-button"),
+  browserPairingButton: document.querySelector("#browser-pairing-button"),
+  browserPairingCode: document.querySelector("#browser-pairing-code"),
+  browserClientList: document.querySelector("#browser-client-list"),
+  refreshImportJobs: document.querySelector("#refresh-import-jobs"),
+  importJobList: document.querySelector("#import-job-list"),
   articleImportForm: document.querySelector("#article-import-form"),
   articleUrlInput: document.querySelector("#article-url-input"),
   parseArticleButton: document.querySelector("#parse-article-button"),
   docsifyPreview: document.querySelector("#docsify-preview"),
+  videoImportForm: document.querySelector("#video-import-form"),
+  videoUrlInput: document.querySelector("#video-url-input"),
+  importVideoButton: document.querySelector("#import-video-button"),
   reader: document.querySelector("#reader"),
   readerBackButton: document.querySelector("#reader-back-button"),
   readerModeSwitch: document.querySelector("#reader-mode-switch"),
@@ -154,6 +168,8 @@ const dom = {
   readerFileName: document.querySelector("#reader-file-name"),
   readerFileSize: document.querySelector("#reader-file-size"),
   readerStatus: document.querySelector("#reader-status"),
+  readerOcrStatus: document.querySelector("#reader-ocr-status"),
+  documentOcrButton: document.querySelector("#document-ocr-button"),
   readerSource: document.querySelector("#reader-source"),
   downloadLink: document.querySelector("#download-link"),
   articleReader: document.querySelector("#article-reader"),
@@ -2235,7 +2251,240 @@ async function returnToPreviousPage(fallbackView = "library") {
   if ((previousLocation.viewName || fallbackView) === "papers") await loadPapers();
 }
 
+/** importJobStageLabels 是后台阶段到中文状态的映射。 */
+const importJobStageLabels = Object.freeze({
+  queued: "等待处理",
+  starting: "正在启动",
+  fetching: "正在抓取网页",
+  rendering: "正在渲染 PDF 页面",
+  recognizing: "正在识别文字",
+  saving: "正在保存正文",
+  indexing: "正在建立索引",
+  reading_metadata: "正在读取视频信息",
+  reading_captions: "正在读取公开字幕",
+  awaiting_confirmation: "没有公开字幕，等待确认",
+  completed: "已完成",
+  failed: "失败",
+});
+
+/**
+ * 渲染最近后台导入任务并提供打开结果或失败重试入口。
+ *
+ * @returns {void}
+ */
+function renderImportJobs() {
+  dom.importJobList.replaceChildren();
+  if (applicationState.importJobs.length === 0) {
+    dom.importJobList.append(
+      createTextElement("p", "import-job-empty", "还没有后台导入任务。"),
+    );
+    return;
+  }
+  for (const job of applicationState.importJobs) {
+    /** item 是单项后台任务状态。 */
+    const item = document.createElement("div");
+    item.className = `import-job-item is-${job.status}`;
+    /** copy 保存任务名称、阶段和错误信息。 */
+    const copy = document.createElement("div");
+    copy.append(
+      createTextElement("strong", "", job.sourceLabel || job.jobType),
+      createTextElement(
+        "small",
+        "",
+        `${importJobStageLabels[job.stage] || job.stage} · ${Math.round(job.progressPercent || 0)}%`,
+      ),
+    );
+    if (job.errorMessage) copy.append(createTextElement("p", "", job.errorMessage));
+    item.append(copy);
+    if (job.stage === "awaiting_confirmation") {
+      /** actions 提供重新检查字幕和明确仅保存链接两个选择。 */
+      const actions = document.createElement("div");
+      actions.className = "import-job-actions";
+      const retryButton = createTextElement("button", "text-button", "重新检查字幕");
+      retryButton.type = "button";
+      retryButton.addEventListener("click", async () => {
+        retryButton.disabled = true;
+        try {
+          await requestJson(`/api/import-jobs/${encodeURIComponent(job.id)}/retry`, {
+            method: "POST",
+          });
+          await loadImportJobs();
+        } catch (error) {
+          showToast(error.message);
+        } finally {
+          retryButton.disabled = false;
+        }
+      });
+      const saveLinkButton = createTextElement("button", "text-button", "仅保存链接");
+      saveLinkButton.type = "button";
+      saveLinkButton.addEventListener("click", async () => {
+        saveLinkButton.disabled = true;
+        try {
+          await requestJson(`/api/import-jobs/${encodeURIComponent(job.id)}/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "save_link" }),
+          });
+          showToast("已确认仅保存链接，不会下载视频或音频。");
+          await loadImportJobs();
+        } catch (error) {
+          showToast(error.message);
+        } finally {
+          saveLinkButton.disabled = false;
+        }
+      });
+      actions.append(retryButton, saveLinkButton);
+      item.append(actions);
+    } else if (job.status === "failed") {
+      /** retryButton 把失败任务重新放回统一队列。 */
+      const retryButton = createTextElement("button", "text-button", "重试");
+      retryButton.type = "button";
+      retryButton.addEventListener("click", async () => {
+        retryButton.disabled = true;
+        try {
+          await requestJson(`/api/import-jobs/${encodeURIComponent(job.id)}/retry`, {
+            method: "POST",
+          });
+          await loadImportJobs();
+        } catch (error) {
+          showToast(error.message);
+        } finally {
+          retryButton.disabled = false;
+        }
+      });
+      item.append(retryButton);
+    } else if (job.status === "completed" && job.targetType === "article" && job.targetId) {
+      /** openButton 直接打开浏览器收藏完成后的文章。 */
+      const openButton = createTextElement("button", "text-button", "打开");
+      openButton.type = "button";
+      openButton.addEventListener("click", () => void openArticle(job.targetId));
+      item.append(openButton);
+    }
+    dom.importJobList.append(item);
+  }
+}
+
+/**
+ * 读取任务中心并在有活动任务时自动轮询。
+ *
+ * @returns {Promise<void>}
+ */
+async function loadImportJobs() {
+  window.clearTimeout(applicationState.importJobPollTimer);
+  /** payload 是最近任务和执行器状态。 */
+  const payload = await requestJson("/api/import-jobs?limit=20");
+  applicationState.importJobs = payload.jobs || [];
+  renderImportJobs();
+  const hasActiveJobs = applicationState.importJobs.some(
+    (job) => job.status === "queued" || job.status === "running",
+  );
+  if (hasActiveJobs && applicationState.activeView === "storage") {
+    applicationState.importJobPollTimer = window.setTimeout(
+      () => void loadImportJobs().catch((error) => showToast(error.message)),
+      2000,
+    );
+  }
+}
+
+/**
+ * 渲染已经配对或撤销的浏览器扩展客户端。
+ *
+ * @param {Array<Record<string, unknown>>} clients 浏览器客户端。
+ * @returns {void}
+ */
+function renderBrowserClients(clients) {
+  dom.browserClientList.replaceChildren();
+  if (clients.length === 0) {
+    dom.browserClientList.append(
+      createTextElement("small", "browser-client-empty", "尚未配对浏览器扩展。"),
+    );
+    return;
+  }
+  for (const client of clients) {
+    /** item 是单个浏览器客户端及撤销操作。 */
+    const item = document.createElement("div");
+    item.className = `browser-client-item ${client.active ? "is-active" : "is-revoked"}`;
+    /** label 显示名称和最近使用状态。 */
+    const label = document.createElement("div");
+    label.append(
+      createTextElement("strong", "", client.name),
+      createTextElement(
+        "small",
+        "",
+        client.active
+          ? client.lastUsedAt ? `最近使用：${formatDate(client.lastUsedAt)}` : "已配对，尚未使用"
+          : "权限已撤销",
+      ),
+    );
+    item.append(label);
+    if (client.active) {
+      /** revokeButton 使泄露或停用的扩展令牌立即失效。 */
+      const revokeButton = createTextElement("button", "text-button", "撤销");
+      revokeButton.type = "button";
+      revokeButton.addEventListener("click", async () => {
+        revokeButton.disabled = true;
+        try {
+          await requestJson(`/api/browser/clients/${encodeURIComponent(client.id)}`, {
+            method: "DELETE",
+          });
+          await loadBrowserClients();
+          showToast("已撤销这个浏览器扩展的权限。");
+        } catch (error) {
+          showToast(error.message);
+        } finally {
+          revokeButton.disabled = false;
+        }
+      });
+      item.append(revokeButton);
+    }
+    dom.browserClientList.append(item);
+  }
+}
+
+/**
+ * 读取本机已配对浏览器客户端。
+ *
+ * @returns {Promise<void>}
+ */
+async function loadBrowserClients() {
+  /** payload 包含全部有效和已撤销客户端。 */
+  const payload = await requestJson("/api/browser/clients");
+  renderBrowserClients(payload.clients || []);
+}
+
+/**
+ * 创建并显示十分钟内有效的一次性浏览器扩展配对码。
+ *
+ * @returns {Promise<void>}
+ */
+async function generateBrowserPairingCode() {
+  dom.browserPairingButton.disabled = true;
+  try {
+    /** payload 是本机服务生成的一次性配对码。 */
+    const payload = await requestJson("/api/browser/pairing/start", { method: "POST" });
+    dom.browserPairingCode.querySelector("strong").textContent = payload.code;
+    dom.browserPairingCode.hidden = false;
+    showToast("配对码已生成，请在十分钟内输入浏览器扩展。");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    dom.browserPairingButton.disabled = false;
+  }
+}
+
+/**
+ * 加载“本地数据”页面的浏览器客户端与后台任务状态。
+ *
+ * @returns {Promise<void>}
+ */
+async function loadStorageOperations() {
+  await Promise.all([loadBrowserClients(), loadImportJobs()]);
+}
+
 function showView(viewName) {
+  if (viewName !== "storage") {
+    window.clearTimeout(applicationState.importJobPollTimer);
+  }
   closeReadingWorkspace();
   applicationState.activeView = viewName;
   applicationState.selectedDocument = null;
@@ -2272,6 +2521,9 @@ function showView(viewName) {
   if (viewName === "ai") {
     applicationState.aiMode = "compare";
     void Promise.all([loadAiSources(), loadAiConversations()]).catch((error) => showToast(error.message));
+  }
+  if (viewName === "storage") {
+    void loadStorageOperations().catch((error) => showToast(error.message));
   }
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -2685,6 +2937,40 @@ async function parseArticleUrl() {
   } finally {
     dom.parseArticleButton.disabled = false;
     dom.parseArticleButton.textContent = "解析并保存";
+  }
+}
+
+/**
+ * 将公开视频链接加入字幕优先后台导入任务。
+ *
+ * @returns {Promise<void>}
+ */
+async function importVideoUrl() {
+  const inputUrl = dom.videoUrlInput.value.trim();
+  if (!inputUrl) {
+    showToast("请先输入视频链接。");
+    return;
+  }
+  dom.importVideoButton.disabled = true;
+  dom.importVideoButton.textContent = "正在加入任务…";
+  try {
+    const payload = await requestJson("/api/videos/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: inputUrl,
+        preferredLanguages: ["zh-Hans", "zh-CN", "zh-Hant", "zh", "en"],
+      }),
+    });
+    dom.videoUrlInput.value = "";
+    showView("storage");
+    await loadStorageOperations();
+    showToast(payload.duplicate ? "相同视频已经在导入队列中。" : "视频已加入字幕导入任务。");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    dom.importVideoButton.disabled = false;
+    dom.importVideoButton.textContent = "读取字幕并导入";
   }
 }
 
@@ -3413,6 +3699,8 @@ function renderDocumentGrid() {
         documentItem.targetType === "article"
           ? documentItem.sourceType === "wechat"
             ? "微信公众号"
+            : documentItem.sourceType === "video"
+              ? "视频字幕"
             : "网页文章"
           : documentItem.targetType === "paper"
             ? "论文"
@@ -4282,6 +4570,99 @@ async function dismissWeeklyPaperReminder() {
   }
 }
 
+/** ocrSupportedExtensions 是阅读页允许手工重新识别的文件类型。 */
+const ocrSupportedExtensions = new Set([
+  ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff",
+]);
+
+/**
+ * 更新文档阅读页的 OCR 状态、置信度和操作按钮。
+ *
+ * @param {Record<string, unknown>} documentItem 当前文档。
+ * @returns {void}
+ */
+function renderDocumentOcrState(documentItem) {
+  /** status 是旧文档缺少字段时使用的兼容状态。 */
+  const status = documentItem.ocrStatus || "not_required";
+  const labels = {
+    not_required: "不需要",
+    queued: "等待后台识别",
+    running: "正在识别",
+    completed: `已完成 · ${documentItem.ocrPageCount || 0} 页 · 置信度 ${Math.round(documentItem.ocrAverageConfidence || 0)}%`,
+    failed: `失败：${documentItem.ocrError || "未知原因"}`,
+  };
+  dom.readerOcrStatus.textContent = labels[status] || status;
+  /** supported 表示可以主动开始或重新执行 OCR。 */
+  const supported = ocrSupportedExtensions.has(String(documentItem.extension || "").toLowerCase());
+  dom.documentOcrButton.hidden = !supported || status === "queued" || status === "running";
+  dom.documentOcrButton.textContent = status === "completed" ? "重新执行 OCR" : "执行 OCR";
+}
+
+/**
+ * 在当前文档等待 OCR 时刷新状态，完成后替换清爽阅读正文。
+ *
+ * @param {string} documentId 文档 ID。
+ * @returns {Promise<void>}
+ */
+async function pollDocumentOcr(documentId) {
+  window.clearTimeout(applicationState.documentOcrPollTimer);
+  if (applicationState.selectedDocument?.id !== documentId) return;
+  /** payload 是当前文档最新详情。 */
+  const payload = await requestJson(`/api/documents/${encodeURIComponent(documentId)}`);
+  /** documentItem 是带 OCR 状态和正文的新记录。 */
+  const documentItem = payload.document;
+  if (applicationState.selectedDocument?.id !== documentId) return;
+  applicationState.selectedDocument = documentItem;
+  renderDocumentOcrState(documentItem);
+  dom.readerStatus.textContent = documentItem.extractionStatus;
+  if (documentItem.ocrStatus === "completed") {
+    dom.readerSummary.textContent = documentItem.summary;
+    dom.readerContent.replaceChildren(createReadableDocument(documentItem.extractedText || ""));
+    applicationState.activeReadingSurface = dom.readerContent;
+    buildReadingTableOfContents(dom.readerContent);
+    applyReadingHighlights();
+    showToast("OCR 已完成，清爽阅读正文和全文索引已更新。");
+    await loadLibrary();
+    return;
+  }
+  if (documentItem.ocrStatus === "failed") return;
+  applicationState.documentOcrPollTimer = window.setTimeout(
+    () => void pollDocumentOcr(documentId).catch((error) => showToast(error.message)),
+    2000,
+  );
+}
+
+/**
+ * 将当前图片或 PDF 加入 OCR 后台任务。
+ *
+ * @returns {Promise<void>}
+ */
+async function requestCurrentDocumentOcr() {
+  /** documentItem 是阅读页当前文档。 */
+  const documentItem = applicationState.selectedDocument;
+  if (!documentItem) return;
+  dom.documentOcrButton.disabled = true;
+  try {
+    /** payload 是新建或复用的 OCR 任务。 */
+    const payload = await requestJson(
+      `/api/documents/${encodeURIComponent(documentItem.id)}/ocr`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    applicationState.selectedDocument = payload.document;
+    renderDocumentOcrState(payload.document);
+    showToast("已加入 OCR 后台任务。");
+    void pollDocumentOcr(documentItem.id).catch((error) => showToast(error.message));
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    dom.documentOcrButton.disabled = false;
+  }
+}
+
 /**
  * 打开一份文档的提取正文和元数据。
  *
@@ -4291,6 +4672,7 @@ async function dismissWeeklyPaperReminder() {
  */
 async function openDocument(documentId, options = {}) {
   try {
+    window.clearTimeout(applicationState.documentOcrPollTimer);
     closeReadingWorkspace();
     /** payload 是文档详情响应。 */
     const payload = await requestJson(`/api/documents/${encodeURIComponent(documentId)}`);
@@ -4322,6 +4704,7 @@ async function openDocument(documentId, options = {}) {
     dom.readerFileName.textContent = documentItem.originalName;
     dom.readerFileSize.textContent = formatFileSize(documentItem.sizeBytes);
     dom.readerStatus.textContent = documentItem.extractionStatus;
+    renderDocumentOcrState(documentItem);
     dom.readerSource.textContent =
       documentItem.categorySource === "deepseek"
         ? "DeepSeek 辅助分类"
@@ -4341,6 +4724,9 @@ async function openDocument(documentId, options = {}) {
     dom.readerCategory.value = documentItem.category;
     window.scrollTo({ top: 0, behavior: "smooth" });
     await initializeReadingWorkspace("document", documentItem.id, dom.readerContent);
+    if (documentItem.ocrStatus === "queued" || documentItem.ocrStatus === "running") {
+      void pollDocumentOcr(documentItem.id).catch((error) => showToast(error.message));
+    }
   } catch (error) {
     showToast(error.message);
   }
@@ -4390,7 +4776,9 @@ async function uploadFile(file) {
       body: file,
     });
     queueItem.classList.add("is-complete");
-    statusElement.textContent = `已保存 · ${payload.document.category}`;
+    statusElement.textContent = payload.importJob
+      ? `已保存 · OCR 后台处理中 · ${payload.document.category}`
+      : `已保存 · ${payload.document.category}`;
     showToast(`《${payload.document.title}》已归入“${payload.document.category}”。`);
   } catch (error) {
     queueItem.classList.add("is-error");
@@ -4616,6 +5004,9 @@ async function initializeApplication() {
   dom.documentAiButton.addEventListener("click", () => {
     if (applicationState.selectedDocument) void openAiWithSource("document", applicationState.selectedDocument.id);
   });
+  dom.documentOcrButton.addEventListener("click", () => {
+    void requestCurrentDocumentOcr();
+  });
   dom.articleAiButton.addEventListener("click", () => {
     if (applicationState.selectedArticle) void openAiWithSource("article", applicationState.selectedArticle.id);
   });
@@ -4741,9 +5132,19 @@ async function initializeApplication() {
       showToast(error.message);
     }
   });
+  dom.browserPairingButton.addEventListener("click", () => {
+    void generateBrowserPairingCode();
+  });
+  dom.refreshImportJobs.addEventListener("click", () => {
+    void loadStorageOperations().catch((error) => showToast(error.message));
+  });
   dom.articleImportForm.addEventListener("submit", (event) => {
     event.preventDefault();
     void parseArticleUrl();
+  });
+  dom.videoImportForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void importVideoUrl();
   });
   dom.articleReaderBackButton.addEventListener("click", () => void returnToPreviousPage("library"));
   dom.articleTranslationRequest.addEventListener("click", () => {

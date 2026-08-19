@@ -1516,6 +1516,23 @@ body.has-reading-toc .floating-reader-back {
 .storage-grid h3 { margin: 40px 0 14px; font-family: var(--serif); font-size: 26px; }
 .storage-grid p { color: var(--ink-soft); line-height: 1.8; }
 .storage-grid button { margin-top: 18px; }
+.browser-integration-card, .import-job-card { min-height: 340px !important; }
+.browser-pairing-code { margin-top: 18px; border: 1px solid var(--line-dark); padding: 14px; background: var(--paper-raised); }
+.browser-pairing-code strong { display: block; color: var(--blue); font-family: var(--mono); font-size: 30px; letter-spacing: 0.18em; }
+.browser-pairing-code small { display: block; margin-top: 7px; color: var(--ink-soft); line-height: 1.5; }
+.browser-client-list, .import-job-list { display: grid; gap: 9px; margin-top: 18px; }
+.browser-client-item, .import-job-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line-dark); padding-top: 10px; }
+.browser-client-item > div, .import-job-item > div { min-width: 0; }
+.browser-client-item strong, .import-job-item strong { display: block; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.browser-client-item small, .import-job-item small { display: block; margin-top: 4px; color: var(--ink-soft); font-size: 10px; }
+.browser-client-item button, .import-job-item button { flex: 0 0 auto; margin: 0; padding: 4px 0; }
+.browser-client-item.is-revoked { opacity: 0.55; }
+.import-job-actions { display: grid; flex: 0 0 auto; gap: 6px; justify-items: end; }
+.import-job-item.is-failed .import-job-actions .text-button:last-child { color: var(--cyan-strong); }
+.import-job-item p { margin: 6px 0 0; color: #b42318; font-size: 10px; line-height: 1.5; }
+.import-job-item.is-running strong, .import-job-item.is-queued strong { color: var(--blue); }
+.import-job-item.is-failed strong { color: #b42318; }
+.browser-client-empty, .import-job-empty { color: var(--ink-soft); font-size: 11px; line-height: 1.6; }
 
 /* 文档详情阅读页。 */
 .reader { min-height: calc(100vh - 112px); background: var(--paper); }

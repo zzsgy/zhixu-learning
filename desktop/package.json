@@ -12,6 +12,9 @@
     "test:ui": "node --disable-warning=ExperimentalWarning --test tests/server-integration.test.mjs tests/article-translation.test.mjs",
     "test:import": "node --disable-warning=ExperimentalWarning --test tests/article-parser.test.mjs tests/docsify-importer.test.mjs tests/mli-paper-service.test.mjs tests/paper-library.test.mjs",
     "test:database": "node --disable-warning=ExperimentalWarning --test tests/ai-history.test.mjs tests/paper-library.test.mjs tests/server-integration.test.mjs",
+    "test:browser": "node --disable-warning=ExperimentalWarning --test tests/browser-capture.test.mjs tests/import-jobs.test.mjs",
+    "test:ocr": "node --disable-warning=ExperimentalWarning --test tests/ocr-service.test.mjs tests/import-jobs.test.mjs",
+    "test:video": "node --disable-warning=ExperimentalWarning --test tests/video-importer.test.mjs tests/video-import-api.test.mjs tests/import-jobs.test.mjs",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.mjs"
   },
   "dependencies": {

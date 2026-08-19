@@ -321,7 +321,7 @@
                 全文索引。DeepSeek 已配置时会辅助判断主题；不可用时仍可使用本地规则分类。
               </p>
               <ul>
-                <li>支持 PDF、DOCX、XLSX、PPTX</li>
+                <li>支持 PDF、DOCX、XLSX、PPTX 和扫描图片</li>
                 <li>支持 TXT、Markdown、HTML、JSON、CSV 和代码文件</li>
                 <li>单个文件最大 <strong id="upload-limit-label">200 MB</strong></li>
               </ul>
@@ -375,6 +375,28 @@
               <div class="docsify-preview" id="docsify-preview" hidden></div>
             </form>
           </div>
+          <div class="article-import-layout video-import-layout">
+            <div class="article-import-copy">
+              <p class="eyebrow">VIDEO INBOX</p>
+              <h2>粘贴视频链接，优先把公开字幕变成可检索正文。</h2>
+              <p>
+                支持 YouTube 和哔哩哔哩公开视频。知序只读取元数据与公开字幕；
+                没有字幕时会停下来询问，不会默认下载视频或音频。
+              </p>
+            </div>
+            <form class="article-import-form" id="video-import-form">
+              <label for="video-url-input">公开视频链接</label>
+              <textarea
+                id="video-url-input"
+                placeholder="https://www.youtube.com/watch?v=... 或 https://www.bilibili.com/video/BV..."
+                rows="4"
+              ></textarea>
+              <button class="primary-button" id="import-video-button" type="submit">
+                读取字幕并导入
+              </button>
+              <small>字幕正文保留时间戳，可从阅读页跳回原视频对应位置。无字幕时可在后台任务中选择“仅保存链接”。</small>
+            </form>
+          </div>
         </section>
 
         <section class="view" id="storage-view">
@@ -404,6 +426,28 @@
               <button class="secondary-button" id="backup-button" type="button">
                 立即确认备份
               </button>
+            </article>
+            <article class="browser-integration-card">
+              <span>04</span>
+              <h3>浏览器快速收藏</h3>
+              <p>安装本地 Chrome/Edge 扩展后，可收藏当前网页、链接或选中文字。</p>
+              <button class="secondary-button" id="browser-pairing-button" type="button">
+                生成配对码
+              </button>
+              <div class="browser-pairing-code" id="browser-pairing-code" hidden>
+                <strong>000000</strong>
+                <small>十分钟内在扩展中输入，仅可使用一次。</small>
+              </div>
+              <div class="browser-client-list" id="browser-client-list"></div>
+            </article>
+            <article class="import-job-card">
+              <span>05</span>
+              <h3>后台导入任务</h3>
+              <p>浏览器收藏、OCR 和视频字幕将共用此任务中心；失败任务可在这里重试。</p>
+              <button class="secondary-button" id="refresh-import-jobs" type="button">
+                刷新任务状态
+              </button>
+              <div class="import-job-list" id="import-job-list"></div>
             </article>
           </div>
         </section>
@@ -457,8 +501,12 @@
                 <div><dt>原始文件</dt><dd id="reader-file-name"></dd></div>
                 <div><dt>文件大小</dt><dd id="reader-file-size"></dd></div>
                 <div><dt>提取状态</dt><dd id="reader-status"></dd></div>
+                <div><dt>OCR 状态</dt><dd id="reader-ocr-status">不需要</dd></div>
                 <div><dt>分类方式</dt><dd id="reader-source"></dd></div>
               </dl>
+              <button class="secondary-button" id="document-ocr-button" type="button" hidden>
+                执行 OCR
+              </button>
             </aside>
           </div>
         </section>

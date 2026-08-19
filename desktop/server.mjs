@@ -21,21 +21,25 @@ import {
   assignContentToFolder,
   backfillArticleLanguages,
   createFolder,
+  createImportJob,
   createReadingAnnotation,
   createDailyBackup,
   createKnowledgeCard,
   createTopic,
   clearPaperLibrary,
+  confirmVideoImportJob,
   deleteEmptyFolder,
   deleteKnowledgeCard,
   deleteKnowledgeTarget,
   deleteReadingAnnotation,
   dismissPaperReminder,
+  failDocumentOcr,
   getArticleById,
   getAiConversation,
   getDocumentById,
   getDocumentStatistics,
   getPaperById,
+  getImportJob,
   getReadingWorkspace,
   getContentOrganization,
   insertDocument,
@@ -43,7 +47,9 @@ import {
   listArticles,
   listAiConversations,
   listDocuments,
+  listDocumentPages,
   listFolders,
+  listImportJobs,
   listKnowledgeCards,
   listPaperCandidates,
   listPendingPaperTranslations,
@@ -54,18 +60,25 @@ import {
   listTags,
   listTopicItems,
   listTopics,
+  listBrowserClients,
+  findBrowserClientByTokenHash,
+  registerBrowserClient,
+  queueDocumentOcr,
   saveArticle,
+  saveDocumentOcrResult,
   saveAiExchange,
   searchKnowledgeBase,
   selectPaperCandidate,
   setFavorite,
   snoozePaperReminder,
+  startDocumentOcr,
   updatePaperCandidateTranslation,
   updatePaperCategory,
   upsertImportedPaper,
   updatePaperFullTranslation,
   requestArticleTranslation,
   retryPaperFullTranslation,
+  retryImportJob,
   updateArticleTranslation,
   updateDocumentCategory,
   updateReadingAnnotation,
@@ -74,6 +87,8 @@ import {
   removeTopicItem,
   renameFolder,
   reviewKnowledgeCard,
+  revokeBrowserClient,
+  touchBrowserClient,
 } from "./lib/database.mjs";
 import {
   classifyDocument,
@@ -112,6 +127,17 @@ import {
   inspectDocsifySource,
   parseDocsifyChapter,
 } from "./lib/docsify-importer.mjs";
+import { createImportJobRunner } from "./lib/import-job-runner.mjs";
+import {
+  getOcrEngineStatus,
+  isOcrSupportedExtension,
+  recognizeDocument,
+} from "./lib/ocr-service.mjs";
+import {
+  createVideoArticle,
+  inspectVideoSource,
+  normalizeVideoUrl,
+} from "./lib/video-importer.mjs";
 
 /** paperScheduleIntervalMilliseconds 是后台检查新自然周的间隔。 */
 const paperScheduleIntervalMilliseconds = 6 * 60 * 60 * 1000;
@@ -147,6 +173,266 @@ function queuePaperPdfProcessing(paper) {
   void processingTask;
 }
 
+/** browserPairingCodeLifetimeMilliseconds 是一次性配对码的有效期。 */
+const browserPairingCodeLifetimeMilliseconds = 10 * 60 * 1000;
+/** browserPairingCodes 仅在内存中保存短期配对码，不写入数据库。 */
+const browserPairingCodes = new Map();
+
+/**
+ * 生成不与当前有效配对码冲突的六位数字。
+ *
+ * @returns {string} 浏览器扩展中输入的一次性配对码。
+ */
+function createBrowserPairingCode() {
+  /** now 是清理过期配对码时使用的当前时间。 */
+  const now = Date.now();
+  for (const [code, pairing] of browserPairingCodes) {
+    if (pairing.expiresAt <= now) browserPairingCodes.delete(code);
+  }
+  let code = "";
+  do {
+    code = String(crypto.randomInt(100000, 1000000));
+  } while (browserPairingCodes.has(code));
+  browserPairingCodes.set(code, {
+    expiresAt: now + browserPairingCodeLifetimeMilliseconds,
+  });
+  return code;
+}
+
+/**
+ * 消费一次性配对码；无效、过期或已经使用时返回 false。
+ *
+ * @param {string} code 用户在扩展中输入的六位数字。
+ * @returns {boolean} 配对码是否有效。
+ */
+function consumeBrowserPairingCode(code) {
+  /** normalizedCode 是只允许六位数字的配对码。 */
+  const normalizedCode = String(code || "").trim();
+  if (!/^\d{6}$/.test(normalizedCode)) return false;
+  /** pairing 是内存中保存的有效期记录。 */
+  const pairing = browserPairingCodes.get(normalizedCode);
+  browserPairingCodes.delete(normalizedCode);
+  return Boolean(pairing && pairing.expiresAt > Date.now());
+}
+
+/**
+ * 只接受 Chrome、Edge 或 Firefox 扩展来源，用于精确 CORS 响应。
+ *
+ * @param {http.IncomingMessage} request HTTP 请求。
+ * @returns {string} 可信扩展来源或空字符串。
+ */
+function getBrowserExtensionOrigin(request) {
+  /** origin 是浏览器发出的 Origin 请求头。 */
+  const origin = String(request.headers.origin || "").trim();
+  return /^(chrome|moz)-extension:\/\/[a-z0-9-]+$/i.test(origin) ? origin : "";
+}
+
+/**
+ * 向浏览器扩展发送仅允许当前扩展来源读取的 JSON。
+ *
+ * @param {http.IncomingMessage} request HTTP 请求。
+ * @param {http.ServerResponse} response HTTP 响应。
+ * @param {number} statusCode HTTP 状态码。
+ * @param {unknown} payload JSON 内容。
+ * @returns {void}
+ */
+function sendBrowserExtensionJson(request, response, statusCode, payload) {
+  /** extensionOrigin 是经过协议白名单检查的扩展来源。 */
+  const extensionOrigin = getBrowserExtensionOrigin(request);
+  sendJson(response, statusCode, payload, extensionOrigin
+    ? {
+      "Access-Control-Allow-Origin": extensionOrigin,
+      "Access-Control-Allow-Headers": "Content-Type, X-Zhixu-Capture-Token",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      Vary: "Origin",
+    }
+    : {});
+}
+
+/**
+ * 将浏览器客户端令牌转换为数据库保存和查询的 SHA-256 摘要。
+ *
+ * @param {string} token 原始随机令牌。
+ * @returns {string} 十六进制摘要。
+ */
+function hashBrowserToken(token) {
+  return crypto.createHash("sha256").update(String(token || ""), "utf8").digest("hex");
+}
+
+/**
+ * 验证快速收藏请求头并更新客户端最后使用时间。
+ *
+ * @param {http.IncomingMessage} request HTTP 请求。
+ * @returns {Record<string, unknown> | null} 已认证客户端。
+ */
+function authenticateBrowserClient(request) {
+  /** token 是扩展配对后保存在其本地存储中的随机值。 */
+  const token = String(request.headers["x-zhixu-capture-token"] || "").trim();
+  if (token.length < 32 || token.length > 256) return null;
+  /** client 是令牌摘要对应的未撤销客户端。 */
+  const client = findBrowserClientByTokenHash(hashBrowserToken(token));
+  if (client) touchBrowserClient(client.id);
+  return client;
+}
+
+/**
+ * 执行浏览器快速收藏任务：抓取完整网页、收藏并尽可能标记用户选区。
+ *
+ * @param {Record<string, unknown>} job 数据库中的后台任务。
+ * @param {{ updateProgress: Function }} context 进度更新接口。
+ * @returns {Promise<Record<string, unknown>>} 导入目标和选区处理结果。
+ */
+async function processBrowserCaptureJob(job, context) {
+  /** inputUrl 是扩展提交且由文章解析器再次校验的公开链接。 */
+  const inputUrl = String(job.payload.url || job.sourceUrl || "").trim();
+  if (!inputUrl) throw new Error("浏览器收藏缺少网页链接。");
+  /** selectedText 是可选的用户选区，限制长度避免扩展提交超大正文。 */
+  const selectedText = String(job.payload.selectedText || "").trim().slice(0, 8000);
+  context.updateProgress({ stage: "fetching", progressPercent: 10 });
+  /** parsedArticle 是现有安全抓取和分类流程生成的网页正文。 */
+  const parsedArticle = await parseAndClassifyArticle(inputUrl);
+  context.updateProgress({ stage: "saving", progressPercent: 75 });
+  /** now 是文章保存或更新的时间。 */
+  const now = new Date().toISOString();
+  /** article 是去重写入后的最终文章。 */
+  const article = saveArticle({
+    id: `article_${crypto.randomUUID()}`,
+    ...parsedArticle,
+    createdAt: now,
+    updatedAt: now,
+  });
+  setFavorite({ targetType: "article", targetId: article.id, active: true });
+  /** selectionStart 是浏览器选区在清洗正文中的精确位置。 */
+  const selectionStart = selectedText ? article.contentText.indexOf(selectedText) : -1;
+  let selectionMatched = false;
+  if (selectionStart >= 0) {
+    /** workspace 用于避免同一选区被扩展重复保存为多条批注。 */
+    const workspace = getReadingWorkspace("article", article.id);
+    const duplicateAnnotation = workspace?.annotations?.some(
+      (annotation) => annotation.quoteText === selectedText
+        && annotation.noteText === "来自浏览器快速收藏",
+    );
+    if (!duplicateAnnotation) {
+      createReadingAnnotation("article", article.id, {
+        quoteText: selectedText,
+        anchorStart: selectionStart,
+        anchorEnd: selectionStart + selectedText.length,
+        color: "yellow",
+        noteText: "来自浏览器快速收藏",
+      });
+    }
+    selectionMatched = true;
+  }
+  context.updateProgress({ stage: "indexing", progressPercent: 95 });
+  createDailyBackup();
+  return {
+    targetType: "article",
+    targetId: article.id,
+    title: article.title,
+    selectionMatched,
+  };
+}
+
+/**
+ * 执行图片或扫描 PDF 的分页 OCR，并把结果写回原文档。
+ *
+ * @param {Record<string, unknown>} job 数据库中的后台任务。
+ * @param {{ updateProgress: Function }} context 进度更新接口。
+ * @returns {Promise<Record<string, unknown>>} 完成后的文档摘要。
+ */
+async function processDocumentOcrJob(job, context) {
+  /** documentId 是上传文档的稳定 ID。 */
+  const documentId = String(job.payload.documentId || "").trim();
+  /** document 是包含本地存储文件名的原始记录。 */
+  const document = getDocumentById(documentId);
+  if (!document) throw new Error("找不到需要 OCR 的文档记录。");
+  if (!isOcrSupportedExtension(document.extension)) throw new Error("当前文件类型不支持 OCR。");
+  /** filePath 是严格位于附件目录中的原始文件。 */
+  const filePath = path.join(attachmentDirectory, document.storedName);
+  if (!isPathInsideDirectory(filePath, attachmentDirectory)) throw new Error("OCR 原始文件路径无效。");
+  startDocumentOcr(document.id);
+  try {
+    /** ocrResult 是逐页正文、坐标和置信度。 */
+    const ocrResult = await recognizeDocument({
+      filePath,
+      extension: document.extension,
+      language: String(job.payload.language || ""),
+      onProgress(progress) {
+        context.updateProgress(progress);
+      },
+    });
+    /** combinedText 用于生成文档卡片摘要。 */
+    const combinedText = ocrResult.pages.map((page) => page.text).join("\n\n");
+    /** savedDocument 是更新正文、分页表和全文索引后的文档。 */
+    const savedDocument = saveDocumentOcrResult(document.id, {
+      ...ocrResult,
+      summary: createDocumentSummary(combinedText, document.originalName),
+    });
+    createDailyBackup();
+    return {
+      targetType: "document",
+      targetId: savedDocument.id,
+      title: savedDocument.title,
+      pageCount: savedDocument.ocrPageCount,
+      averageConfidence: savedDocument.ocrAverageConfidence,
+    };
+  } catch (error) {
+    failDocumentOcr(document.id, error);
+    throw error;
+  }
+}
+
+/**
+ * 执行视频链接导入：只读取公开元数据与字幕，不默认下载视频或音频。
+ *
+ * @param {Record<string, unknown>} job 数据库中的后台任务。
+ * @param {{ updateProgress: Function }} context 进度更新接口。
+ * @returns {Promise<Record<string, unknown>>} 完成后的文章目标。
+ */
+async function processVideoTranscriptJob(job, context) {
+  const inputUrl = String(job.payload.url || job.sourceUrl || "").trim();
+  if (!inputUrl) throw new Error("视频导入缺少链接。");
+  context.updateProgress({ stage: "reading_metadata", progressPercent: 8 });
+  /** video 是平台元数据、所选字幕轨和时间戳片段。 */
+  const video = await inspectVideoSource(inputUrl, {
+    preferredLanguages: Array.isArray(job.payload.preferredLanguages)
+      ? job.payload.preferredLanguages
+      : undefined,
+  });
+  context.updateProgress({ stage: "reading_captions", progressPercent: 55 });
+  /** articleInput 是经过统一 HTML 清洗与分类的本地文章数据。 */
+  const articleInput = await createVideoArticle(video, {
+    saveLinkOnly: job.payload.confirmationAction === "save_link",
+  });
+  context.updateProgress({ stage: "saving", progressPercent: 82 });
+  const now = new Date().toISOString();
+  const article = saveArticle({
+    id: `article_${crypto.randomUUID()}`,
+    ...articleInput,
+    createdAt: now,
+    updatedAt: now,
+  });
+  context.updateProgress({ stage: "indexing", progressPercent: 96 });
+  createDailyBackup();
+  return {
+    targetType: "article",
+    targetId: article.id,
+    title: article.title,
+    platform: video.platform,
+    transcriptSegmentCount: articleInput.transcriptSegmentCount,
+    savedLinkOnly: articleInput.transcriptSegmentCount === 0,
+  };
+}
+
+/** importJobRunner 是 OCR、视频和浏览器收藏共用的顺序任务执行器。 */
+const importJobRunner = createImportJobRunner({
+  handlers: {
+    browser_capture: processBrowserCaptureJob,
+    document_ocr: processDocumentOcrJob,
+    video_transcript: processVideoTranscriptJob,
+  },
+});
+
 /** staticMimeTypes 是本地网页静态资源扩展名到 MIME 的映射。 */
 const staticMimeTypes = Object.freeze({
   ".html": "text/html; charset=utf-8",
@@ -168,7 +454,7 @@ const staticMimeTypes = Object.freeze({
  * @param {unknown} payload 可序列化数据。
  * @returns {void}
  */
-function sendJson(response, statusCode, payload) {
+function sendJson(response, statusCode, payload, additionalHeaders = {}) {
   /** body 是 UTF-8 JSON 响应正文。 */
   const body = JSON.stringify(payload);
   response.writeHead(statusCode, {
@@ -176,6 +462,7 @@ function sendJson(response, statusCode, payload) {
     "Content-Length": Buffer.byteLength(body),
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
+    ...additionalHeaders,
   });
   response.end(body);
 }
@@ -289,12 +576,317 @@ function toArticleListItem(article) {
  * @returns {Promise<boolean>} 是否已经处理本次请求。
  */
 async function handleApiRequest(request, response, url) {
+  if (request.method === "OPTIONS" && url.pathname.startsWith("/api/browser/")) {
+    /** extensionOrigin 是仅允许浏览器扩展跨源调用的来源。 */
+    const extensionOrigin = getBrowserExtensionOrigin(request);
+    if (!extensionOrigin) {
+      sendJson(response, 403, { message: "只允许已安装的知序浏览器扩展访问。" });
+      return true;
+    }
+    response.writeHead(204, {
+      "Access-Control-Allow-Origin": extensionOrigin,
+      "Access-Control-Allow-Headers": "Content-Type, X-Zhixu-Capture-Token",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Max-Age": "600",
+      Vary: "Origin",
+    });
+    response.end();
+    return true;
+  }
+
   if (request.method === "GET" && url.pathname === "/api/health") {
     sendJson(response, 200, {
       status: "ok",
       storage: "SQLite 本地数据库",
       deepSeekConfigured: Boolean(serverConfig.deepSeekApiKey),
     });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/import-jobs") {
+    /** jobs 是前端任务中心最近的后台导入记录。 */
+    const jobs = listImportJobs({
+      status: url.searchParams.get("status") || "",
+      jobType: url.searchParams.get("jobType") || "",
+      limit: Number(url.searchParams.get("limit")) || 30,
+    });
+    sendJson(response, 200, { jobs, runner: importJobRunner.getStatus() });
+    return true;
+  }
+
+  /** importJobMatch 匹配单个任务状态或重试接口。 */
+  const importJobMatch = url.pathname.match(/^\/api\/import-jobs\/([^/]+)$/);
+  if (request.method === "GET" && importJobMatch) {
+    /** job 是指定 ID 的后台导入任务。 */
+    const job = getImportJob(decodeURIComponent(importJobMatch[1]));
+    if (!job) {
+      sendJson(response, 404, { message: "找不到这项导入任务。" });
+      return true;
+    }
+    sendJson(response, 200, { job });
+    return true;
+  }
+
+  /** importJobRetryMatch 匹配失败任务重新排队地址。 */
+  const importJobRetryMatch = url.pathname.match(/^\/api\/import-jobs\/([^/]+)\/retry$/);
+  if (request.method === "POST" && importJobRetryMatch) {
+    /** job 是重新进入队列的失败任务。 */
+    const job = retryImportJob(decodeURIComponent(importJobRetryMatch[1]));
+    if (!job) {
+      sendJson(response, 409, { message: "只有失败的导入任务可以重试。" });
+      return true;
+    }
+    importJobRunner.trigger();
+    sendJson(response, 202, { job });
+    return true;
+  }
+
+  /** importJobConfirmMatch 匹配无字幕视频的用户确认入口。 */
+  const importJobConfirmMatch = url.pathname.match(/^\/api\/import-jobs\/([^/]+)\/confirm$/);
+  if (request.method === "POST" && importJobConfirmMatch) {
+    const requestBuffer = await readRequestBuffer(request, 16 * 1024);
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    if (payload.action !== "save_link") {
+      sendJson(response, 400, { message: "当前只支持确认后仅保存视频链接。" });
+      return true;
+    }
+    /** job 是用户明确选择仅保存链接后重新排队的任务。 */
+    const job = confirmVideoImportJob(
+      decodeURIComponent(importJobConfirmMatch[1]),
+      String(payload.action || ""),
+    );
+    if (!job) {
+      sendJson(response, 409, { message: "这项任务当前不需要视频导入确认。" });
+      return true;
+    }
+    importJobRunner.trigger();
+    sendJson(response, 202, { job });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/ocr/status") {
+    /** ocr 是本机 Tesseract 与 PDF 渲染工具可用状态。 */
+    const ocr = await getOcrEngineStatus();
+    sendJson(response, 200, { ocr });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/videos/import") {
+    const requestBuffer = await readRequestBuffer(request, 64 * 1024);
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** normalizedVideo 在任务入库前拒绝无效协议并统一平台链接。 */
+    let normalizedVideo;
+    try {
+      normalizedVideo = normalizeVideoUrl(payload.url);
+    } catch (error) {
+      sendJson(response, 400, {
+        message: error instanceof Error ? error.message : "视频链接无效。",
+      });
+      return true;
+    }
+    /** activeJob 避免同一规范链接被连续重复加入队列。 */
+    const activeJob = listImportJobs({ jobType: "video_transcript", limit: 200 }).find(
+      (job) => job.sourceUrl === normalizedVideo.canonicalUrl
+        && (job.status === "queued" || job.status === "running"),
+    );
+    if (activeJob) {
+      sendJson(response, 202, { job: activeJob, duplicate: true });
+      return true;
+    }
+    const preferredLanguages = Array.isArray(payload.preferredLanguages)
+      ? payload.preferredLanguages
+        .map((value) => String(value || "").trim().slice(0, 20))
+        .filter(Boolean)
+        .slice(0, 12)
+      : [];
+    const platformLabels = { youtube: "YouTube", bilibili: "哔哩哔哩", generic: "视频链接" };
+    const job = createImportJob({
+      jobType: "video_transcript",
+      sourceLabel: `${platformLabels[normalizedVideo.platform]} · ${normalizedVideo.videoId || new URL(normalizedVideo.canonicalUrl).hostname}`,
+      sourceUrl: normalizedVideo.canonicalUrl,
+      payload: {
+        url: normalizedVideo.canonicalUrl,
+        preferredLanguages,
+      },
+    });
+    importJobRunner.trigger();
+    sendJson(response, 202, { job, duplicate: false });
+    return true;
+  }
+
+  /** documentOcrMatch 匹配单篇文档的 OCR 入队地址。 */
+  const documentOcrMatch = url.pathname.match(/^\/api\/documents\/([^/]+)\/ocr$/);
+  if (request.method === "POST" && documentOcrMatch) {
+    /** documentId 是待识别文档 ID。 */
+    const documentId = decodeURIComponent(documentOcrMatch[1]);
+    /** document 是用于验证文件类型的文档。 */
+    const document = getDocumentById(documentId);
+    if (!document) {
+      sendJson(response, 404, { message: "找不到需要 OCR 的文档。" });
+      return true;
+    }
+    if (!isOcrSupportedExtension(document.extension)) {
+      sendJson(response, 400, { message: "只有图片或 PDF 可以执行 OCR。" });
+      return true;
+    }
+    /** activeJob 是同一文档尚未结束的 OCR 任务。 */
+    const activeJob = listImportJobs({ jobType: "document_ocr", limit: 200 }).find(
+      (job) => job.payload.documentId === document.id
+        && (job.status === "queued" || job.status === "running"),
+    );
+    if (activeJob) {
+      sendJson(response, 202, { job: activeJob, document });
+      return true;
+    }
+    /** requestBuffer 是可选识别语言参数。 */
+    const requestBuffer = await readRequestBuffer(request, 32 * 1024);
+    /** payload 是用户指定的 OCR 语言。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    queueDocumentOcr(document.id);
+    /** job 是持久化后的 OCR 后台任务。 */
+    const job = createImportJob({
+      jobType: "document_ocr",
+      sourceLabel: document.title,
+      payload: {
+        documentId: document.id,
+        language: String(payload.language || "").trim().slice(0, 80),
+      },
+    });
+    importJobRunner.trigger();
+    sendJson(response, 202, { job, document: getDocumentById(document.id) });
+    return true;
+  }
+
+  /** documentPagesMatch 匹配逐页 OCR 结果查询地址。 */
+  const documentPagesMatch = url.pathname.match(/^\/api\/documents\/([^/]+)\/pages$/);
+  if (request.method === "GET" && documentPagesMatch) {
+    /** documentId 是待查询的文档 ID。 */
+    const documentId = decodeURIComponent(documentPagesMatch[1]);
+    if (!getDocumentById(documentId)) {
+      sendJson(response, 404, { message: "找不到这份文档。" });
+      return true;
+    }
+    sendJson(response, 200, { pages: listDocumentPages(documentId) });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/browser/pairing/start") {
+    /** code 是十分钟内仅可使用一次的六位配对码。 */
+    const code = createBrowserPairingCode();
+    sendJson(response, 201, {
+      code,
+      expiresAt: new Date(Date.now() + browserPairingCodeLifetimeMilliseconds).toISOString(),
+    });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/browser/pair") {
+    if (!getBrowserExtensionOrigin(request)) {
+      sendJson(response, 403, { message: "请从知序浏览器扩展完成配对。" });
+      return true;
+    }
+    /** requestBuffer 是扩展提交的配对码和客户端名称。 */
+    const requestBuffer = await readRequestBuffer(request, 32 * 1024);
+    /** payload 是浏览器配对参数。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    if (!consumeBrowserPairingCode(payload.code)) {
+      sendBrowserExtensionJson(request, response, 401, { message: "配对码无效或已经过期。" });
+      return true;
+    }
+    /** token 是只在本次响应中返回给扩展的高强度随机令牌。 */
+    const token = crypto.randomBytes(32).toString("base64url");
+    /** client 是不包含令牌摘要的本地客户端记录。 */
+    const client = registerBrowserClient({
+      name: payload.name,
+      tokenHash: hashBrowserToken(token),
+    });
+    sendBrowserExtensionJson(request, response, 201, { token, client });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/browser/clients") {
+    sendJson(response, 200, { clients: listBrowserClients() });
+    return true;
+  }
+
+  /** browserClientMatch 匹配本地页面撤销某个扩展权限的地址。 */
+  const browserClientMatch = url.pathname.match(/^\/api\/browser\/clients\/([^/]+)$/);
+  if (request.method === "DELETE" && browserClientMatch) {
+    /** client 是撤销后的浏览器客户端。 */
+    const client = revokeBrowserClient(decodeURIComponent(browserClientMatch[1]));
+    if (!client) {
+      sendJson(response, 404, { message: "找不到这个浏览器客户端。" });
+      return true;
+    }
+    sendJson(response, 200, { client });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/browser/captures") {
+    if (!getBrowserExtensionOrigin(request)) {
+      sendJson(response, 403, { message: "请从知序浏览器扩展发送收藏。" });
+      return true;
+    }
+    /** client 是令牌验证通过的扩展客户端。 */
+    const client = authenticateBrowserClient(request);
+    if (!client) {
+      sendBrowserExtensionJson(request, response, 401, { message: "浏览器扩展尚未配对或权限已撤销。" });
+      return true;
+    }
+    /** requestBuffer 是网页地址、标题和可选选区。 */
+    const requestBuffer = await readRequestBuffer(request, 128 * 1024);
+    /** payload 是扩展提交的快速收藏内容。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** captureUrl 是仅允许 HTTP(S) 的网页地址。 */
+    let captureUrl;
+    try {
+      captureUrl = new URL(String(payload.url || "").trim());
+    } catch {
+      sendBrowserExtensionJson(request, response, 400, { message: "当前页面不是可收藏的网页链接。" });
+      return true;
+    }
+    if (!["http:", "https:"].includes(captureUrl.protocol)) {
+      sendBrowserExtensionJson(request, response, 400, { message: "只支持收藏 HTTP 或 HTTPS 网页。" });
+      return true;
+    }
+    captureUrl.hash = "";
+    /** job 是立即持久化、随后在后台执行的收藏任务。 */
+    const job = createImportJob({
+      jobType: "browser_capture",
+      sourceLabel: String(payload.title || captureUrl.hostname),
+      sourceUrl: captureUrl.toString(),
+      payload: {
+        url: captureUrl.toString(),
+        title: String(payload.title || "").slice(0, 500),
+        selectedText: String(payload.selectedText || "").slice(0, 8000),
+        clientId: client.id,
+      },
+    });
+    importJobRunner.trigger();
+    sendBrowserExtensionJson(request, response, 202, { job });
+    return true;
+  }
+
+  /** browserCaptureJobMatch 是扩展轮询自己提交任务的地址。 */
+  const browserCaptureJobMatch = url.pathname.match(/^\/api\/browser\/captures\/([^/]+)$/);
+  if (request.method === "GET" && browserCaptureJobMatch) {
+    if (!getBrowserExtensionOrigin(request)) {
+      sendJson(response, 403, { message: "请从知序浏览器扩展查询收藏状态。" });
+      return true;
+    }
+    /** client 是令牌验证通过的扩展客户端。 */
+    const client = authenticateBrowserClient(request);
+    if (!client) {
+      sendBrowserExtensionJson(request, response, 401, { message: "浏览器扩展尚未配对或权限已撤销。" });
+      return true;
+    }
+    /** job 是扩展等待完成的后台收藏任务。 */
+    const job = getImportJob(decodeURIComponent(browserCaptureJobMatch[1]));
+    if (!job || job.jobType !== "browser_capture" || job.payload.clientId !== client.id) {
+      sendBrowserExtensionJson(request, response, 404, { message: "找不到这项浏览器收藏任务。" });
+      return true;
+    }
+    sendBrowserExtensionJson(request, response, 200, { job });
     return true;
   }
 
@@ -1511,7 +2103,7 @@ async function handleApiRequest(request, response, url) {
     fs.writeFileSync(storedPath, fileBuffer, { flag: "wx" });
     try {
       /** document 是即将写入 SQLite 的完整文档记录。 */
-      const document = insertDocument({
+      let document = insertDocument({
         id: documentId,
         originalName,
         storedName,
@@ -1529,8 +2121,21 @@ async function handleApiRequest(request, response, url) {
         createdAt: now,
         updatedAt: now,
       });
+      /** needsOcr 表示图片或缺少可用文本层的 PDF 应进入后台识别。 */
+      const needsOcr = isOcrSupportedExtension(extension)
+        && (extension !== ".pdf" || extractionResult.text.trim().length < 80);
+      let importJob = null;
+      if (needsOcr) {
+        document = queueDocumentOcr(document.id);
+        importJob = createImportJob({
+          jobType: "document_ocr",
+          sourceLabel: document.title,
+          payload: { documentId: document.id, language: "" },
+        });
+        importJobRunner.trigger();
+      }
       createDailyBackup();
-      sendJson(response, 201, { document });
+      sendJson(response, 201, { document, importJob });
     } catch (error) {
       fs.rmSync(storedPath, { force: true });
       throw error;
@@ -1823,6 +2428,7 @@ const codexWorkerTimer = setInterval(
 );
 codexWorkerTimer.unref();
 initializeCodexPaperTranslationWorker();
+importJobRunner.start();
 
 /** server 是只监听本机回环地址的 HTTP 服务。 */
 const server = http.createServer((request, response) => {

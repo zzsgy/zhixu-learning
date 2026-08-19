@@ -25,6 +25,8 @@ export const attachmentDirectory = path.join(dataDirectory, "attachments");
 export const articleImageDirectory = path.join(dataDirectory, "article-images");
 /** paperDirectory 是公开论文 PDF 与全文提取结果的本地缓存目录。 */
 export const paperDirectory = path.join(dataDirectory, "papers");
+/** ocrDirectory 是扫描 PDF 页面渲染和 OCR 临时文件的受控目录。 */
+export const ocrDirectory = path.join(dataDirectory, "ocr");
 /** SQLite 自动备份目录。 */
 export const backupDirectory = path.join(dataDirectory, "backups");
 /** 本地私密环境变量文件路径。 */
@@ -117,6 +119,16 @@ export const serverConfig = Object.freeze({
   deepSeekApiKey: process.env.DEEPSEEK_API_KEY?.trim() || "",
   /** deepSeekModel 是有出处问答使用的模型名称，可在本机环境文件中覆盖。 */
   deepSeekModel: process.env.DEEPSEEK_MODEL?.trim() || "deepseek-chat",
+  /** tesseractPath 是可由用户覆盖的本机 OCR 命令。 */
+  tesseractPath: process.env.ZHIXU_TESSERACT_PATH?.trim() || "tesseract",
+  /** pdfToPpmPath 是扫描 PDF 转换为逐页图片的本机命令。 */
+  pdfToPpmPath: process.env.ZHIXU_PDFTOPPM_PATH?.trim() || "pdftoppm",
+  /** ocrLanguages 默认同时识别简体中文与英文。 */
+  ocrLanguages: process.env.ZHIXU_OCR_LANGUAGES?.trim() || "chi_sim+eng",
+  /** ocrDpi 是扫描页渲染和识别采用的分辨率。 */
+  ocrDpi: readBoundedInteger(process.env.ZHIXU_OCR_DPI, 300, 150, 600),
+  /** ocrMaximumPages 防止误导入超大扫描件长期占用电脑。 */
+  ocrMaximumPages: readBoundedInteger(process.env.ZHIXU_OCR_MAX_PAGES, 300, 1, 2000),
 });
 
 /** publicDirectory 是本地网页静态文件所在目录。 */
@@ -133,6 +145,7 @@ export function ensureLocalDirectories() {
     attachmentDirectory,
     articleImageDirectory,
     paperDirectory,
+    ocrDirectory,
     backupDirectory,
   ]) {
     fs.mkdirSync(directoryPath, { recursive: true });
