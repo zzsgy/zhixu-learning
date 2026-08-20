@@ -4137,9 +4137,17 @@ function renderPapers() {
     );
     /** footer 是中文阅读、论文来源和公开 PDF 操作区。 */
     const footer = document.createElement("footer");
+    /** hasExtractedPaperText 使用列表接口保留的词数判断英文全文是否已提取。 */
+    const hasExtractedPaperText = Number(paper.sourceTextWordCount) > 0;
+    /** hasFullPaperTranslation 表示 Codex 中文全文已经写回数据库。 */
+    const hasFullPaperTranslation = paper.fullTranslationStatus === "ready";
+    /** hasReadablePaperContent 汇总卡片能够安全依赖的轻量状态字段。 */
+    const hasReadablePaperContent = paper.sourceType === "mli"
+      || hasExtractedPaperText
+      || hasFullPaperTranslation;
     /** readerButton 是只在已有可读正文或中文译文时启用的站内阅读入口。 */
     const readerButton = createPaperReaderButton(paper);
-    readerButton.disabled = Boolean(paper.pdfUrl && !paper.sourceText && !paper.fullTranslationHtml);
+    readerButton.disabled = Boolean(paper.pdfUrl && !hasReadablePaperContent);
     footer.append(
       readerButton,
       createPaperLink(
@@ -4189,15 +4197,25 @@ function renderPapers() {
     /** processingLabel 是论文从下载、解析到 Codex 翻译的当前可读状态。 */
     const processingLabel = paper.extractionError
       ? `PDF 解析失败：${paper.extractionError}`
-      : paper.titleZh
-        ? "Codex 中文翻译"
-        : paper.pdfUrl && !paper.sourceText
-          ? "正在后台下载并解析 PDF"
-          : "等待 Codex 翻译";
+      : hasFullPaperTranslation
+        ? "Codex 中文全文已完成"
+        : paper.fullTranslationStatus === "failed"
+          ? `Codex 中文全文失败：${paper.fullTranslationError || "可进入阅读页重试"}`
+          : paper.pdfUrl && !hasExtractedPaperText
+            ? "正在后台下载并解析 PDF"
+            : paper.fullTranslationStatus === "processing"
+              ? "正在生成中文全文"
+              : paper.fullTranslationStatus === "not_required"
+                ? "原文可直接阅读"
+                : "等待 Codex 翻译";
+    /** paperStateIsFailed 统一控制提取或全文翻译失败样式。 */
+    const paperStateIsFailed = Boolean(
+      paper.extractionError || paper.fullTranslationStatus === "failed",
+    );
     contentElements.push(
       createTextElement(
         "span",
-        `paper-translation-state ${paper.titleZh ? "is-translated" : ""} ${paper.extractionError ? "is-failed" : ""}`,
+        `paper-translation-state ${hasFullPaperTranslation ? "is-translated" : ""} ${paperStateIsFailed ? "is-failed" : ""}`,
         processingLabel,
       ),
       createTextElement(

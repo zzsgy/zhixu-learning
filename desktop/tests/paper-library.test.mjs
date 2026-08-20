@@ -6,6 +6,22 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
+test("论文列表使用轻量状态字段启用中文阅读", () => {
+  /** projectDirectory 是桌面版项目根目录。 */
+  const projectDirectory = path.resolve(import.meta.dirname, "..");
+  /** applicationScript 是论文卡片状态判断所在的浏览器脚本。 */
+  const applicationScript = fs.readFileSync(
+    path.join(projectDirectory, "public", "app.js"),
+    "utf8",
+  );
+  assert.match(applicationScript, /Number\(paper\.sourceTextWordCount\) > 0/);
+  assert.match(applicationScript, /paper\.fullTranslationStatus === "ready"/);
+  assert.doesNotMatch(
+    applicationScript,
+    /readerButton\.disabled = Boolean\(paper\.pdfUrl && !paper\.sourceText/,
+  );
+});
+
 /**
  * 验证 ISO 周计算和“每周只选一篇”的完整本地数据流程。
  */
