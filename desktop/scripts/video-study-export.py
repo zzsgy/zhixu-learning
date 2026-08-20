@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import subprocess
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -38,8 +37,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-pdf", required=True)
     parser.add_argument("--output-json", required=True)
     parser.add_argument("--model", default="small")
-    parser.add_argument("--tesseract", default="tesseract")
-    parser.add_argument("--ocr-languages", default="chi_sim+eng")
     parser.add_argument("--max-frames", type=int, default=60)
     return parser.parse_args()
 
@@ -119,26 +116,6 @@ def select_key_frames(frame_paths: list[Path], interval: float, maximum: int) ->
     return [selected[index] for index in indexes]
 
 
-def recognize_frame(frame_path: Path, tesseract: str, languages: str) -> str:
-    process = subprocess.run(
-        [tesseract, str(frame_path), "stdout", "-l", languages, "--psm", "6"],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=60,
-    )
-    if process.returncode != 0:
-        return ""
-    lines = []
-    for line in process.stdout.splitlines():
-        normalized = re.sub(r"\s+", " ", line).strip()
-        if len(normalized) >= 2 and normalized not in lines:
-            lines.append(normalized)
-    return "\n".join(lines)[:1800]
-
-
 def transcript_for_window(segments: list[dict], start: float, end: float) -> str:
     texts = []
     for segment in segments:
@@ -209,7 +186,7 @@ def build_pdf(metadata: dict, segments: list[dict], frames: list[dict], output_p
         ),
         Spacer(1, 8 * mm),
         Paragraph(
-            "本 PDF 由本机语音转写、画面变化筛选和 OCR 生成。"
+            "本 PDF 由本机语音转写和画面变化筛选生成。"
             "文字可搜索；关键画面用于保留 PPT、流程图和操作演示上下文。"
             "自动识别可能存在错误，请结合原视频时间戳核对。",
             body_style,
@@ -229,9 +206,6 @@ def build_pdf(metadata: dict, segments: list[dict], frames: list[dict], output_p
         image.drawWidth = image.imageWidth * scale
         image.drawHeight = image.imageHeight * scale
         story.extend([image, Spacer(1, 3 * mm)])
-        if frame.get("ocrText"):
-            story.append(Paragraph("画面文字（OCR）", small_style))
-            story.append(Paragraph(escape(frame["ocrText"]).replace("\n", "<br/>"), small_style))
         story.append(Paragraph("对应讲解", small_style))
         story.append(Paragraph(
             escape(frame_transcript or "该时间段未识别到清晰语音。"),
@@ -270,15 +244,12 @@ def main() -> None:
         raise ValueError("必须提供音频或已有字幕。")
     frame_paths = sorted(frame_directory.glob("frame-*.jpg"))
     key_frames = select_key_frames(frame_paths, args.frame_interval, max(args.max_frames, 1))
-    for frame in key_frames:
-        frame["ocrText"] = recognize_frame(frame["path"], args.tesseract, args.ocr_languages)
     page_count = build_pdf(metadata, segments, key_frames, output_pdf)
     result = {
         "segments": segments,
         "detectedLanguage": detected_language,
         "keyFrameCount": len(key_frames),
         "pageCount": page_count,
-        "ocrFrameCount": sum(1 for frame in key_frames if frame.get("ocrText")),
     }
     output_json.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 

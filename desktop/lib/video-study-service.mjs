@@ -245,8 +245,6 @@ export async function createVideoStudyPdf(video, options) {
       "--output-pdf", reportPath,
       "--output-json", resultPath,
       "--model", serverConfig.whisperModel,
-      "--tesseract", serverConfig.tesseractPath,
-      "--ocr-languages", serverConfig.ocrLanguages,
       "--max-frames", "60",
     ];
     generatorArguments.push(
