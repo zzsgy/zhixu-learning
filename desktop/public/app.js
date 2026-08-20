@@ -4776,9 +4776,11 @@ async function openDocument(documentId, options = {}) {
     const supportsOriginalPreview =
       documentItem.extension === ".pdf" ||
       documentItem.mimeType === "application/pdf";
+    /** previewRevision 防止重建 PDF 后浏览器继续显示旧缓存。 */
+    const previewRevision = encodeURIComponent(documentItem.updatedAt || "current");
     dom.readerModeSwitch.hidden = !supportsOriginalPreview;
     dom.originalPreviewFrame.src = supportsOriginalPreview
-      ? `/api/documents/${encodeURIComponent(documentId)}/view#toolbar=1&navpanes=0&view=FitH`
+      ? `/api/documents/${encodeURIComponent(documentId)}/view?v=${previewRevision}#toolbar=1&navpanes=0&view=FitH`
       : "about:blank";
     setReaderMode(supportsOriginalPreview ? "original" : "readable");
     dom.readerCategory.value = documentItem.category;
