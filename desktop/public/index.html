@@ -447,6 +447,24 @@
               <button class="secondary-button" id="refresh-import-jobs" type="button">
                 刷新任务状态
               </button>
+              <div class="import-job-toolbar">
+                <label>
+                  显示
+                  <select id="import-job-filter">
+                    <option value="priority">重点任务</option>
+                    <option value="active">处理中</option>
+                    <option value="attention">需要处理</option>
+                    <option value="completed">已完成</option>
+                    <option value="video">视频</option>
+                    <option value="ocr">OCR</option>
+                    <option value="all">全部历史</option>
+                  </select>
+                </label>
+                <button class="text-button" id="show-import-job-history" type="button">
+                  查看全部历史
+                </button>
+              </div>
+              <small class="import-job-summary" id="import-job-summary"></small>
               <div class="import-job-list" id="import-job-list"></div>
             </article>
           </div>

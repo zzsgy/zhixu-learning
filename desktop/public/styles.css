@@ -1521,6 +1521,12 @@ body.has-reading-toc .floating-reader-back {
 .browser-pairing-code strong { display: block; color: var(--blue); font-family: var(--mono); font-size: 30px; letter-spacing: 0.18em; }
 .browser-pairing-code small { display: block; margin-top: 7px; color: var(--ink-soft); line-height: 1.5; }
 .browser-client-list, .import-job-list { display: grid; gap: 9px; margin-top: 18px; }
+.import-job-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 18px; }
+.import-job-toolbar label { display: flex; align-items: center; gap: 8px; color: var(--ink-soft); font-size: 11px; }
+.import-job-toolbar select { border: 1px solid var(--line-dark); padding: 7px 28px 7px 9px; background: var(--paper-raised); color: var(--ink); font: inherit; }
+.import-job-toolbar .text-button { margin: 0; }
+.import-job-summary { display: block; margin-top: 10px; color: var(--ink-soft); font-size: 10px; line-height: 1.5; }
+.import-job-list { max-height: 520px; overflow-y: auto; padding-right: 8px; scrollbar-gutter: stable; }
 .browser-client-item, .import-job-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line-dark); padding-top: 10px; }
 .browser-client-item > div, .import-job-item > div { min-width: 0; }
 .browser-client-item strong, .import-job-item strong { display: block; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }

@@ -64,6 +64,8 @@ test("浏览器扩展必须配对才能创建快速收藏任务", async () => {
     const indexHtml = await indexResponse.text();
     assert.match(indexHtml, /id="browser-pairing-button"/);
     assert.match(indexHtml, /id="import-job-list"/);
+    assert.match(indexHtml, /id="import-job-filter"/);
+    assert.match(indexHtml, /id="show-import-job-history"/);
 
     /** preflight 验证只向扩展来源开放跨源请求。 */
     const preflight = await fetch(`${browserBaseUrl}/api/browser/captures`, {

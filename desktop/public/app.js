@@ -106,6 +106,8 @@ const applicationState = {
   aiHistoryTimer: null,
   /** importJobs 是任务中心最近的浏览器收藏、OCR 和视频导入记录。 */
   importJobs: [],
+  /** importJobFilter 控制任务中心的重点、状态和类型筛选。 */
+  importJobFilter: "priority",
   /** importJobPollTimer 在存在排队或运行任务时刷新状态。 */
   importJobPollTimer: null,
   /** documentOcrPollTimer 在阅读页等待 OCR 完成时刷新文档。 */
@@ -146,6 +148,9 @@ const dom = {
   browserPairingCode: document.querySelector("#browser-pairing-code"),
   browserClientList: document.querySelector("#browser-client-list"),
   refreshImportJobs: document.querySelector("#refresh-import-jobs"),
+  importJobFilter: document.querySelector("#import-job-filter"),
+  showImportJobHistory: document.querySelector("#show-import-job-history"),
+  importJobSummary: document.querySelector("#import-job-summary"),
   importJobList: document.querySelector("#import-job-list"),
   articleImportForm: document.querySelector("#article-import-form"),
   articleUrlInput: document.querySelector("#article-url-input"),
@@ -2280,12 +2285,51 @@ const importJobStageLabels = Object.freeze({
 function renderImportJobs() {
   dom.importJobList.replaceChildren();
   if (applicationState.importJobs.length === 0) {
+    dom.importJobSummary.textContent = "";
     dom.importJobList.append(
       createTextElement("p", "import-job-empty", "还没有后台导入任务。"),
     );
     return;
   }
-  for (const job of applicationState.importJobs) {
+  /** activeJobs 是仍在排队或运行、需要持续关注的任务。 */
+  const activeJobs = applicationState.importJobs.filter(
+    (job) => job.status === "queued" || job.status === "running",
+  );
+  /** attentionJobs 是等待确认或失败后可重试的任务。 */
+  const attentionJobs = applicationState.importJobs.filter(
+    (job) => !activeJobs.includes(job)
+      && (job.stage === "awaiting_confirmation" || job.status === "failed"),
+  );
+  /** completedJobs 是按更新时间倒序返回的已完成历史。 */
+  const completedJobs = applicationState.importJobs.filter(
+    (job) => job.status === "completed",
+  );
+  /** filters 把状态和任务类型筛选统一映射到列表。 */
+  const filters = {
+    priority: [...activeJobs, ...attentionJobs, ...completedJobs.slice(0, 5)],
+    active: activeJobs,
+    attention: attentionJobs,
+    completed: completedJobs,
+    video: applicationState.importJobs.filter((job) => job.jobType === "video_transcript"),
+    ocr: applicationState.importJobs.filter((job) => job.jobType === "document_ocr"),
+    all: applicationState.importJobs,
+  };
+  /** visibleJobs 是当前筛选条件下实际渲染的任务。 */
+  const visibleJobs = filters[applicationState.importJobFilter] || filters.priority;
+  dom.importJobFilter.value = applicationState.importJobFilter;
+  dom.showImportJobHistory.textContent = applicationState.importJobFilter === "all"
+    ? "收起历史"
+    : `查看全部历史（${applicationState.importJobs.length}）`;
+  dom.importJobSummary.textContent = applicationState.importJobs.length >= 200
+    ? `当前显示 ${visibleJobs.length} 条；历史记录仅载入最近 200 条。`
+    : `当前显示 ${visibleJobs.length} 条，共 ${applicationState.importJobs.length} 条历史记录。`;
+  if (visibleJobs.length === 0) {
+    dom.importJobList.append(
+      createTextElement("p", "import-job-empty", "当前筛选条件下没有任务。"),
+    );
+    return;
+  }
+  for (const job of visibleJobs) {
     /** item 是单项后台任务状态。 */
     const item = document.createElement("div");
     item.className = `import-job-item is-${job.status}`;
@@ -2346,7 +2390,7 @@ function renderImportJobs() {
       studyPdfButton.type = "button";
       studyPdfButton.addEventListener("click", async () => {
         const accepted = window.confirm(
-          "将临时获取该公开视频，使用本机语音转写、画面 OCR 和关键帧生成 PDF。"
+          "将临时获取该公开视频，使用本机语音转写和关键帧生成 PDF。"
           + "处理完成后会删除临时视频和音频，仅保留正文、关键画面和 PDF。是否继续？",
         );
         if (!accepted) return;
@@ -2425,7 +2469,7 @@ function renderImportJobs() {
 async function loadImportJobs() {
   window.clearTimeout(applicationState.importJobPollTimer);
   /** payload 是最近任务和执行器状态。 */
-  const payload = await requestJson("/api/import-jobs?limit=20");
+  const payload = await requestJson("/api/import-jobs?limit=200");
   applicationState.importJobs = payload.jobs || [];
   renderImportJobs();
   const hasActiveJobs = applicationState.importJobs.some(
@@ -5199,6 +5243,16 @@ async function initializeApplication() {
   });
   dom.refreshImportJobs.addEventListener("click", () => {
     void loadStorageOperations().catch((error) => showToast(error.message));
+  });
+  dom.importJobFilter.addEventListener("change", () => {
+    applicationState.importJobFilter = dom.importJobFilter.value;
+    renderImportJobs();
+  });
+  dom.showImportJobHistory.addEventListener("click", () => {
+    applicationState.importJobFilter = applicationState.importJobFilter === "all"
+      ? "priority"
+      : "all";
+    renderImportJobs();
   });
   dom.articleImportForm.addEventListener("submit", (event) => {
     event.preventDefault();
