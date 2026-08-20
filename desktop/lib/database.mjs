@@ -913,14 +913,16 @@ export function retryImportJob(jobId) {
 }
 
 /**
- * 用户确认无字幕视频仅保存链接后，写入确认动作并重新排队。
+ * 用户确认无字幕视频的处理方式后，写入确认动作并重新排队。
  *
  * @param {string} jobId 视频导入任务 ID。
- * @param {"save_link"} action 用户明确选择的动作。
+ * @param {"save_link" | "generate_study_pdf"} action 用户明确选择的动作。
  * @returns {Record<string, unknown> | null} 重新排队的任务。
  */
 export function confirmVideoImportJob(jobId, action) {
-  if (action !== "save_link") throw new TypeError("不支持的视频确认动作。");
+  if (!["save_link", "generate_study_pdf"].includes(action)) {
+    throw new TypeError("不支持的视频确认动作。");
+  }
   /** existingJob 必须是正在等待确认的视频字幕任务。 */
   const existingJob = getImportJob(jobId);
   if (

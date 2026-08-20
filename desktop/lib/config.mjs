@@ -27,6 +27,16 @@ export const articleImageDirectory = path.join(dataDirectory, "article-images");
 export const paperDirectory = path.join(dataDirectory, "papers");
 /** ocrDirectory 是扫描 PDF 页面渲染和 OCR 临时文件的受控目录。 */
 export const ocrDirectory = path.join(dataDirectory, "ocr");
+/** videoReportDirectory 保存用户明确确认后生成的图文学习 PDF。 */
+export const videoReportDirectory = path.join(dataDirectory, "video-reports");
+/** videoWorkDirectory 只保存处理中的临时媒体、音频和关键帧。 */
+export const videoWorkDirectory = path.join(dataDirectory, "video-work");
+/** videoToolDirectory 是知序本地安装的 FFmpeg 与 yt-dlp 目录。 */
+export const videoToolDirectory = path.join(dataDirectory, "video-tools");
+/** videoPythonDirectory 是隔离安装语音转写和 PDF 依赖的 Python 环境。 */
+export const videoPythonDirectory = path.join(dataDirectory, "video-python");
+/** videoModelDirectory 保存本地 Whisper 模型缓存。 */
+export const videoModelDirectory = path.join(dataDirectory, "video-models");
 /** SQLite 自动备份目录。 */
 export const backupDirectory = path.join(dataDirectory, "backups");
 /** 本地私密环境变量文件路径。 */
@@ -129,6 +139,24 @@ export const serverConfig = Object.freeze({
   ocrDpi: readBoundedInteger(process.env.ZHIXU_OCR_DPI, 300, 150, 600),
   /** ocrMaximumPages 防止误导入超大扫描件长期占用电脑。 */
   ocrMaximumPages: readBoundedInteger(process.env.ZHIXU_OCR_MAX_PAGES, 300, 1, 2000),
+  /** ffmpegPath 可覆盖本地安装的 FFmpeg。 */
+  ffmpegPath: process.env.ZHIXU_FFMPEG_PATH?.trim()
+    || path.join(videoToolDirectory, "ffmpeg", "bin", "ffmpeg.exe"),
+  /** ytDlpPath 可覆盖本地安装的 yt-dlp。 */
+  ytDlpPath: process.env.ZHIXU_YTDLP_PATH?.trim()
+    || path.join(videoToolDirectory, "yt-dlp.exe"),
+  /** videoPythonPath 指向隔离的本地语音转写环境。 */
+  videoPythonPath: process.env.ZHIXU_VIDEO_PYTHON_PATH?.trim()
+    || path.join(videoPythonDirectory, "Scripts", "python.exe"),
+  /** whisperModel 首次使用时下载到本机，small 在中文质量和 CPU 开销之间折中。 */
+  whisperModel: process.env.ZHIXU_WHISPER_MODEL?.trim() || "small",
+  /** videoFrameIntervalSeconds 控制候选画面的采样频率。 */
+  videoFrameIntervalSeconds: readBoundedInteger(
+    process.env.ZHIXU_VIDEO_FRAME_INTERVAL_SECONDS,
+    8,
+    3,
+    60,
+  ),
 });
 
 /** publicDirectory 是本地网页静态文件所在目录。 */
@@ -146,6 +174,11 @@ export function ensureLocalDirectories() {
     articleImageDirectory,
     paperDirectory,
     ocrDirectory,
+    videoReportDirectory,
+    videoWorkDirectory,
+    videoToolDirectory,
+    videoPythonDirectory,
+    videoModelDirectory,
     backupDirectory,
   ]) {
     fs.mkdirSync(directoryPath, { recursive: true });

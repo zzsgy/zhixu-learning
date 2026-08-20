@@ -27,7 +27,7 @@ const defaultPreferredLanguages = Object.freeze([
  * 表示视频可访问但没有公开字幕，需要用户决定是否只保存链接。
  */
 export class VideoConfirmationRequiredError extends Error {
-  constructor(message = "当前视频没有可读取的公开字幕。") {
+  constructor(message = "当前视频没有可读取的独立字幕轨；画面中可能仍有硬字幕。") {
     super(message);
     this.name = "VideoConfirmationRequiredError";
     this.code = "IMPORT_CONFIRMATION_REQUIRED";
@@ -445,7 +445,7 @@ export async function createVideoArticle(video, options = {}) {
       const timestampUrl = createTimestampUrl(video, segment.startSeconds);
       return `<section><h3><a href="${timestampUrl}">[${timestamp}]</a></h3><p>${escapeHtmlText(segment.text)}</p></section>`;
     }).join("\n")
-    : `<section><p>该视频当前没有可读取的公开字幕。知序仅保存了原始链接，没有下载视频或音频。</p><p><a href="${video.canonicalUrl}">打开原视频</a></p></section>`;
+    : `<section><p>该视频当前没有可读取的独立字幕轨。知序仅保存了原始链接，没有下载视频或音频；画面中可能仍有硬字幕。</p><p><a href="${video.canonicalUrl}">打开原视频</a></p></section>`;
   const sanitized = sanitizeArticleHtml(rawHtml, new URL(video.canonicalUrl));
   const transcriptText = segments.map((segment) => segment.text).join("\n");
   const contentText = sanitized.text || transcriptText;

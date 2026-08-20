@@ -2262,7 +2262,12 @@ const importJobStageLabels = Object.freeze({
   indexing: "正在建立索引",
   reading_metadata: "正在读取视频信息",
   reading_captions: "正在读取公开字幕",
-  awaiting_confirmation: "没有公开字幕，等待确认",
+  awaiting_confirmation: "没有独立字幕轨，等待确认",
+  downloading_video: "正在临时获取公开视频",
+  extracting_audio: "正在提取本地音频",
+  extracting_frames: "正在采集候选画面",
+  transcribing_audio: "正在进行本地语音转写",
+  rendering_study_pdf: "正在生成图文学习 PDF",
   completed: "已完成",
   failed: "失败",
 });
@@ -2297,7 +2302,7 @@ function renderImportJobs() {
     if (job.errorMessage) copy.append(createTextElement("p", "", job.errorMessage));
     item.append(copy);
     if (job.stage === "awaiting_confirmation") {
-      /** actions 提供重新检查字幕和明确仅保存链接两个选择。 */
+      /** actions 提供重新检查、图文 PDF 和仅保存链接三个明确选择。 */
       const actions = document.createElement("div");
       actions.className = "import-job-actions";
       const retryButton = createTextElement("button", "text-button", "重新检查字幕");
@@ -2333,7 +2338,34 @@ function renderImportJobs() {
           saveLinkButton.disabled = false;
         }
       });
-      actions.append(retryButton, saveLinkButton);
+      const studyPdfButton = createTextElement(
+        "button",
+        "text-button",
+        "本地转写并生成图文 PDF",
+      );
+      studyPdfButton.type = "button";
+      studyPdfButton.addEventListener("click", async () => {
+        const accepted = window.confirm(
+          "将临时获取该公开视频，使用本机语音转写、画面 OCR 和关键帧生成 PDF。"
+          + "处理完成后会删除临时视频和音频，仅保留正文、关键画面和 PDF。是否继续？",
+        );
+        if (!accepted) return;
+        studyPdfButton.disabled = true;
+        try {
+          await requestJson(`/api/import-jobs/${encodeURIComponent(job.id)}/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "generate_study_pdf" }),
+          });
+          showToast("已开始本地转写和关键画面提取，较长视频可能需要一些时间。");
+          await loadImportJobs();
+        } catch (error) {
+          showToast(error.message);
+        } finally {
+          studyPdfButton.disabled = false;
+        }
+      });
+      actions.append(retryButton, studyPdfButton, saveLinkButton);
       item.append(actions);
     } else if (job.status === "failed") {
       /** retryButton 把失败任务重新放回统一队列。 */
@@ -2354,11 +2386,21 @@ function renderImportJobs() {
       });
       item.append(retryButton);
     } else if (job.status === "completed" && job.targetType === "article" && job.targetId) {
-      /** openButton 直接打开浏览器收藏完成后的文章。 */
+      /** completedActions 同时提供正文和可选图文 PDF。 */
+      const completedActions = document.createElement("div");
+      completedActions.className = "import-job-actions";
       const openButton = createTextElement("button", "text-button", "打开");
       openButton.type = "button";
       openButton.addEventListener("click", () => void openArticle(job.targetId));
-      item.append(openButton);
+      completedActions.append(openButton);
+      if (job.result?.pdfUrl) {
+        const pdfButton = createTextElement("a", "text-button", "打开图文 PDF");
+        pdfButton.href = job.result.pdfUrl;
+        pdfButton.target = "_blank";
+        pdfButton.rel = "noopener noreferrer";
+        completedActions.append(pdfButton);
+      }
+      item.append(completedActions);
     }
     dom.importJobList.append(item);
   }

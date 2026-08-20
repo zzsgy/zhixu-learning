@@ -1525,7 +1525,7 @@ body.has-reading-toc .floating-reader-back {
 .browser-client-item > div, .import-job-item > div { min-width: 0; }
 .browser-client-item strong, .import-job-item strong { display: block; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .browser-client-item small, .import-job-item small { display: block; margin-top: 4px; color: var(--ink-soft); font-size: 10px; }
-.browser-client-item button, .import-job-item button { flex: 0 0 auto; margin: 0; padding: 4px 0; }
+.browser-client-item button, .import-job-item button, .import-job-item a.text-button { flex: 0 0 auto; margin: 0; padding: 4px 0; }
 .browser-client-item.is-revoked { opacity: 0.55; }
 .import-job-actions { display: grid; flex: 0 0 auto; gap: 6px; justify-items: end; }
 .import-job-item.is-failed .import-job-actions .text-button:last-child { color: var(--cyan-strong); }

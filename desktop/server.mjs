@@ -14,6 +14,7 @@ import {
   paperDirectory,
   publicDirectory,
   serverConfig,
+  videoReportDirectory,
 } from "./lib/config.mjs";
 import {
   addContentTag,
@@ -138,6 +139,10 @@ import {
   inspectVideoSource,
   normalizeVideoUrl,
 } from "./lib/video-importer.mjs";
+import {
+  createVideoStudyPdf,
+  getVideoStudyEngineStatus,
+} from "./lib/video-study-service.mjs";
 
 /** paperScheduleIntervalMilliseconds 是后台检查新自然周的间隔。 */
 const paperScheduleIntervalMilliseconds = 6 * 60 * 60 * 1000;
@@ -383,7 +388,7 @@ async function processDocumentOcrJob(job, context) {
 }
 
 /**
- * 执行视频链接导入：只读取公开元数据与字幕，不默认下载视频或音频。
+ * 执行视频链接导入：默认只读取公开字幕；用户明确确认后才本地转写并生成 PDF。
  *
  * @param {Record<string, unknown>} job 数据库中的后台任务。
  * @param {{ updateProgress: Function }} context 进度更新接口。
@@ -400,6 +405,23 @@ async function processVideoTranscriptJob(job, context) {
       : undefined,
   });
   context.updateProgress({ stage: "reading_captions", progressPercent: 55 });
+  /** analysisResult 仅在用户明确选择图文 PDF 时存在。 */
+  let analysisResult = null;
+  if (
+    video.segments.length === 0
+    && job.payload.confirmationAction === "generate_study_pdf"
+  ) {
+    analysisResult = await createVideoStudyPdf(video, {
+      jobId: job.id,
+      updateProgress: context.updateProgress,
+    });
+    video.segments = Array.isArray(analysisResult.segments) ? analysisResult.segments : [];
+    video.captionLanguage = analysisResult.detectedLanguage || "zh";
+    video.captionName = "本地语音转写";
+    if (video.segments.length === 0) {
+      throw new Error("本地语音转写没有识别到可保存的讲解文字。");
+    }
+  }
   /** articleInput 是经过统一 HTML 清洗与分类的本地文章数据。 */
   const articleInput = await createVideoArticle(video, {
     saveLinkOnly: job.payload.confirmationAction === "save_link",
@@ -421,6 +443,10 @@ async function processVideoTranscriptJob(job, context) {
     platform: video.platform,
     transcriptSegmentCount: articleInput.transcriptSegmentCount,
     savedLinkOnly: articleInput.transcriptSegmentCount === 0,
+    pdfUrl: analysisResult?.pdfUrl || "",
+    pdfFileName: analysisResult?.pdfFileName || "",
+    keyFrameCount: Number(analysisResult?.keyFrameCount) || 0,
+    pdfPageCount: Number(analysisResult?.pageCount) || 0,
   };
 }
 
@@ -646,11 +672,11 @@ async function handleApiRequest(request, response, url) {
   if (request.method === "POST" && importJobConfirmMatch) {
     const requestBuffer = await readRequestBuffer(request, 16 * 1024);
     const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    if (payload.action !== "save_link") {
-      sendJson(response, 400, { message: "当前只支持确认后仅保存视频链接。" });
+    if (!["save_link", "generate_study_pdf"].includes(payload.action)) {
+      sendJson(response, 400, { message: "请选择仅保存链接或生成图文学习 PDF。" });
       return true;
     }
-    /** job 是用户明确选择仅保存链接后重新排队的任务。 */
+    /** job 是用户明确选择处理方式后重新排队的任务。 */
     const job = confirmVideoImportJob(
       decodeURIComponent(importJobConfirmMatch[1]),
       String(payload.action || ""),
@@ -668,6 +694,35 @@ async function handleApiRequest(request, response, url) {
     /** ocr 是本机 Tesseract 与 PDF 渲染工具可用状态。 */
     const ocr = await getOcrEngineStatus();
     sendJson(response, 200, { ocr });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/video-study/status") {
+    const videoStudy = await getVideoStudyEngineStatus();
+    sendJson(response, 200, { videoStudy });
+    return true;
+  }
+
+  const videoReportMatch = url.pathname.match(/^\/api\/video-reports\/([^/]+)$/);
+  if (request.method === "GET" && videoReportMatch) {
+    const reportName = decodeURIComponent(videoReportMatch[1]);
+    if (!/^[a-z0-9_-]+\.pdf$/i.test(reportName) || path.basename(reportName) !== reportName) {
+      sendJson(response, 400, { message: "视频学习 PDF 名称无效。" });
+      return true;
+    }
+    const reportPath = path.join(videoReportDirectory, reportName);
+    if (!fs.existsSync(reportPath) || !fs.statSync(reportPath).isFile()) {
+      sendJson(response, 404, { message: "找不到这份视频学习 PDF。" });
+      return true;
+    }
+    response.writeHead(200, {
+      "Content-Type": "application/pdf",
+      "Content-Length": fs.statSync(reportPath).size,
+      "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(reportName)}`,
+      "Cache-Control": "private, max-age=300",
+      "X-Content-Type-Options": "nosniff",
+    });
+    fs.createReadStream(reportPath).pipe(response);
     return true;
   }
 

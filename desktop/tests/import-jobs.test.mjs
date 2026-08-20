@@ -91,7 +91,7 @@ test("后台导入任务可恢复重试，浏览器令牌可验证撤销", async
       payload: { url: "https://example.com/video" },
     });
     databaseModule.claimNextImportJob(["video_transcript"]);
-    const confirmationError = new Error("当前视频没有可读取的公开字幕。");
+    const confirmationError = new Error("当前视频没有可读取的独立字幕轨；画面中可能仍有硬字幕。");
     confirmationError.code = "IMPORT_CONFIRMATION_REQUIRED";
     databaseModule.failImportJob(confirmationJob.id, confirmationError);
     const waitingJob = databaseModule.getImportJob(confirmationJob.id);
@@ -103,6 +103,24 @@ test("后台导入任务可恢复重试，浏览器令牌可验证撤销", async
     );
     assert.equal(confirmedJob.status, "queued");
     assert.equal(confirmedJob.payload.confirmationAction, "save_link");
+    databaseModule.claimNextImportJob(["video_transcript"]);
+    databaseModule.completeImportJob(confirmedJob.id, { savedLinkOnly: true });
+
+    /** pdfConfirmationJob 验证用户也可明确选择本地转写与图文 PDF。 */
+    const pdfConfirmationJob = databaseModule.createImportJob({
+      jobType: "video_transcript",
+      sourceLabel: "硬字幕视频",
+      sourceUrl: "https://example.com/hard-subtitle-video",
+      payload: { url: "https://example.com/hard-subtitle-video" },
+    });
+    databaseModule.claimNextImportJob(["video_transcript"]);
+    databaseModule.failImportJob(pdfConfirmationJob.id, confirmationError);
+    const pdfConfirmedJob = databaseModule.confirmVideoImportJob(
+      pdfConfirmationJob.id,
+      "generate_study_pdf",
+    );
+    assert.equal(pdfConfirmedJob.status, "queued");
+    assert.equal(pdfConfirmedJob.payload.confirmationAction, "generate_study_pdf");
 
     /** rawToken 只用于模拟扩展本地保存的随机令牌。 */
     const rawToken = crypto.randomBytes(32).toString("base64url");

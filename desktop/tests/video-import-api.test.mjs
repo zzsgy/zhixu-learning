@@ -76,7 +76,7 @@ test("无公开字幕的视频等待确认，确认后仅保存链接文章", as
       (job) => job.stage === "awaiting_confirmation",
     );
     assert.equal(waitingJob.status, "failed");
-    assert.match(waitingJob.errorMessage, /公开字幕/);
+    assert.match(waitingJob.errorMessage, /独立字幕轨/);
 
     const confirmResponse = await fetch(
       `${videoBaseUrl}/api/import-jobs/${encodeURIComponent(waitingJob.id)}/confirm`,
