@@ -140,6 +140,7 @@ import {
   normalizeVideoUrl,
 } from "./lib/video-importer.mjs";
 import {
+  cleanupVideoProcessingArtifacts,
   createVideoStudyPdf,
   getVideoStudyEngineStatus,
 } from "./lib/video-study-service.mjs";
@@ -388,6 +389,61 @@ async function processDocumentOcrJob(job, context) {
 }
 
 /**
+ * 将视频任务生成的 PDF 作为正式文档保存，并写入全文检索和分类目录。
+ *
+ * @param {Record<string, unknown>} video 视频元数据。
+ * @param {Record<string, unknown>} analysisResult 图文 PDF 生成结果。
+ * @returns {Promise<Record<string, unknown>>} 文档库记录。
+ */
+async function saveVideoStudyPdfDocument(video, analysisResult) {
+  const reportPath = path.resolve(String(analysisResult.pdfPath || ""));
+  if (!isPathInsideDirectory(reportPath, videoReportDirectory) || !fs.existsSync(reportPath)) {
+    throw new Error("视频图文 PDF 暂存文件无效。");
+  }
+  const fileBuffer = fs.readFileSync(reportPath);
+  const safeTitle = String(video.title || "视频学习笔记").replace(/[\\/:*?"<>|]/g, " ").trim();
+  const originalName = sanitizeFileName(encodeURIComponent(`${safeTitle || "视频学习笔记"}-图文学习笔记.pdf`));
+  const documentId = `doc_${crypto.randomUUID()}`;
+  const storedName = `${documentId}.pdf`;
+  const storedPath = path.join(attachmentDirectory, storedName);
+  const sha256 = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+  const extractionResult = await extractDocumentText({
+    buffer: fileBuffer,
+    originalName,
+    mimeType: "application/pdf",
+  });
+  const classification = await classifyDocument({
+    fileName: originalName,
+    text: `${video.description || ""}\n${extractionResult.text}`.slice(0, 120_000),
+  });
+  const now = new Date().toISOString();
+  fs.writeFileSync(storedPath, fileBuffer, { flag: "wx" });
+  try {
+    return insertDocument({
+      id: documentId,
+      originalName,
+      storedName,
+      mimeType: "application/pdf",
+      extension: ".pdf",
+      sizeBytes: fileBuffer.length,
+      sha256,
+      title: deriveDocumentTitle(originalName),
+      category: classification.category,
+      categorySource: classification.source,
+      categoryConfidence: classification.confidence,
+      summary: createDocumentSummary(extractionResult.text, originalName),
+      extractedText: extractionResult.text,
+      extractionStatus: extractionResult.status,
+      createdAt: now,
+      updatedAt: now,
+    });
+  } catch (error) {
+    fs.rmSync(storedPath, { force: true });
+    throw error;
+  }
+}
+
+/**
  * 执行视频链接导入：默认只读取公开字幕；用户明确确认后才本地转写并生成 PDF。
  *
  * @param {Record<string, unknown>} job 数据库中的后台任务。
@@ -405,22 +461,41 @@ async function processVideoTranscriptJob(job, context) {
       : undefined,
   });
   context.updateProgress({ stage: "reading_captions", progressPercent: 55 });
-  /** analysisResult 仅在用户明确选择图文 PDF 时存在。 */
-  let analysisResult = null;
-  if (
-    video.segments.length === 0
-    && job.payload.confirmationAction === "generate_study_pdf"
-  ) {
-    analysisResult = await createVideoStudyPdf(video, {
+  /** generateStudyPdf 表示用户已明确同意临时处理媒体并保存到文档库。 */
+  const generateStudyPdf = job.payload.confirmationAction === "generate_study_pdf";
+  if (generateStudyPdf) {
+    const analysisResult = await createVideoStudyPdf(video, {
       jobId: job.id,
       updateProgress: context.updateProgress,
+      segments: video.segments,
+      captionLanguage: video.captionLanguage,
     });
     video.segments = Array.isArray(analysisResult.segments) ? analysisResult.segments : [];
-    video.captionLanguage = analysisResult.detectedLanguage || "zh";
-    video.captionName = "本地语音转写";
+    video.captionLanguage = video.captionLanguage || analysisResult.detectedLanguage || "zh";
+    video.captionName = video.captionName || "本地语音转写";
     if (video.segments.length === 0) {
+      fs.rmSync(analysisResult.pdfPath, { force: true });
       throw new Error("本地语音转写没有识别到可保存的讲解文字。");
     }
+    context.updateProgress({ stage: "saving", progressPercent: 91 });
+    let document;
+    try {
+      document = await saveVideoStudyPdfDocument(video, analysisResult);
+    } finally {
+      fs.rmSync(analysisResult.pdfPath, { force: true });
+    }
+    context.updateProgress({ stage: "indexing", progressPercent: 97 });
+    createDailyBackup();
+    return {
+      targetType: "document",
+      targetId: document.id,
+      title: document.title,
+      platform: video.platform,
+      transcriptSegmentCount: video.segments.length,
+      keyFrameCount: Number(analysisResult.keyFrameCount) || 0,
+      pdfPageCount: Number(analysisResult.pageCount) || 0,
+      savedToDocumentLibrary: true,
+    };
   }
   /** articleInput 是经过统一 HTML 清洗与分类的本地文章数据。 */
   const articleInput = await createVideoArticle(video, {
@@ -443,10 +518,10 @@ async function processVideoTranscriptJob(job, context) {
     platform: video.platform,
     transcriptSegmentCount: articleInput.transcriptSegmentCount,
     savedLinkOnly: articleInput.transcriptSegmentCount === 0,
-    pdfUrl: analysisResult?.pdfUrl || "",
-    pdfFileName: analysisResult?.pdfFileName || "",
-    keyFrameCount: Number(analysisResult?.keyFrameCount) || 0,
-    pdfPageCount: Number(analysisResult?.pageCount) || 0,
+    pdfUrl: "",
+    pdfFileName: "",
+    keyFrameCount: 0,
+    pdfPageCount: 0,
   };
 }
 
@@ -762,6 +837,9 @@ async function handleApiRequest(request, response, url) {
       payload: {
         url: normalizedVideo.canonicalUrl,
         preferredLanguages,
+        confirmationAction: payload.generateStudyPdf === true
+          ? "generate_study_pdf"
+          : undefined,
       },
     });
     importJobRunner.trigger();
@@ -2483,6 +2561,7 @@ const codexWorkerTimer = setInterval(
 );
 codexWorkerTimer.unref();
 initializeCodexPaperTranslationWorker();
+cleanupVideoProcessingArtifacts();
 importJobRunner.start();
 
 /** server 是只监听本机回环地址的 HTTP 服务。 */

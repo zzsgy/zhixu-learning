@@ -63,6 +63,7 @@ test("无公开字幕的视频等待确认，确认后仅保存链接文章", as
     await waitForServer();
     const indexHtml = await (await fetch(`${videoBaseUrl}/`)).text();
     assert.match(indexHtml, /id="video-import-form"/);
+    assert.match(indexHtml, /整理为图文 PDF 并保存/);
 
     const createResponse = await fetch(`${videoBaseUrl}/api/videos/import`, {
       method: "POST",

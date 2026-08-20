@@ -13,34 +13,10 @@ const moduleFilePath = fileURLToPath(import.meta.url);
 const moduleDirectory = path.dirname(moduleFilePath);
 /** 桌面版项目根目录。 */
 export const projectDirectory = path.resolve(moduleDirectory, "..");
-/** dataDirectory 是本地数据根目录；测试时允许通过环境变量隔离到临时目录。 */
-export const dataDirectory = process.env.ZHIXU_DATA_DIR
-  ? path.resolve(process.env.ZHIXU_DATA_DIR)
-  : path.join(projectDirectory, "data");
-/** SQLite 数据库文件路径。 */
-export const databasePath = path.join(dataDirectory, "zhixu.db");
-/** 上传原文件保存目录。 */
-export const attachmentDirectory = path.join(dataDirectory, "attachments");
-/** articleImageDirectory 是网页文章远程图片的本地缓存目录。 */
-export const articleImageDirectory = path.join(dataDirectory, "article-images");
-/** paperDirectory 是公开论文 PDF 与全文提取结果的本地缓存目录。 */
-export const paperDirectory = path.join(dataDirectory, "papers");
-/** ocrDirectory 是扫描 PDF 页面渲染和 OCR 临时文件的受控目录。 */
-export const ocrDirectory = path.join(dataDirectory, "ocr");
-/** videoReportDirectory 保存用户明确确认后生成的图文学习 PDF。 */
-export const videoReportDirectory = path.join(dataDirectory, "video-reports");
-/** videoWorkDirectory 只保存处理中的临时媒体、音频和关键帧。 */
-export const videoWorkDirectory = path.join(dataDirectory, "video-work");
-/** videoToolDirectory 是知序本地安装的 FFmpeg 与 yt-dlp 目录。 */
-export const videoToolDirectory = path.join(dataDirectory, "video-tools");
-/** videoPythonDirectory 是隔离安装语音转写和 PDF 依赖的 Python 环境。 */
-export const videoPythonDirectory = path.join(dataDirectory, "video-python");
-/** videoModelDirectory 保存本地 Whisper 模型缓存。 */
-export const videoModelDirectory = path.join(dataDirectory, "video-models");
-/** SQLite 自动备份目录。 */
-export const backupDirectory = path.join(dataDirectory, "backups");
 /** 本地私密环境变量文件路径。 */
 const localEnvironmentPath = path.join(projectDirectory, ".env.local");
+/** externallyConfiguredDataDirectory 用于让测试或系统级数据目录保持完整隔离。 */
+const externallyConfiguredDataDirectory = process.env.ZHIXU_DATA_DIR?.trim() || "";
 
 /**
  * 清理环境变量文本两端的可选引号。
@@ -106,6 +82,38 @@ function readBoundedInteger(
 }
 
 loadLocalEnvironment();
+
+/** dataDirectory 是本地数据根目录；测试时允许通过环境变量隔离到临时目录。 */
+export const dataDirectory = process.env.ZHIXU_DATA_DIR
+  ? path.resolve(process.env.ZHIXU_DATA_DIR)
+  : path.join(projectDirectory, "data");
+/** SQLite 数据库文件路径。 */
+export const databasePath = path.join(dataDirectory, "zhixu.db");
+/** 上传原文件保存目录。 */
+export const attachmentDirectory = path.join(dataDirectory, "attachments");
+/** articleImageDirectory 是网页文章远程图片的本地缓存目录。 */
+export const articleImageDirectory = path.join(dataDirectory, "article-images");
+/** paperDirectory 是公开论文 PDF 与全文提取结果的本地缓存目录。 */
+export const paperDirectory = path.join(dataDirectory, "papers");
+/** ocrDirectory 是扫描 PDF 页面渲染和 OCR 临时文件的受控目录。 */
+export const ocrDirectory = path.join(dataDirectory, "ocr");
+/** videoRuntimeDirectory 把大体积工具、模型和临时媒体集中到可迁移目录。 */
+export const videoRuntimeDirectory = !externallyConfiguredDataDirectory
+  && process.env.ZHIXU_VIDEO_RUNTIME_DIR
+  ? path.resolve(process.env.ZHIXU_VIDEO_RUNTIME_DIR)
+  : path.join(dataDirectory, "video-runtime");
+/** videoReportDirectory 是生成 PDF 正式进入文档库前的短期暂存目录。 */
+export const videoReportDirectory = path.join(videoRuntimeDirectory, "reports");
+/** videoWorkDirectory 只保存处理中的临时媒体、音频和关键帧。 */
+export const videoWorkDirectory = path.join(videoRuntimeDirectory, "work");
+/** videoToolDirectory 是知序本地安装的 FFmpeg 与 yt-dlp 目录。 */
+export const videoToolDirectory = path.join(videoRuntimeDirectory, "tools");
+/** videoPythonDirectory 是隔离安装语音转写和 PDF 依赖的 Python 环境。 */
+export const videoPythonDirectory = path.join(videoRuntimeDirectory, "python");
+/** videoModelDirectory 保存本地 Whisper 模型缓存。 */
+export const videoModelDirectory = path.join(videoRuntimeDirectory, "models");
+/** SQLite 自动备份目录。 */
+export const backupDirectory = path.join(dataDirectory, "backups");
 
 /** serverConfig 汇总本地 HTTP 服务、上传和备份配置。 */
 export const serverConfig = Object.freeze({
@@ -174,6 +182,7 @@ export function ensureLocalDirectories() {
     articleImageDirectory,
     paperDirectory,
     ocrDirectory,
+    videoRuntimeDirectory,
     videoReportDirectory,
     videoWorkDirectory,
     videoToolDirectory,

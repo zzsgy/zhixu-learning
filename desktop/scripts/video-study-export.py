@@ -30,7 +30,8 @@ from reportlab.platypus import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--audio", required=True)
+    parser.add_argument("--audio")
+    parser.add_argument("--transcript-json")
     parser.add_argument("--frames", required=True)
     parser.add_argument("--frame-interval", type=float, required=True)
     parser.add_argument("--metadata", required=True)
@@ -71,6 +72,21 @@ def transcribe(audio_path: Path, model_name: str) -> tuple[list[dict], str]:
             "text": text,
         })
     return segments, str(getattr(info, "language", "") or "")
+
+
+def load_transcript(transcript_path: Path) -> tuple[list[dict], str]:
+    payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+    segments = []
+    for item in payload.get("segments", []):
+        text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
+        if not text:
+            continue
+        segments.append({
+            "startSeconds": max(float(item.get("startSeconds") or 0), 0),
+            "endSeconds": max(float(item.get("endSeconds") or 0), 0),
+            "text": text,
+        })
+    return segments, str(payload.get("language") or "")
 
 
 def image_difference(left: Path, right: Path) -> float:
@@ -242,12 +258,16 @@ def build_pdf(metadata: dict, segments: list[dict], frames: list[dict], output_p
 
 def main() -> None:
     args = parse_args()
-    audio_path = Path(args.audio).resolve()
     frame_directory = Path(args.frames).resolve()
     output_pdf = Path(args.output_pdf).resolve()
     output_json = Path(args.output_json).resolve()
     metadata = json.loads(Path(args.metadata).read_text(encoding="utf-8"))
-    segments, detected_language = transcribe(audio_path, args.model)
+    if args.transcript_json:
+        segments, detected_language = load_transcript(Path(args.transcript_json).resolve())
+    elif args.audio:
+        segments, detected_language = transcribe(Path(args.audio).resolve(), args.model)
+    else:
+        raise ValueError("必须提供音频或已有字幕。")
     frame_paths = sorted(frame_directory.glob("frame-*.jpg"))
     key_frames = select_key_frames(frame_paths, args.frame_interval, max(args.max_frames, 1))
     for frame in key_frames:

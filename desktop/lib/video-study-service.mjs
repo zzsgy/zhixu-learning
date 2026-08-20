@@ -138,10 +138,27 @@ export async function getVideoStudyEngineStatus() {
 }
 
 /**
+ * 删除上次异常退出遗留的媒体、音频、截图和未入库 PDF。
+ *
+ * @returns {void}
+ */
+export function cleanupVideoProcessingArtifacts() {
+  for (const rootDirectory of [videoWorkDirectory, videoReportDirectory]) {
+    fs.mkdirSync(rootDirectory, { recursive: true });
+    const resolvedRoot = path.resolve(rootDirectory);
+    for (const entry of fs.readdirSync(resolvedRoot, { withFileTypes: true })) {
+      const candidatePath = path.resolve(resolvedRoot, entry.name);
+      if (!candidatePath.startsWith(`${resolvedRoot}${path.sep}`)) continue;
+      fs.rmSync(candidatePath, { recursive: entry.isDirectory(), force: true });
+    }
+  }
+}
+
+/**
  * 临时下载公开视频，转写音频、提取关键画面并生成可检索 PDF。
  *
  * @param {Record<string, unknown>} video 统一视频信息。
- * @param {{ jobId: string, updateProgress?: Function }} options 任务信息。
+ * @param {{ jobId: string, updateProgress?: Function, segments?: Array<Record<string, unknown>>, captionLanguage?: string }} options 任务信息。
  * @returns {Promise<Record<string, unknown>>} 转写段落与 PDF 结果。
  */
 export async function createVideoStudyPdf(video, options) {
@@ -158,12 +175,17 @@ export async function createVideoStudyPdf(video, options) {
   const workDirectory = createSafeWorkDirectory(options.jobId);
   const framesDirectory = path.join(workDirectory, "frames");
   const audioPath = path.join(workDirectory, "audio.wav");
+  const transcriptPath = path.join(workDirectory, "transcript.json");
   const metadataPath = path.join(workDirectory, "metadata.json");
   const resultPath = path.join(workDirectory, "analysis.json");
   const reportName = `${String(options.jobId).replace(/[^a-z0-9_-]/gi, "_")}.pdf`;
   const reportPath = path.join(videoReportDirectory, reportName);
   fs.mkdirSync(framesDirectory, { recursive: true });
   fs.mkdirSync(videoReportDirectory, { recursive: true });
+  const suppliedSegments = Array.isArray(options.segments)
+    ? options.segments.filter((segment) => String(segment?.text || "").trim())
+    : [];
+  let reportReady = false;
   try {
     updateProgress({ stage: "downloading_video", progressPercent: 12 });
     await runCommand(serverConfig.ytDlpPath, [
@@ -171,20 +193,29 @@ export async function createVideoStudyPdf(video, options) {
       "--no-progress",
       "--no-warnings",
       "--ffmpeg-location", path.dirname(serverConfig.ffmpegPath),
-      "--format", "bv*[height<=1080]+ba/b[height<=1080]",
+      "--format", suppliedSegments.length > 0
+        ? "bv*[height<=1080]/b[height<=1080]"
+        : "bv*[height<=1080]+ba/b[height<=1080]",
       "--merge-output-format", "mp4",
       "--output", path.join(workDirectory, "source.%(ext)s"),
       "--", video.canonicalUrl,
     ], { cwd: workDirectory });
     const mediaPath = findDownloadedMedia(workDirectory);
 
-    updateProgress({ stage: "extracting_audio", progressPercent: 28 });
-    await runCommand(serverConfig.ffmpegPath, [
-      "-hide_banner", "-loglevel", "error", "-y",
-      "-i", mediaPath,
-      "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
-      audioPath,
-    ]);
+    if (suppliedSegments.length === 0) {
+      updateProgress({ stage: "extracting_audio", progressPercent: 28 });
+      await runCommand(serverConfig.ffmpegPath, [
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-i", mediaPath,
+        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+        audioPath,
+      ]);
+    } else {
+      fs.writeFileSync(transcriptPath, JSON.stringify({
+        language: options.captionLanguage || "",
+        segments: suppliedSegments,
+      }, null, 2), "utf8");
+    }
 
     updateProgress({ stage: "extracting_frames", progressPercent: 38 });
     await runCommand(serverConfig.ffmpegPath, [
@@ -206,9 +237,8 @@ export async function createVideoStudyPdf(video, options) {
 
     updateProgress({ stage: "transcribing_audio", progressPercent: 48 });
     fs.mkdirSync(videoModelDirectory, { recursive: true });
-    await runCommand(serverConfig.videoPythonPath, [
+    const generatorArguments = [
       generatorScriptPath,
-      "--audio", audioPath,
       "--frames", framesDirectory,
       "--frame-interval", String(serverConfig.videoFrameIntervalSeconds),
       "--metadata", metadataPath,
@@ -218,7 +248,12 @@ export async function createVideoStudyPdf(video, options) {
       "--tesseract", serverConfig.tesseractPath,
       "--ocr-languages", serverConfig.ocrLanguages,
       "--max-frames", "60",
-    ], {
+    ];
+    generatorArguments.push(
+      suppliedSegments.length > 0 ? "--transcript-json" : "--audio",
+      suppliedSegments.length > 0 ? transcriptPath : audioPath,
+    );
+    await runCommand(serverConfig.videoPythonPath, generatorArguments, {
       env: { ...process.env, HF_HOME: videoModelDirectory },
     });
     const result = JSON.parse(fs.readFileSync(resultPath, "utf8"));
@@ -226,6 +261,7 @@ export async function createVideoStudyPdf(video, options) {
     if (!fs.existsSync(reportPath) || fs.statSync(reportPath).size < 10_000) {
       throw new Error("图文学习 PDF 未正确生成。");
     }
+    reportReady = true;
     return {
       ...result,
       pdfPath: reportPath,
@@ -237,5 +273,6 @@ export async function createVideoStudyPdf(video, options) {
     if (`${path.resolve(workDirectory)}${path.sep}`.startsWith(workRoot)) {
       fs.rmSync(workDirectory, { recursive: true, force: true });
     }
+    if (!reportReady) fs.rmSync(reportPath, { force: true });
   }
 }

@@ -2385,13 +2385,24 @@ function renderImportJobs() {
         }
       });
       item.append(retryButton);
-    } else if (job.status === "completed" && job.targetType === "article" && job.targetId) {
-      /** completedActions 同时提供正文和可选图文 PDF。 */
+    } else if (
+      job.status === "completed"
+      && ["article", "document"].includes(job.targetType)
+      && job.targetId
+    ) {
+      /** completedActions 直接打开已经进入知识库的文章或文档。 */
       const completedActions = document.createElement("div");
       completedActions.className = "import-job-actions";
-      const openButton = createTextElement("button", "text-button", "打开");
+      const openButton = createTextElement(
+        "button",
+        "text-button",
+        job.targetType === "document" ? "打开文档" : "打开",
+      );
       openButton.type = "button";
-      openButton.addEventListener("click", () => void openArticle(job.targetId));
+      openButton.addEventListener("click", () => {
+        if (job.targetType === "document") void openDocument(job.targetId);
+        else void openArticle(job.targetId);
+      });
       completedActions.append(openButton);
       if (job.result?.pdfUrl) {
         const pdfButton = createTextElement("a", "text-button", "打开图文 PDF");
@@ -2993,6 +3004,12 @@ async function importVideoUrl() {
     showToast("请先输入视频链接。");
     return;
   }
+  const accepted = window.confirm(
+    "知序将优先读取公开字幕，并临时获取视频画面来提取 PPT 和关键帧。"
+    + "没有字幕时会在本机转写音频；完成后自动删除临时视频、音频和截图，"
+    + "最终 PDF 会保存到文档库。是否继续？",
+  );
+  if (!accepted) return;
   dom.importVideoButton.disabled = true;
   dom.importVideoButton.textContent = "正在加入任务…";
   try {
@@ -3002,17 +3019,18 @@ async function importVideoUrl() {
       body: JSON.stringify({
         url: inputUrl,
         preferredLanguages: ["zh-Hans", "zh-CN", "zh-Hant", "zh", "en"],
+        generateStudyPdf: true,
       }),
     });
     dom.videoUrlInput.value = "";
     showView("storage");
     await loadStorageOperations();
-    showToast(payload.duplicate ? "相同视频已经在导入队列中。" : "视频已加入字幕导入任务。");
+    showToast(payload.duplicate ? "相同视频已经在导入队列中。" : "正在整理图文 PDF，完成后会自动进入文档库。");
   } catch (error) {
     showToast(error.message);
   } finally {
     dom.importVideoButton.disabled = false;
-    dom.importVideoButton.textContent = "读取字幕并导入";
+    dom.importVideoButton.textContent = "整理为图文 PDF 并保存";
   }
 }
 

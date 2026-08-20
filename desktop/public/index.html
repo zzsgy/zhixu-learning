@@ -378,10 +378,10 @@
           <div class="article-import-layout video-import-layout">
             <div class="article-import-copy">
               <p class="eyebrow">VIDEO INBOX</p>
-              <h2>粘贴视频链接，把字幕、讲解和关键画面变成可检索资料。</h2>
+              <h2>粘贴视频链接，整理成图文 PDF 并保存到文档库。</h2>
               <p>
                 支持 YouTube 和哔哩哔哩公开视频。知序只读取元数据与公开字幕；
-                没有独立字幕轨时会停下来询问，可选择本地转写并生成包含 PPT 关键画面的 PDF。
+                优先使用公开字幕，并提取 PPT、流程图和演示画面；没有独立字幕轨时改用本地语音转写。
               </p>
             </div>
             <form class="article-import-form" id="video-import-form">
@@ -392,9 +392,9 @@
                 rows="4"
               ></textarea>
               <button class="primary-button" id="import-video-button" type="submit">
-                读取字幕并导入
+                整理为图文 PDF 并保存
               </button>
-              <small>默认不下载媒体。只有明确确认生成图文 PDF 后，才临时处理视频和音频；完成后自动删除临时媒体。</small>
+              <small>点击后会再次确认。临时视频、音频和截图在成功或失败后都会清理，最终 PDF 作为正式文档进入文档库。</small>
             </form>
           </div>
         </section>
