@@ -2,11 +2,27 @@
  * 每周论文偏好排序测试。
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import {
+
+/** temporaryDirectory 隔离模块初始化时创建的 SQLite 数据库，避免测试触碰正式库。 */
+const temporaryDirectory = fs.mkdtempSync(
+  path.join(os.tmpdir(), "zhixu-paper-preference-"),
+);
+process.env.ZHIXU_DATA_DIR = temporaryDirectory;
+
+const {
   scorePaperPreference,
   selectPreferredPaperCandidate,
-} from "../lib/paper-service.mjs";
+} = await import(`../lib/paper-service.mjs?test=${Date.now()}`);
+const { closeDatabase } = await import("../lib/database.mjs");
+
+test.after(() => {
+  closeDatabase();
+  fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+});
 
 /** llmAgentTopic 模拟生产环境中的 LLM 与 Agent 优先规则。 */
 const llmAgentTopic = {
@@ -62,4 +78,30 @@ test("优先级高于单纯发布时间，分数相同时仍选择较新论文",
     llmAgentTopic,
   );
   assert.equal(selectedCandidate?.externalId, "agent");
+});
+
+test("论文库提供可持久化的网格与列表视图", () => {
+  /** projectDirectory 是桌面版项目根目录。 */
+  const projectDirectory = path.resolve(import.meta.dirname, "..");
+  /** indexHtml、applicationScript 和 styleSheet 覆盖控件、交互与布局三层。 */
+  const indexHtml = fs.readFileSync(
+    path.join(projectDirectory, "public", "index.html"),
+    "utf8",
+  );
+  const applicationScript = fs.readFileSync(
+    path.join(projectDirectory, "public", "app.js"),
+    "utf8",
+  );
+  const styleSheet = fs.readFileSync(
+    path.join(projectDirectory, "public", "styles.css"),
+    "utf8",
+  );
+  assert.match(indexHtml, /id="paper-view-mode"/);
+  assert.match(indexHtml, /data-paper-view-mode="grid"/);
+  assert.match(indexHtml, /data-paper-view-mode="list"/);
+  assert.match(applicationScript, /function setupPaperViewMode\(\)/);
+  assert.match(applicationScript, /zhixu-paper-view-mode/);
+  assert.match(applicationScript, /paperGrid\.classList\.toggle\("is-list"/);
+  assert.match(styleSheet, /\.paper-grid\.is-list \.paper-card/);
+  assert.match(styleSheet, /\.paper-grid\.is-list \.paper-card-content/);
 });

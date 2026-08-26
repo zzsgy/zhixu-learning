@@ -9,6 +9,7 @@
     />
     <title>知序｜本地知识库</title>
     <script src="/theme-init.js?v=20260818-2"></script>
+    <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
     <link rel="stylesheet" href="/styles.css?v=20260819-2" />
   </head>
   <body>
@@ -104,6 +105,9 @@
               <button class="secondary-button" id="new-folder-button" type="button">
                 ＋ 新建文件夹
               </button>
+              <button class="secondary-button" id="batch-select-button" type="button" aria-pressed="false">
+                批量整理
+              </button>
               <details class="view-mode" id="view-mode">
                 <summary class="view-mode-button" aria-label="切换文档列表视图">
                   <span>视图</span>
@@ -141,6 +145,17 @@
               >
                 ☆ 只看重点
               </button>
+            </div>
+          </div>
+
+          <div class="library-batch-toolbar" id="library-batch-toolbar" hidden>
+            <strong id="batch-selection-count">已选择 0 项</strong>
+            <span>勾选需要统一整理的文档或网页文章</span>
+            <div>
+              <button class="secondary-button" id="batch-select-all-button" type="button">选择当前页全部</button>
+              <button class="primary-button" id="batch-move-button" type="button" disabled>移动所选内容</button>
+              <button class="danger-button" id="batch-delete-button" type="button" disabled>删除所选内容</button>
+              <button class="secondary-button" id="batch-cancel-button" type="button">退出批量整理</button>
             </div>
           </div>
 
@@ -289,6 +304,35 @@
               <h2>我的论文</h2>
             </div>
             <div class="paper-library-actions">
+              <details class="view-mode" id="paper-view-mode">
+                <summary class="view-mode-button" aria-label="切换论文库展示视图">
+                  <span>视图</span>
+                  <strong id="paper-view-mode-label">网格</strong>
+                  <span class="view-mode-caret" aria-hidden="true">⌄</span>
+                </summary>
+                <div class="view-mode-menu" role="menu">
+                  <button
+                    type="button"
+                    class="view-mode-option"
+                    data-paper-view-mode="grid"
+                    role="menuitemradio"
+                    aria-checked="true"
+                  >
+                    <span class="view-mode-check" aria-hidden="true">✓</span>
+                    <span>网格</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="view-mode-option"
+                    data-paper-view-mode="list"
+                    role="menuitemradio"
+                    aria-checked="false"
+                  >
+                    <span class="view-mode-check" aria-hidden="true">✓</span>
+                    <span>列表</span>
+                  </button>
+                </div>
+              </details>
               <button class="secondary-button" data-open-upload type="button">导入论文</button>
               <button class="secondary-button" id="check-paper-reminder-button" type="button">
                 查看今日推荐
@@ -312,90 +356,117 @@
         </section>
 
         <section class="view" id="upload-view">
-          <div class="upload-layout">
+          <div class="import-method-grid">
+          <div class="document-import-stack">
+          <div class="upload-layout import-method-card">
             <div class="upload-intro">
               <p class="eyebrow">DOCUMENT INBOX</p>
-              <h2>把分散的文件，整理成自己的长期知识。</h2>
-              <p>
-                原文件保存到本机附件目录，提取文本进入 SQLite
-                全文索引。DeepSeek 已配置时会辅助判断主题；不可用时仍可使用本地规则分类。
+              <h2>导入本地文档</h2>
+              <p>上传文件或整个文件夹，原件与目录层级均保存在本机。</p>
+              <p class="import-support-summary">
+                PDF、Office、图片、文本与代码文件 · 单文件最大
+                <strong id="upload-limit-label">200 MB</strong>
               </p>
-              <ul>
-                <li>支持 PDF、DOCX、XLSX、PPTX 和扫描图片</li>
-                <li>支持 TXT、Markdown、HTML、JSON、CSV 和代码文件</li>
-                <li>单个文件最大 <strong id="upload-limit-label">200 MB</strong></li>
-              </ul>
+              <fieldset class="upload-destination" id="upload-destination-controls">
+                <legend>保存到知识库</legend>
+                <label>
+                  <input type="radio" name="upload-destination-mode" value="auto" checked />
+                  <span><strong>系统自动识别</strong><small>按内容分类；导入文件夹时保留原目录层级</small></span>
+                </label>
+                <label>
+                  <input type="radio" name="upload-destination-mode" value="selected" />
+                  <span><strong>指定知识库目录</strong><small>由你选择保存位置</small></span>
+                </label>
+                <select id="upload-folder-select" disabled aria-label="选择知识库目录">
+                  <option value="">请选择目录</option>
+                </select>
+              </fieldset>
             </div>
             <div class="drop-zone" id="drop-zone" tabindex="0" role="button">
               <input id="file-input" type="file" multiple hidden />
+              <input id="folder-input" type="file" webkitdirectory multiple hidden />
               <span class="drop-number">01</span>
-              <h3>拖放文档到这里</h3>
-              <p>或者点击选择电脑中的一个或多个文件</p>
-              <button class="secondary-button" id="choose-files-button" type="button">
-                选择文档
-              </button>
+              <h3>拖放或选择文件</h3>
+              <p>支持多选，也可整批导入文件夹</p>
+              <div class="drop-actions">
+                <button class="secondary-button" id="choose-files-button" type="button">
+                  选择文档
+                </button>
+                <button class="secondary-button" id="choose-folder-button" type="button">
+                  选择文件夹
+                </button>
+              </div>
             </div>
           </div>
+          <div class="upload-batch-progress" id="upload-batch-progress" role="status" aria-live="polite" hidden>
+            <div>
+              <strong id="upload-batch-label">准备导入</strong>
+              <span id="upload-batch-count">0 / 0</span>
+            </div>
+            <div class="upload-batch-track" aria-hidden="true">
+              <span id="upload-batch-bar"></span>
+            </div>
+            <details class="upload-duplicate-summary" id="upload-duplicate-summary" hidden>
+              <summary id="upload-duplicate-label">重复文件未导入</summary>
+              <ul id="upload-duplicate-list"></ul>
+            </details>
+          </div>
           <div class="upload-queue" id="upload-queue"></div>
-          <div class="paper-import-layout">
+          </div>
+          <div class="paper-import-layout import-method-card">
             <div class="paper-import-copy">
               <p class="eyebrow">PAPER INBOX</p>
-              <h2>把经典论文和自己的研究资料放进论文库。</h2>
-              <p>可上传本地 PDF，也可粘贴 arXiv、论文 PDF 或公开论文网页链接。英文论文会保留原文，并进入 Codex 中文翻译流程。</p>
+              <h2>导入论文</h2>
+              <p>选择本地 PDF，或粘贴 arXiv、论文 PDF 与公开论文链接。</p>
               <input id="paper-file-input" type="file" accept="application/pdf,.pdf" hidden />
               <button class="secondary-button" id="choose-paper-file-button" type="button">选择本地 PDF</button>
             </div>
             <form class="paper-import-form" id="paper-import-form">
               <label for="paper-url-input">论文链接</label>
-              <textarea id="paper-url-input" rows="4" placeholder="https://arxiv.org/abs/1706.03762"></textarea>
+              <textarea id="paper-url-input" rows="3" placeholder="https://arxiv.org/abs/1706.03762"></textarea>
               <button class="primary-button" id="import-paper-url-button" type="submit">识别并导入论文</button>
-              <small>公开 PDF 会缓存到本机；普通论文网页会保存可读取的标题、摘要和正文。</small>
+              <small>公开 PDF 缓存到本机；论文网页保存标题、摘要和正文。</small>
             </form>
           </div>
-          <div class="article-import-layout">
+          <div class="article-import-layout import-method-card">
             <div class="article-import-copy">
               <p class="eyebrow">ARTICLE INBOX</p>
-              <h2>也可以粘贴链接，保存公开网页正文。</h2>
-              <p>
-                输入普通网页或微信公众号文章链接。知序会提取正文、过滤脚本，
-                生成简介并自动归入对应技术领域。
-              </p>
+              <h2>保存网页文章</h2>
+              <p>提取公开网页、微信公众号文章或教程目录的可读正文。</p>
             </div>
             <form class="article-import-form" id="article-import-form">
               <label for="article-url-input">文章或教程系列链接</label>
               <textarea
                 id="article-url-input"
                 placeholder="文章、Docsify 根链接，或 GitHub 的 tree/main/docs 目录"
-                rows="4"
+                rows="3"
               ></textarea>
               <button class="primary-button" id="parse-article-button" type="submit">
                 解析并保存
               </button>
-              <small>支持 Docsify 根链接和公开 GitHub docs 目录；会先展示章节预览，再按顺序批量导入。</small>
+              <small>教程目录会先展示章节预览，再按顺序批量导入。</small>
               <div class="docsify-preview" id="docsify-preview" hidden></div>
             </form>
           </div>
-          <div class="article-import-layout video-import-layout">
+          <div class="article-import-layout video-import-layout import-method-card">
             <div class="article-import-copy">
               <p class="eyebrow">VIDEO INBOX</p>
-              <h2>粘贴视频链接，整理成图文 PDF 并保存到文档库。</h2>
-              <p>
-                支持 YouTube 和哔哩哔哩公开视频。知序只读取元数据与公开字幕；
-                优先使用公开字幕，并提取 PPT、流程图和演示画面；没有独立字幕轨时改用本地语音转写。
-              </p>
+              <h2>视频转图文 PDF</h2>
+              <p>读取公开视频字幕并提取 PPT、流程图和关键演示画面。</p>
             </div>
             <form class="article-import-form" id="video-import-form">
               <label for="video-url-input">公开视频链接</label>
               <textarea
                 id="video-url-input"
                 placeholder="https://www.youtube.com/watch?v=... 或 https://www.bilibili.com/video/BV..."
-                rows="4"
+                rows="3"
               ></textarea>
               <button class="primary-button" id="import-video-button" type="submit">
                 整理为图文 PDF 并保存
               </button>
-              <small>点击后会再次确认。临时视频、音频和截图在成功或失败后都会清理，最终 PDF 作为正式文档进入文档库。</small>
+              <small>无字幕时可转本地语音；临时文件会在任务结束后清理。</small>
             </form>
+          </div>
           </div>
         </section>
 
@@ -477,10 +548,15 @@
             </button>
             <div class="reader-header-actions">
               <div class="reader-mode-switch" id="reader-mode-switch" hidden>
-                <button class="is-active" data-reader-mode="original" type="button">
-                  原版预览
-                </button>
-                <button data-reader-mode="readable" type="button">清爽阅读</button>
+                <span class="is-active" aria-current="page">HTML 阅读</span>
+                <a
+                  id="original-document-link"
+                  href="#"
+                  target="_blank"
+                  rel="noopener"
+                >
+                  ↗ 新标签页查看原版
+                </a>
               </div>
               <button class="secondary-button" id="document-ai-button" type="button">用 AI 追问</button>
               <a class="primary-button" id="download-link" href="#">下载原文件</a>
@@ -491,24 +567,20 @@
               <p class="eyebrow" id="reader-meta"></p>
               <h1 id="reader-title"></h1>
               <p class="reader-summary" id="reader-summary"></p>
-              <div class="original-preview" id="original-preview" hidden>
-                <div class="preview-layout-toolbar">
-                  <span>PDF 原版阅读</span>
-                  <button
-                    id="wide-preview-button"
-                    type="button"
-                    aria-pressed="false"
-                  >
-                    ⇱ 展开至页面宽度
-                  </button>
+              <nav class="document-chapter-navigation" id="document-chapter-navigation" aria-label="文档章节翻页" hidden>
+                <button id="document-chapter-previous" type="button">← 上一章</button>
+                <div>
+                  <span id="document-chapter-counter"></span>
+                  <strong id="document-chapter-title"></strong>
                 </div>
-                <iframe
-                  id="original-preview-frame"
-                  title="原始文档预览"
-                  loading="eager"
-                ></iframe>
-              </div>
+                <button id="document-chapter-next" type="button">下一章 →</button>
+              </nav>
               <div class="readable-content" id="reader-content"></div>
+              <nav class="document-chapter-footer" id="document-chapter-footer" aria-label="文档章节翻页" hidden>
+                <button id="document-chapter-footer-previous" type="button">← 上一章</button>
+                <span id="document-chapter-footer-counter"></span>
+                <button id="document-chapter-footer-next" type="button">下一章 →</button>
+              </nav>
             </article>
             <aside class="reader-aside">
               <label>
@@ -537,6 +609,9 @@
             <div class="reader-header-actions">
               <div class="article-translation-tools" id="article-translation-tools" hidden>
                 <span id="article-translation-status"></span>
+                <div class="article-translation-progress" id="article-translation-progress" hidden aria-label="文章翻译进度">
+                  <span id="article-translation-progress-bar"></span>
+                </div>
                 <button class="secondary-button" id="article-translation-request" type="button">
                   加入 Codex 翻译
                 </button>
@@ -608,7 +683,7 @@
           <header class="reading-toc-sidebar-header">
             <div>
               <span>CONTENTS</span>
-              <strong>文章目录</strong>
+              <strong id="reading-toc-title">文章目录</strong>
             </div>
             <button
               id="reading-toc-toggle"
@@ -792,13 +867,29 @@
           <form method="dialog" class="move-folder-shell" id="move-folder-form">
             <header>
               <div>
-                <p class="eyebrow">MOVE CONTENT</p>
-                <h2>移动到文件夹</h2>
+                <p class="eyebrow" id="move-folder-eyebrow">MOVE CONTENT</p>
+                <h2 id="move-folder-title">移动到文件夹</h2>
                 <p id="move-folder-item-title"></p>
               </div>
               <button class="dialog-close-button" id="move-folder-close" type="button" aria-label="取消移动">×</button>
             </header>
-            <div class="move-folder-options" id="move-folder-options" role="listbox" aria-label="选择目标文件夹"></div>
+            <div class="move-folder-toolbar">
+              <label class="move-folder-search">
+                <span>查找目录</span>
+                <input id="move-folder-search" type="search" placeholder="输入文件夹名称或路径" autocomplete="off" />
+              </label>
+              <button class="secondary-button" id="move-folder-collapse-all" type="button">全部折叠</button>
+              <button class="secondary-button" id="move-folder-new" type="button">＋ 新建文件夹</button>
+            </div>
+            <div class="move-folder-create-panel" id="move-folder-create-panel" hidden>
+              <p id="move-folder-create-parent">在文档库根目录下创建</p>
+              <div>
+                <input id="move-folder-create-name" type="text" maxlength="100" placeholder="新文件夹名称" autocomplete="off" />
+                <button class="primary-button" id="move-folder-create-confirm" type="button">创建</button>
+                <button class="secondary-button" id="move-folder-create-cancel" type="button">取消</button>
+              </div>
+            </div>
+            <div class="move-folder-options" id="move-folder-options" role="tree" aria-label="选择目标文件夹"></div>
             <footer>
               <button class="secondary-button" id="move-folder-cancel" type="button">取消</button>
               <button class="primary-button" id="move-folder-confirm" type="submit" disabled>确认移动</button>

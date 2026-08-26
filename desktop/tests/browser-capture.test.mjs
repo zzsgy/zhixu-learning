@@ -58,6 +58,12 @@ test("浏览器扩展必须配对才能创建快速收藏任务", async () => {
     assert.deepEqual(manifest.host_permissions, ["http://127.0.0.1:47821/*"]);
     assert.equal(manifest.permissions.includes("activeTab"), true);
     assert.equal(manifest.permissions.includes("<all_urls>"), false);
+    /** serviceWorkerSource 防止弹窗读取到的网页 HTML 在后台转发时再次丢失。 */
+    const serviceWorkerSource = fs.readFileSync(
+      path.join(projectDirectory, "browser-extension", "service-worker.js"),
+      "utf8",
+    );
+    assert.match(serviceWorkerSource, /sourceHtml:\s*input\.sourceHtml\s*\|\|\s*""/);
 
     /** indexHtml 验证知序页面实际提供配对与任务中心入口。 */
     const indexResponse = await fetch(`${browserBaseUrl}/`);
@@ -120,6 +126,42 @@ test("浏览器扩展必须配对才能创建快速收藏任务", async () => {
       body: JSON.stringify({ url: "chrome://settings" }),
     });
     assert.equal(invalidCapture.status, 400);
+
+    /** capturedPage 模拟用户已在浏览器中通过站点验证后收藏当前文章。 */
+    const capturedPage = await fetch(`${browserBaseUrl}/api/browser/captures`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: extensionOrigin,
+        "X-Zhixu-Capture-Token": acceptedPayload.token,
+      },
+      body: JSON.stringify({
+        url: "https://93.184.216.34/postgresql-hot",
+        title: "HOT updates",
+        sourceHtml: `<html><head><title>HOT updates</title></head><body><main>
+          <h1>HOT updates</h1><p>${"PostgreSQL Heap Only Tuple improves update performance. ".repeat(12)}</p>
+          <script>alert("blocked")</script></main></body></html>`,
+      }),
+    });
+    assert.equal(capturedPage.status, 201);
+    const capturedPayload = await capturedPage.json();
+    assert.equal(capturedPayload.job.status, "completed");
+    assert.equal(capturedPayload.job.result.title, "HOT updates");
+    assert.equal("sourceHtml" in capturedPayload.job.payload, false);
+    const articleResponse = await fetch(`${browserBaseUrl}/api/articles`);
+    const articlePayload = await articleResponse.json();
+    assert.equal(articlePayload.articles.length, 1);
+    /** renameArticleResponse 验证网页来源标题可保留，同时使用人工展示名称。 */
+    const articleId = articlePayload.articles[0].id;
+    const renameArticleResponse = await fetch(`${browserBaseUrl}/api/articles/${articleId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "PostgreSQL HOT 更新原理" }),
+    });
+    assert.equal(renameArticleResponse.status, 200);
+    const renamedArticle = (await renameArticleResponse.json()).article;
+    assert.equal(renamedArticle.title, "PostgreSQL HOT 更新原理");
+    assert.equal(renamedArticle.sourceTitle, "HOT updates");
 
     /** clientsResponse 供知序页面展示和撤销客户端。 */
     const clientsResponse = await fetch(`${browserBaseUrl}/api/browser/clients`);

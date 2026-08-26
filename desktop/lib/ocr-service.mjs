@@ -27,17 +27,23 @@ const commandTimeoutMilliseconds = 10 * 60 * 1000;
 /**
  * 返回正式命令或测试环境注入的 Node.js 模拟脚本。
  *
- * @param {"tesseract" | "pdftoppm"} tool 工具名称。
+ * @param {"tesseract" | "pdftoppm" | "pdfimages"} tool 工具名称。
  * @returns {{ command: string, prefixArguments: string[] }} 命令定义。
  */
 function resolveToolCommand(tool) {
   /** testScript 是测试环境显式提供的不联网模拟程序。 */
   const testScript = tool === "tesseract"
     ? process.env.ZHIXU_TESSERACT_CLI_JS
-    : process.env.ZHIXU_PDFTOPPM_CLI_JS;
+    : tool === "pdfimages"
+      ? process.env.ZHIXU_PDFIMAGES_CLI_JS
+      : process.env.ZHIXU_PDFTOPPM_CLI_JS;
   if (testScript) return { command: process.execPath, prefixArguments: [path.resolve(testScript)] };
   return {
-    command: tool === "tesseract" ? serverConfig.tesseractPath : serverConfig.pdfToPpmPath,
+    command: tool === "tesseract"
+      ? serverConfig.tesseractPath
+      : tool === "pdfimages"
+        ? serverConfig.pdfImagesPath
+        : serverConfig.pdfToPpmPath,
     prefixArguments: [],
   };
 }
@@ -45,7 +51,7 @@ function resolveToolCommand(tool) {
 /**
  * 安全执行本地 OCR 工具并收集有限输出。
  *
- * @param {"tesseract" | "pdftoppm"} tool 工具名称。
+ * @param {"tesseract" | "pdftoppm" | "pdfimages"} tool 工具名称。
  * @param {string[]} argumentsList 工具参数。
  * @returns {Promise<{ stdout: Buffer, stderr: string }>} 命令输出。
  */
@@ -95,7 +101,9 @@ function runTool(tool, argumentsList) {
       if (error.code === "ENOENT") {
         const settingName = tool === "tesseract"
           ? "ZHIXU_TESSERACT_PATH"
-          : "ZHIXU_PDFTOPPM_PATH";
+          : tool === "pdfimages"
+            ? "ZHIXU_PDFIMAGES_PATH"
+            : "ZHIXU_PDFTOPPM_PATH";
         reject(new Error(`未找到 ${tool}，请安装本地工具并在 .env.local 配置 ${settingName}。`));
         return;
       }
@@ -223,6 +231,127 @@ async function renderPdfPages(pdfPath) {
     throw new Error(`扫描 PDF 共 ${pagePaths.length} 页，超过当前 OCR 上限 ${serverConfig.ocrMaximumPages} 页。`);
   }
   return { directoryPath, pagePaths };
+}
+
+/**
+ * 将 PDF 页面中的一个已验证表格区域渲染为清晰 PNG。
+ *
+ * @param {string} pdfPath 本地 PDF 绝对路径。
+ * @param {number} pageNumber 从 1 开始的物理页码。
+ * @param {{ x: number, y: number, width: number, height: number }} crop PDF 点坐标裁剪区域，原点在左上角。
+ * @returns {Promise<Buffer>} 表格区域 PNG 数据。
+ */
+export async function renderPdfTableRegion(pdfPath, pageNumber, crop) {
+  const safePageNumber = Math.trunc(Number(pageNumber));
+  const values = [crop?.x, crop?.y, crop?.width, crop?.height].map(Number);
+  if (
+    !Number.isInteger(safePageNumber)
+    || safePageNumber < 1
+    || safePageNumber > 5000
+    || values.some((value) => !Number.isFinite(value) || value < 0)
+    || values[2] < 40
+    || values[3] < 30
+    || values[2] > 2000
+    || values[3] > 2000
+  ) {
+    throw new Error("PDF 表格裁剪参数无效。");
+  }
+  const dpi = 180;
+  const scale = dpi / 72;
+  fs.mkdirSync(ocrDirectory, { recursive: true });
+  const directoryPath = fs.mkdtempSync(path.join(ocrDirectory, "table-"));
+  const outputPrefix = path.join(directoryPath, "table");
+  try {
+    await runTool("pdftoppm", [
+      "-png",
+      "-r",
+      String(dpi),
+      "-f",
+      String(safePageNumber),
+      "-l",
+      String(safePageNumber),
+      "-singlefile",
+      "-x",
+      String(Math.max(0, Math.floor(values[0] * scale))),
+      "-y",
+      String(Math.max(0, Math.floor(values[1] * scale))),
+      "-W",
+      String(Math.max(1, Math.ceil(values[2] * scale))),
+      "-H",
+      String(Math.max(1, Math.ceil(values[3] * scale))),
+      pdfPath,
+      outputPrefix,
+    ]);
+    const outputPath = `${outputPrefix}.png`;
+    if (!fs.existsSync(outputPath)) throw new Error("PDF 表格没有生成预览图。");
+    return fs.readFileSync(outputPath);
+  } finally {
+    fs.rmSync(directoryPath, { recursive: true, force: true });
+  }
+}
+
+/**
+ * 列出 PDF 每个物理页中适合插入 HTML 正文的内嵌插图。
+ *
+ * 过小的图标、蒙版和装饰资源不会进入阅读页。
+ *
+ * @param {string} pdfPath 本地 PDF 绝对路径。
+ * @returns {Promise<Record<string, Array<{ assetIndex: number, width: number, height: number }>>>} 页码到插图列表。
+ */
+export async function listPdfEmbeddedFigures(pdfPath) {
+  const { stdout } = await runTool("pdfimages", ["-list", pdfPath]);
+  const figuresByPage = {};
+  const pageAssetCounters = new Map();
+  for (const line of stdout.toString("utf8").split(/\r?\n/)) {
+    const fields = line.trim().split(/\s+/);
+    if (fields.length < 6 || !/^\d+$/.test(fields[0]) || !/^\d+$/.test(fields[1])) continue;
+    const pageNumber = Number(fields[0]);
+    const assetIndex = pageAssetCounters.get(pageNumber) || 0;
+    pageAssetCounters.set(pageNumber, assetIndex + 1);
+    const type = fields[2];
+    const width = Number(fields[3]);
+    const height = Number(fields[4]);
+    if (type !== "image" || width < 100 || height < 80 || width * height < 24000) continue;
+    if (!figuresByPage[pageNumber]) figuresByPage[pageNumber] = [];
+    figuresByPage[pageNumber].push({ assetIndex, width, height });
+  }
+  return figuresByPage;
+}
+
+/**
+ * 提取 PDF 单页中的一张内嵌插图为 PNG。
+ *
+ * @param {string} pdfPath 本地 PDF 绝对路径。
+ * @param {number} pageNumber 从 1 开始的物理页码。
+ * @param {number} assetIndex 该页 pdfimages 原始资源下标。
+ * @returns {Promise<Buffer>} 插图 PNG 数据。
+ */
+export async function renderPdfEmbeddedFigure(pdfPath, pageNumber, assetIndex) {
+  const safePageNumber = Math.trunc(Number(pageNumber));
+  const safeAssetIndex = Math.trunc(Number(assetIndex));
+  if (safePageNumber < 1 || safePageNumber > 5000 || safeAssetIndex < 0 || safeAssetIndex > 999) {
+    throw new Error("PDF 插图参数无效。");
+  }
+  fs.mkdirSync(ocrDirectory, { recursive: true });
+  const directoryPath = fs.mkdtempSync(path.join(ocrDirectory, "figure-"));
+  const outputPrefix = path.join(directoryPath, "asset");
+  try {
+    await runTool("pdfimages", [
+      "-f",
+      String(safePageNumber),
+      "-l",
+      String(safePageNumber),
+      "-png",
+      pdfPath,
+      outputPrefix,
+    ]);
+    const expectedSuffix = `-${String(safeAssetIndex).padStart(3, "0")}.png`;
+    const outputName = fs.readdirSync(directoryPath).find((name) => name.endsWith(expectedSuffix));
+    if (!outputName) throw new Error("PDF 插图没有生成可显示的 PNG。 ");
+    return fs.readFileSync(path.join(directoryPath, outputName));
+  } finally {
+    fs.rmSync(directoryPath, { recursive: true, force: true });
+  }
 }
 
 /**

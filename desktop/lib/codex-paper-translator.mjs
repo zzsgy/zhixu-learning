@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { projectDirectory } from "./config.mjs";
+import { paperTranslationWorkDirectory } from "./config.mjs";
 import {
   claimNextPendingFullPaperTranslation,
   markPaperFullTranslationFailed,
@@ -16,7 +16,7 @@ import {
 } from "./database.mjs";
 
 /** workerRootDirectory 是翻译任务使用的隔离本地目录。 */
-const workerRootDirectory = path.join(projectDirectory, "work", "paper-translations");
+const workerRootDirectory = paperTranslationWorkDirectory;
 /** processTimeoutMilliseconds 是单篇长论文允许占用 Codex 的最长时间。 */
 const processTimeoutMilliseconds = 60 * 60 * 1000;
 /** workerEnabled 允许测试或故障排查时临时关闭自动翻译。 */

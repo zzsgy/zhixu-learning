@@ -4,14 +4,24 @@
  * 外部网页始终视为不可信输入，正文必须清理后才能保存和渲染。
  */
 import dns from "node:dns/promises";
+import crypto from "node:crypto";
+import fs, { readFileSync } from "node:fs";
 import net from "node:net";
+import tls from "node:tls";
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import { EnvHttpProxyAgent, fetch as undiciFetch } from "undici";
 import { classifyDocument } from "./classifier.mjs";
+import { articleImageDirectory } from "./config.mjs";
 
-/** ordinarySourceLimit 是普通网页允许下载的最大字节数。 */
-const ordinarySourceLimit = 5_000_000;
+/**
+ * ordinarySourceLimit 是普通网页解压后的最大字节数。
+ *
+ * Jupyter、Quarto 等导出的长篇技术教程常包含大量代码高亮和公式样式，gzip
+ * 响应虽然较小，解压后的 HTML 可能超过 5 MB；15 MB 在兼容这类教程的同时
+ * 仍能阻止异常网页无限占用内存。
+ */
+const ordinarySourceLimit = 15_000_000;
 /** wechatSourceLimit 是微信公众号文章允许下载的最大字节数。 */
 const wechatSourceLimit = 15_000_000;
 /** minimumArticleLength 是正文提取成功所需的最少字符数。 */
@@ -24,8 +34,28 @@ const fetchTimeoutMilliseconds = 25_000;
 const fetchAttemptLimit = 3;
 /** maximumImageBytes 是单张文章图片允许缓存的最大容量。 */
 const maximumImageBytes = 12_000_000;
+/**
+ * letsEncryptGenerationYChain 补齐部分网站尚未随响应发送的新一代中间证书链。
+ *
+ * 证书来自 Let’s Encrypt 官方证书目录。它们只扩展可信 CA 链，不会关闭主机名、
+ * 有效期或签名校验；系统默认根证书仍然完整保留。
+ */
+const letsEncryptGenerationYChain = readFileSync(
+  new URL("../certificates/letsencrypt-generation-y-chain.crt", import.meta.url),
+  "utf8",
+);
+/** trustedCertificateAuthorities 保留 Node 默认 CA，并补充 Generation Y 链。 */
+const trustedCertificateAuthorities = [
+  ...tls.rootCertificates,
+  letsEncryptGenerationYChain,
+];
 /** externalRequestDispatcher 根据 HTTP_PROXY、HTTPS_PROXY 和 NO_PROXY 选择连接路径。 */
-const externalRequestDispatcher = new EnvHttpProxyAgent();
+const externalRequestDispatcher = new EnvHttpProxyAgent({
+  /** connect 用于未经过代理的 TLS 连接。 */
+  connect: { ca: trustedCertificateAuthorities },
+  /** requestTls 用于通过 HTTP CONNECT 代理建立的目标站 TLS 连接。 */
+  requestTls: { ca: trustedCertificateAuthorities },
+});
 
 /** retryDelayMilliseconds 是每次网络重试前使用的递增等待时间。 */
 const retryDelayMilliseconds = [250, 750];
@@ -79,6 +109,16 @@ export function createExternalFetchError(error, resourceLabel = "网页") {
   }
   if (["ENOTFOUND", "EAI_AGAIN"].includes(code)) {
     return new Error(`${resourceLabel}域名解析失败，请检查 DNS 或网络连接。`);
+  }
+  if (
+    [
+      "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+      "CERT_HAS_EXPIRED",
+      "DEPTH_ZERO_SELF_SIGNED_CERT",
+      "SELF_SIGNED_CERT_IN_CHAIN",
+    ].includes(code)
+  ) {
+    return new Error(`${resourceLabel}的 HTTPS 证书链无法验证，请稍后重试或联系网站维护者。`);
   }
   if (
     ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT"].includes(code) ||
@@ -242,6 +282,39 @@ function isPrivateAddress(address) {
 }
 
 /**
+ * 对公网主机执行有限次数 DNS 查询，吸收系统解析器的短暂波动。
+ *
+ * @param {string} hostname 不含方括号的规范主机名。
+ * @param {(hostname: string, options: { all: true }) => Promise<Array<{ address: string }>>} lookup DNS 查询函数。
+ * @returns {Promise<Array<{ address: string }>>} DNS 返回的全部地址。
+ */
+export async function lookupPublicAddresses(hostname, lookup = dns.lookup) {
+  /** lastError 保存最后一次 DNS 异常，用于生成中文错误提示。 */
+  let lastError;
+  for (let attempt = 1; attempt <= fetchAttemptLimit; attempt += 1) {
+    try {
+      /** addresses 是当前查询返回的 IPv4 与 IPv6 地址。 */
+      const addresses = await lookup(hostname, { all: true });
+      if (addresses.length > 0) return addresses;
+      lastError = Object.assign(new Error(`No DNS records for ${hostname}`), {
+        code: "ENOTFOUND",
+      });
+    } catch (error) {
+      lastError = error;
+      /** code 用于判断错误是否可能由短暂 DNS 波动造成。 */
+      const code = readNetworkErrorCode(error);
+      if (!["ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT"].includes(code)) {
+        throw createExternalFetchError(error, "文章网页");
+      }
+    }
+    if (attempt < fetchAttemptLimit) {
+      await wait(retryDelayMilliseconds[attempt - 1] ?? 750);
+    }
+  }
+  throw createExternalFetchError(lastError, "文章网页");
+}
+
+/**
  * 校验外部 URL，并通过 DNS 解析阻止访问本机或局域网。
  *
  * @param {string} input 用户输入的文章链接。
@@ -270,7 +343,7 @@ async function validatePublicUrl(input) {
   /** addresses 是 DNS 返回的全部目标地址。 */
   const addresses = net.isIP(hostname)
     ? [{ address: hostname }]
-    : await dns.lookup(hostname, { all: true });
+    : await lookupPublicAddresses(hostname);
   if (addresses.length === 0 || addresses.some((item) => isPrivateAddress(item.address))) {
     throw new Error("不能读取本机、局域网或保留网络地址。");
   }
@@ -327,6 +400,14 @@ export async function fetchPublicSource(inputUrl) {
       continue;
     }
     if (!response.ok) {
+      if (response.status === 403) {
+        /** captureError 引导用户改用已授权浏览器读取需要验证的公开页面。 */
+        const captureError = new Error(
+          "该网站要求浏览器验证，知序后台无法直接读取。请在 Chrome 或 Edge 中打开文章，再使用“知序快速收藏”扩展保存当前网页。",
+        );
+        captureError.code = "BROWSER_CAPTURE_REQUIRED";
+        throw captureError;
+      }
       throw new Error(`文章网页返回 ${response.status}，暂时无法读取。`);
     }
     /** contentType 用于拒绝 PDF、图片和其它非网页响应。 */
@@ -583,16 +664,116 @@ export function sanitizeArticleHtml(rawHtml, baseUrl) {
 }
 
 /**
+ * 将旧网页误用的 HTML <image> 元素规范化为标准 <img>。
+ *
+ * SVG 内部的 <image> 具有不同语义，必须保持原状并由后续 SVG 清理规则处理；
+ * 这里只兼容正文 HTML 中带 src 的非标准图片标签。
+ *
+ * @param {Document} document 待交给 Readability 的网页文档。
+ * @returns {number} 完成规范化的图片数量。
+ */
+export function normalizeLegacyHtmlImages(document) {
+  /** legacyImages 是不处于 SVG 内部、且确实声明图片地址的旧式节点。 */
+  const legacyImages = Array.from(document.querySelectorAll("image[src]"))
+    .filter((element) => !element.closest("svg"));
+  for (const legacyImage of legacyImages) {
+    /** standardImage 只复制图片解析需要的有限属性，其他属性由清洗器统一拒绝。 */
+    const standardImage = document.createElement("img");
+    for (const attributeName of ["src", "data-src", "data-original", "alt"]) {
+      const attributeValue = legacyImage.getAttribute(attributeName);
+      if (attributeValue !== null) standardImage.setAttribute(attributeName, attributeValue);
+    }
+    legacyImage.replaceWith(standardImage);
+  }
+  return legacyImages.length;
+}
+
+/** embeddedImageFormats 是允许从网页 data URL 落入本地缓存的非脚本图片格式。 */
+const embeddedImageFormats = new Map([
+  ["image/png", { extension: ".png", signature: (bytes) =>
+    bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex")) }],
+  ["image/jpeg", { extension: ".jpg", signature: (bytes) =>
+    bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff }],
+  ["image/gif", { extension: ".gif", signature: (bytes) =>
+    bytes.length >= 6 && ["GIF87a", "GIF89a"].includes(bytes.subarray(0, 6).toString("ascii")) }],
+  ["image/webp", { extension: ".webp", signature: (bytes) =>
+    bytes.length >= 12
+      && bytes.subarray(0, 4).toString("ascii") === "RIFF"
+      && bytes.subarray(8, 12).toString("ascii") === "WEBP" }],
+]);
+
+/**
+ * 把 Notebook/Quarto 页面内嵌的 Base64 图片写入 D 盘文章图片缓存。
+ *
+ * 正文只保存 `.invalid` 保留域名下的稳定虚拟 HTTPS 地址；浏览器仍通过知序
+ * `/api/article-images` 读取对应缓存文件，不会向该虚拟域名发送网络请求。
+ *
+ * @param {Document} document Readability 处理前的网页文档。
+ * @param {string} imageDirectory 可覆盖的缓存目录，测试时用于隔离正式数据。
+ * @returns {number} 成功持久化并改写的内嵌图片数量。
+ */
+export function persistEmbeddedArticleImages(
+  document,
+  imageDirectory = articleImageDirectory,
+) {
+  /** persistedCount 记录成功替换为本地缓存地址的图片数。 */
+  let persistedCount = 0;
+  for (const image of Array.from(document.querySelectorAll("img[src^='data:']"))) {
+    /** source 是页面声明的完整 data URL。 */
+    const source = image.getAttribute("src") || "";
+    /** match 只接受明确的图片 MIME 与 Base64 编码，不允许 SVG 或任意文本。 */
+    const match = source.match(/^data:(image\/(?:png|jpeg|gif|webp));base64,([a-z0-9+/=\s]+)$/i);
+    if (!match) {
+      image.remove();
+      continue;
+    }
+    /** format 是声明 MIME 对应的扩展名和文件签名校验器。 */
+    const format = embeddedImageFormats.get(match[1].toLowerCase());
+    /** encoded 是移除空白后的 Base64 数据。 */
+    const encoded = match[2].replace(/\s+/g, "");
+    if (!format || encoded.length > Math.ceil(maximumImageBytes * 4 / 3) + 4) {
+      image.remove();
+      continue;
+    }
+    /** bytes 是等待写入缓存的原始图片字节。 */
+    const bytes = Buffer.from(encoded, "base64");
+    if (bytes.length === 0 || bytes.length > maximumImageBytes || !format.signature(bytes)) {
+      image.remove();
+      continue;
+    }
+    /** contentHash 使相同内嵌图片跨文章复用同一份缓存。 */
+    const contentHash = crypto.createHash("sha256").update(bytes).digest("hex");
+    /** virtualUrl 是数据库与译文中使用的稳定受控图片地址。 */
+    const virtualUrl = `https://embedded.zhixu.invalid/${contentHash}${format.extension}`;
+    /** cacheHash 与服务端 `/api/article-images` 的缓存键算法保持一致。 */
+    const cacheHash = crypto.createHash("sha256").update(virtualUrl).digest("hex");
+    /** cachedPath 是 D 盘文章图片目录中的最终文件。 */
+    const cachedPath = `${imageDirectory}/${cacheHash}${format.extension}`;
+    fs.mkdirSync(imageDirectory, { recursive: true });
+    try {
+      fs.writeFileSync(cachedPath, bytes, { flag: "wx" });
+    } catch (error) {
+      if (!error || error.code !== "EEXIST") throw error;
+    }
+    image.setAttribute("src", virtualUrl);
+    persistedCount += 1;
+  }
+  return persistedCount;
+}
+
+/**
  * 抓取文章、提取正文、自动分类并返回可持久化对象。
  *
  * @param {string} inputUrl 用户输入链接。
  * @returns {Promise<Record<string, unknown>>} 已整理文章。
  */
-export async function parseAndClassifyArticle(inputUrl) {
-  /** source 是抓取到的网页源码和最终地址。 */
-  const source = await fetchPublicSource(inputUrl);
+async function parseAndClassifyArticleSource(source) {
   /** originalDocument 保留页面元数据和公众号专用节点。 */
   const { document: originalDocument } = parseHTML(source.text);
+  /** 旧博客可能误用 <image>；先规范化，避免 Readability 在入库前丢图。 */
+  normalizeLegacyHtmlImages(originalDocument);
+  /** Notebook 导出的 data URL 图片先写入本地缓存，避免清洗时丢失或膨胀 SQLite。 */
+  persistEmbeddedArticleImages(originalDocument);
   /** sourceType 用于区分微信公众号和普通网页。 */
   const sourceType =
     source.finalUrl.hostname.toLowerCase() === "mp.weixin.qq.com"
@@ -687,4 +868,42 @@ export async function parseAndClassifyArticle(inputUrl) {
       ["en", "mixed"].includes(sourceLanguage) ? "not_requested" : "not_required",
     wordCount: sanitized.text.length,
   };
+}
+
+/**
+ * 抓取公开文章后执行正文提取、清洗和分类。
+ *
+ * @param {string} inputUrl 用户输入链接。
+ * @returns {Promise<Record<string, unknown>>} 已整理文章。
+ */
+export async function parseAndClassifyArticle(inputUrl) {
+  /** source 是抓取到的网页源码和最终地址。 */
+  const source = await fetchPublicSource(inputUrl);
+  return parseAndClassifyArticleSource(source);
+}
+
+/**
+ * 解析用户已在浏览器中成功加载的公开网页源码。
+ *
+ * 该入口供已配对的知序扩展使用：Cloudflare 等浏览器验证通过后，扩展提交当前
+ * DOM，服务端仍会重新校验 URL、限制容量并执行与普通导入相同的安全清洗。
+ *
+ * @param {string} inputUrl 当前浏览器标签页地址。
+ * @param {string} sourceHtml 当前标签页完整 HTML。
+ * @returns {Promise<Record<string, unknown>>} 已整理文章。
+ */
+export async function parseAndClassifyCapturedArticle(inputUrl, sourceHtml) {
+  /** finalUrl 仍经过公网地址校验，浏览器内容不能把来源伪装成本机地址。 */
+  const finalUrl = await validatePublicUrl(inputUrl);
+  /** normalizedHtml 是扩展提交的当前页面 DOM。 */
+  const normalizedHtml = String(sourceHtml || "");
+  if (!normalizedHtml.trim()) throw new Error("浏览器没有返回可解析的网页正文。");
+  if (Buffer.byteLength(normalizedHtml, "utf8") > sourceLimitForUrl(finalUrl)) {
+    throw new Error("浏览器网页超过 15 MB，暂时无法收藏。");
+  }
+  return parseAndClassifyArticleSource({
+    text: normalizedHtml,
+    finalUrl,
+    contentType: "text/html; charset=utf-8",
+  });
 }

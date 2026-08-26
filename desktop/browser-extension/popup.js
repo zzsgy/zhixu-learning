@@ -59,17 +59,26 @@ pairingForm.addEventListener("submit", async (event) => {
 
 async function getCurrentPage(includeSelection) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.url) throw new Error("无法读取当前页面地址。");
-  let selectedText = "";
-  if (includeSelection && tab.id) {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => window.getSelection()?.toString() || "",
-    });
-    selectedText = String(results?.[0]?.result || "").trim();
-    if (!selectedText) throw new Error("请先在网页中选中文字。");
-  }
-  return { url: tab.url, title: tab.title || "", selectedText };
+  if (!tab?.url || !tab.id) throw new Error("无法读取当前页面地址。");
+  /** results 由用户主动点击扩展后读取当前标签页，不读取 Cookie 或浏览器存储。 */
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    args: [includeSelection],
+    func: (shouldReadSelection) => ({
+      sourceHtml: document.documentElement?.outerHTML || "",
+      selectedText: shouldReadSelection ? window.getSelection()?.toString() || "" : "",
+    }),
+  });
+  const page = results?.[0]?.result || {};
+  const selectedText = String(page.selectedText || "").trim();
+  if (includeSelection && !selectedText) throw new Error("请先在网页中选中文字。");
+  if (!page.sourceHtml) throw new Error("当前页面没有可读取的 HTML 正文。");
+  return {
+    url: tab.url,
+    title: tab.title || "",
+    selectedText,
+    sourceHtml: String(page.sourceHtml),
+  };
 }
 
 async function captureCurrentPage(includeSelection) {

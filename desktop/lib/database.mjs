@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { parseHTML } from "linkedom";
 import {
   backupDirectory,
   databasePath,
@@ -36,6 +37,7 @@ database.exec(`
     size_bytes INTEGER NOT NULL,
     sha256 TEXT NOT NULL,
     title TEXT NOT NULL,
+    display_title TEXT NOT NULL DEFAULT '',
     category TEXT NOT NULL,
     category_source TEXT NOT NULL DEFAULT 'rules',
     category_confidence REAL NOT NULL DEFAULT 0,
@@ -90,6 +92,7 @@ database.exec(`
     url TEXT NOT NULL UNIQUE,
     source_type TEXT NOT NULL,
     title TEXT NOT NULL,
+    display_title TEXT NOT NULL DEFAULT '',
     summary TEXT NOT NULL,
     category TEXT NOT NULL,
     category_source TEXT NOT NULL DEFAULT 'rules',
@@ -107,6 +110,13 @@ database.exec(`
     translated_text TEXT NOT NULL DEFAULT '',
     translation_source TEXT,
     translated_at TEXT,
+    translation_stage TEXT NOT NULL DEFAULT '',
+    translation_progress_percent INTEGER NOT NULL DEFAULT 0,
+    translation_total_sections INTEGER NOT NULL DEFAULT 0,
+    translation_completed_sections INTEGER NOT NULL DEFAULT 0,
+    translation_error TEXT NOT NULL DEFAULT '',
+    translation_requested_at TEXT,
+    translation_started_at TEXT,
     word_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -424,6 +434,10 @@ function ensureTableColumn(tableName, columnName, columnDefinition) {
   );
 }
 
+/** 用户修改的展示名称独立于来源标题，重新解析或更新原文时不会被覆盖。 */
+ensureTableColumn("documents", "display_title", "TEXT NOT NULL DEFAULT ''");
+ensureTableColumn("articles", "display_title", "TEXT NOT NULL DEFAULT ''");
+
 /** articleTranslationColumns 是网页文章的语言识别和 Codex 译文字段。 */
 const articleTranslationColumns = Object.freeze([
   ["source_language", "TEXT NOT NULL DEFAULT 'unknown'"],
@@ -434,6 +448,13 @@ const articleTranslationColumns = Object.freeze([
   ["translated_text", "TEXT NOT NULL DEFAULT ''"],
   ["translation_source", "TEXT"],
   ["translated_at", "TEXT"],
+  ["translation_stage", "TEXT NOT NULL DEFAULT ''"],
+  ["translation_progress_percent", "INTEGER NOT NULL DEFAULT 0"],
+  ["translation_total_sections", "INTEGER NOT NULL DEFAULT 0"],
+  ["translation_completed_sections", "INTEGER NOT NULL DEFAULT 0"],
+  ["translation_error", "TEXT NOT NULL DEFAULT ''"],
+  ["translation_requested_at", "TEXT"],
+  ["translation_started_at", "TEXT"],
 ]);
 for (const [columnName, columnDefinition] of articleTranslationColumns) {
   ensureTableColumn("articles", columnName, columnDefinition);
@@ -566,7 +587,8 @@ function mapDocumentRow(row) {
     extension: row.extension,
     sizeBytes: row.size_bytes,
     sha256: row.sha256,
-    title: row.title,
+    title: row.display_title || row.title,
+    sourceTitle: row.title,
     category: row.category,
     categorySource: row.category_source,
     categoryConfidence: row.category_confidence,
@@ -588,6 +610,105 @@ function mapDocumentRow(row) {
 }
 
 /**
+ * 统一标题的宽窄字符、大小写、空白和标点，用于识别同名资料。
+ *
+ * @param {unknown} value 原始标题。
+ * @returns {string} 可稳定比较的标题键。
+ */
+function normalizeDuplicateTitle(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLocaleLowerCase("zh-CN")
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .trim();
+}
+
+/**
+ * 清理用户设置的知识库展示名称。
+ *
+ * @param {unknown} value 用户输入。
+ * @returns {string} 可持久化名称。
+ */
+function normalizeDisplayTitle(value) {
+  const title = String(value || "").replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!title) throw new Error("名称不能为空。");
+  if (title.length > 180) throw new Error("名称不能超过 180 个字符。");
+  return title;
+}
+
+/**
+ * 按原标题或原文件内容摘要查找已存在的普通文档。
+ *
+ * @param {{ title?: string, sha256?: string }} input 候选文档特征。
+ * @returns {Record<string, unknown> | null} 重复文档摘要或空值。
+ */
+export function findDuplicateDocument(input = {}) {
+  const sha256 = String(input.sha256 || "").trim().toLowerCase();
+  if (sha256) {
+    const contentMatch = database.prepare(`
+      SELECT id, title, original_name FROM documents WHERE sha256 = ? LIMIT 1
+    `).get(sha256);
+    if (contentMatch) {
+      return {
+        id: contentMatch.id,
+        title: contentMatch.title,
+        originalName: contentMatch.original_name,
+        matchReason: "content",
+      };
+    }
+  }
+  const titleKey = normalizeDuplicateTitle(input.title);
+  if (!titleKey) return null;
+  const titleMatch = database.prepare(`
+    SELECT id, title, original_name FROM documents ORDER BY created_at ASC
+  `).all().find((row) => normalizeDuplicateTitle(row.title) === titleKey);
+  return titleMatch
+    ? {
+        id: titleMatch.id,
+        title: titleMatch.title,
+        originalName: titleMatch.original_name,
+        matchReason: "title",
+      }
+    : null;
+}
+
+/**
+ * 按最终链接、原标题或规范化正文查找已存在的网页文章。
+ *
+ * @param {{ url?: string, title?: string, contentText?: string }} input 候选文章特征。
+ * @returns {Record<string, unknown> | null} 重复文章摘要或空值。
+ */
+export function findDuplicateArticle(input = {}) {
+  const url = String(input.url || "").trim();
+  const urlMatch = url
+    ? database.prepare("SELECT id, url, title FROM articles WHERE url = ? LIMIT 1").get(url)
+    : null;
+  if (urlMatch) {
+    return { id: urlMatch.id, url: urlMatch.url, title: urlMatch.title, matchReason: "url" };
+  }
+  const titleKey = normalizeDuplicateTitle(input.title);
+  const titleRows = database.prepare(`
+    SELECT id, url, title FROM articles ORDER BY created_at ASC
+  `).all();
+  const titleMatch = titleKey
+    ? titleRows.find((row) => normalizeDuplicateTitle(row.title) === titleKey)
+    : null;
+  if (titleMatch) {
+    return { id: titleMatch.id, url: titleMatch.url, title: titleMatch.title, matchReason: "title" };
+  }
+  /** contentText 由统一网页解析器清理，精确比较可避免把全部长正文读入 Node 内存。 */
+  const contentText = String(input.contentText || "");
+  const contentMatch = contentText.trim().length >= 80
+    ? database.prepare(`
+        SELECT id, url, title FROM articles WHERE content_text = ? LIMIT 1
+      `).get(contentText)
+    : null;
+  return contentMatch
+    ? { id: contentMatch.id, url: contentMatch.url, title: contentMatch.title, matchReason: "content" }
+    : null;
+}
+
+/**
  * 将文章数据库行转换为浏览器使用的驼峰字段。
  *
  * @param {Record<string, unknown>} row SQLite 查询结果。
@@ -598,7 +719,8 @@ function mapArticleRow(row) {
     id: row.id,
     url: row.url,
     sourceType: row.source_type,
-    title: row.title,
+    title: row.display_title || row.title,
+    sourceTitle: row.title,
     summary: row.summary,
     category: row.category,
     categorySource: row.category_source,
@@ -610,12 +732,19 @@ function mapArticleRow(row) {
     contentText: row.content_text,
     sourceLanguage: row.source_language || "unknown",
     translationStatus: row.translation_status || "not_required",
-    translatedTitle: row.translated_title || "",
+    translatedTitle: row.display_title || row.translated_title || "",
     translatedSummary: row.translated_summary || "",
     translatedHtml: row.translated_html || "",
     translatedText: row.translated_text || "",
     translationSource: row.translation_source,
     translatedAt: row.translated_at,
+    translationStage: row.translation_stage || "",
+    translationProgressPercent: Number(row.translation_progress_percent) || 0,
+    translationTotalSections: Number(row.translation_total_sections) || 0,
+    translationCompletedSections: Number(row.translation_completed_sections) || 0,
+    translationError: row.translation_error || "",
+    translationRequestedAt: row.translation_requested_at,
+    translationStartedAt: row.translation_started_at,
     wordCount: row.word_count,
     isFavorite: Boolean(row.is_favorite),
     folderId: row.folder_id || null,
@@ -1039,7 +1168,7 @@ export function revokeBrowserClient(clientId) {
 export function saveArticle(article) {
   /** existingRow 是同一最终 URL 已存在的文章。 */
   const existingRow = database
-    .prepare("SELECT id, created_at FROM articles WHERE url = ? LIMIT 1")
+    .prepare("SELECT id, created_at, display_title FROM articles WHERE url = ? LIMIT 1")
     .get(article.url);
   /** articleId 复用旧记录 ID，避免重复收藏。 */
   const articleId = existingRow?.id ?? article.id;
@@ -1144,7 +1273,7 @@ export function saveArticle(article) {
       `)
       .run(
         articleId,
-        article.title,
+        `${existingRow?.display_title || article.title} ${article.title}`.trim(),
         article.summary,
         article.category,
         article.author ?? "",
@@ -1188,6 +1317,46 @@ export function getArticleById(articleId) {
     `)
     .get(articleId);
   return row ? mapArticleRow(row) : null;
+}
+
+/**
+ * 修改网页文章在知识库中的展示名称，并同步全文索引。
+ *
+ * @param {string} articleId 文章 ID。
+ * @param {unknown} nextTitle 新展示名称。
+ * @returns {Record<string, unknown> | null} 更新后的文章。
+ */
+export function renameArticleTitle(articleId, nextTitle) {
+  const displayTitle = normalizeDisplayTitle(nextTitle);
+  const source = database.prepare(`
+    SELECT title, translated_title FROM articles WHERE id = ? LIMIT 1
+  `).get(String(articleId || ""));
+  if (!source) return null;
+  const updatedAt = new Date().toISOString();
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    database.prepare(`
+      UPDATE articles SET display_title = ?, updated_at = ? WHERE id = ?
+    `).run(displayTitle, updatedAt, articleId);
+    const article = getArticleById(articleId);
+    database.prepare("DELETE FROM article_search WHERE article_id = ?").run(articleId);
+    database.prepare(`
+      INSERT INTO article_search(article_id, title, summary, category, author, content_text)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      article.id,
+      `${displayTitle} ${source.title} ${source.translated_title || ""}`.trim(),
+      `${article.summary} ${article.translatedSummary || ""}`.trim(),
+      article.category,
+      article.author || "",
+      `${article.contentText}\n\n${article.translatedText || ""}`.trim(),
+    );
+    database.exec("COMMIT;");
+    return getArticleById(articleId);
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
 }
 
 /**
@@ -1240,14 +1409,14 @@ export function backfillArticleLanguages(detectLanguage) {
   return updatedCount;
 }
 
-/** articleTranslationTags 是 Codex 文章译文允许使用的无属性语义标签。 */
+/** articleTranslationTags 是文章译文允许使用的安全语义标签。 */
 const articleTranslationTags = new Set([
   "h2", "h3", "h4", "p", "ul", "ol", "li", "blockquote", "pre", "code",
-  "table", "thead", "tbody", "tr", "th", "td", "strong", "em", "sub", "sup",
+  "table", "thead", "tbody", "tr", "th", "td", "strong", "em", "sub", "sup", "br", "img",
 ]);
 
 /**
- * 校验 Codex 文章译文只包含安全的无属性语义 HTML。
+ * 校验 Codex 文章译文只包含安全语义 HTML；图片仅允许解析器生成的受控属性。
  *
  * @param {string} translatedHtml 待写入的中文译文。
  * @returns {{ html: string, text: string }} 规范化译文及纯文本。
@@ -1256,15 +1425,34 @@ function validateArticleTranslationHtml(translatedHtml) {
   /** html 是去除首尾空白后的完整中文译文。 */
   const html = String(translatedHtml || "").trim();
   if (!html) throw new TypeError("文章中文译文不能为空。");
-  /** tagPattern 用于逐一校验标签名称并拒绝任何 HTML 属性。 */
-  const tagPattern = /<\/?([a-z][a-z0-9]*)\b[^>]*>/gi;
-  for (const match of html.matchAll(tagPattern)) {
+  /** parsedDocument 用 DOM 逐项校验标签与图片地址，避免属性顺序影响判断。 */
+  const { document: parsedDocument } = parseHTML(`<main>${html}</main>`);
+  const root = parsedDocument.querySelector("main");
+  if (!root) throw new TypeError("文章中文译文结构无效。");
+  for (const element of root.querySelectorAll("*")) {
     /** tagName 是当前标签的小写名称。 */
-    const tagName = match[1].toLowerCase();
+    const tagName = element.tagName.toLowerCase();
     if (!articleTranslationTags.has(tagName)) {
       throw new TypeError(`文章译文包含不允许的标签：${tagName}。`);
     }
-    if (!new RegExp(`^<\\/?${tagName}\\s*>$`, "i").test(match[0])) {
+    if (tagName === "img") {
+      /** attributeNames 只允许文章解析器生成的静态图片属性。 */
+      const attributeNames = Array.from(element.attributes, (attribute) => attribute.name);
+      if (attributeNames.some((name) => !["src", "alt", "loading", "referrerpolicy"].includes(name))) {
+        throw new TypeError("文章译文图片包含不允许的属性。");
+      }
+      /** source 必须是文章解析阶段已经规范化的 HTTPS 图片地址。 */
+      const source = element.getAttribute("src") || "";
+      if (!/^https:\/\/[^\s]+$/i.test(source)) {
+        throw new TypeError("文章译文图片地址不安全。");
+      }
+      if (element.getAttribute("loading") !== "lazy"
+        || element.getAttribute("referrerpolicy") !== "no-referrer") {
+        throw new TypeError("文章译文图片缺少安全加载属性。");
+      }
+      continue;
+    }
+    if (element.attributes.length > 0) {
       throw new TypeError("文章译文标签不能包含 HTML 属性。");
     }
   }
@@ -1278,20 +1466,191 @@ function validateArticleTranslationHtml(translatedHtml) {
  * 将英文或中英混合文章加入 Codex 翻译队列。
  *
  * @param {string} articleId 文章稳定本地 ID。
+ * @param {{ force?: boolean }} options 是否强制重新生成已有译文。
  * @returns {Record<string, unknown> | null} 更新后的文章。
  */
-export function requestArticleTranslation(articleId) {
+export function requestArticleTranslation(articleId, options = {}) {
   /** article 是准备进入翻译队列的完整原文。 */
   const article = getArticleById(articleId);
   if (!article) return null;
   if (!['en', 'mixed'].includes(article.sourceLanguage)) {
     throw new TypeError("当前文章不是英文或中英混合内容，无需加入翻译队列。");
   }
-  if (article.translationStatus === "ready" && article.translatedHtml) return article;
-  database
-    .prepare("UPDATE articles SET translation_status = 'pending', updated_at = ? WHERE id = ?")
-    .run(new Date().toISOString(), articleId);
+  if (article.translationStatus === "ready" && article.translatedHtml && !options.force) return article;
+  /** requestedAt 是排队顺序、等待时间和恢复信息使用的本机时间。 */
+  const requestedAt = new Date().toISOString();
+  database.prepare(`
+    UPDATE articles
+    SET translation_status = 'pending', translation_stage = 'queued',
+        translation_progress_percent = 0, translation_total_sections = 0,
+        translation_completed_sections = 0, translation_error = '',
+        translated_title = CASE WHEN ? THEN '' ELSE translated_title END,
+        translated_summary = CASE WHEN ? THEN '' ELSE translated_summary END,
+        translated_html = CASE WHEN ? THEN '' ELSE translated_html END,
+        translated_text = CASE WHEN ? THEN '' ELSE translated_text END,
+        translation_source = CASE WHEN ? THEN NULL ELSE translation_source END,
+        translated_at = CASE WHEN ? THEN NULL ELSE translated_at END,
+        translation_requested_at = ?, translation_started_at = NULL,
+        updated_at = ?
+    WHERE id = ?
+  `).run(
+    options.force ? 1 : 0,
+    options.force ? 1 : 0,
+    options.force ? 1 : 0,
+    options.force ? 1 : 0,
+    options.force ? 1 : 0,
+    options.force ? 1 : 0,
+    requestedAt,
+    requestedAt,
+    articleId,
+  );
   return getArticleById(articleId);
+}
+
+/**
+ * 原子领取等待时间最早的一篇文章，防止同一服务进程重复处理。
+ *
+ * @returns {Record<string, unknown> | null} 已切换为 processing 的文章。
+ */
+export function claimNextPendingArticleTranslation() {
+  /** row 是当前队列中等待最久的文章标识。 */
+  const row = database.prepare(`
+    SELECT id FROM articles
+    WHERE translation_status = 'pending'
+      AND source_language IN ('en', 'mixed')
+      AND COALESCE(TRIM(translated_html), '') = ''
+    ORDER BY COALESCE(translation_requested_at, updated_at) ASC, id ASC
+    LIMIT 1
+  `).get();
+  if (!row) return null;
+  /** startedAt 是本轮实际开始处理的时间。 */
+  const startedAt = new Date().toISOString();
+  /** result 用 pending 条件确保只领取一次。 */
+  const result = database.prepare(`
+    UPDATE articles
+    SET translation_status = 'processing', translation_stage = 'preparing',
+        translation_progress_percent = MAX(translation_progress_percent, 2),
+        translation_error = '', translation_started_at = ?, updated_at = ?
+    WHERE id = ? AND translation_status = 'pending'
+  `).run(startedAt, startedAt, row.id);
+  return result.changes === 1 ? getArticleById(row.id) : null;
+}
+
+/**
+ * 保存文章分段翻译的真实完成进度。
+ *
+ * @param {string} articleId 文章 ID。
+ * @param {{ stage: string, progressPercent: number, totalSections?: number, completedSections?: number }} progress 进度快照。
+ * @returns {Record<string, unknown> | null} 更新后的文章。
+ */
+export function updateArticleTranslationProgress(articleId, progress) {
+  /** progressPercent 是限制在 0 到 99 的处理中百分比。 */
+  const progressPercent = Math.min(Math.max(Math.round(Number(progress.progressPercent) || 0), 0), 99);
+  /** totalSections 是本次正文分段总数。 */
+  const totalSections = Math.max(Math.trunc(Number(progress.totalSections) || 0), 0);
+  /** completedSections 是已经成功生成中文译文的分段数。 */
+  const completedSections = Math.min(
+    Math.max(Math.trunc(Number(progress.completedSections) || 0), 0),
+    totalSections || Number.MAX_SAFE_INTEGER,
+  );
+  database.prepare(`
+    UPDATE articles
+    SET translation_stage = ?, translation_progress_percent = ?,
+        translation_total_sections = CASE WHEN ? > 0 THEN ? ELSE translation_total_sections END,
+        translation_completed_sections = ?, updated_at = ?
+    WHERE id = ? AND translation_status = 'processing'
+  `).run(
+    String(progress.stage || "translating").slice(0, 40),
+    progressPercent,
+    totalSections,
+    totalSections,
+    completedSections,
+    new Date().toISOString(),
+    articleId,
+  );
+  return getArticleById(articleId);
+}
+
+/**
+ * 记录文章自动翻译失败原因，保留原文和可恢复的分段结果。
+ *
+ * @param {string} articleId 文章 ID。
+ * @param {string} message 可展示的失败原因。
+ * @returns {Record<string, unknown> | null} 更新后的文章。
+ */
+export function markArticleTranslationFailed(articleId, message) {
+  /** failedAt 是失败状态写入时间。 */
+  const failedAt = new Date().toISOString();
+  database.prepare(`
+    UPDATE articles
+    SET translation_status = 'failed', translation_stage = 'failed',
+        translation_error = ?, updated_at = ?
+    WHERE id = ?
+  `).run(String(message || "Codex 文章翻译失败。").slice(0, 1000), failedAt, articleId);
+  return getArticleById(articleId);
+}
+
+/**
+ * 服务启动时把异常中断的文章恢复到队列，磁盘分段结果将被继续使用。
+ *
+ * @returns {number} 恢复的任务数量。
+ */
+export function resetInterruptedArticleTranslations() {
+  /** recoveredAt 是恢复任务重新入队的时间。 */
+  const recoveredAt = new Date().toISOString();
+  /** result 是本次恢复影响的文章数量。 */
+  const result = database.prepare(`
+    UPDATE articles
+    SET translation_status = 'pending', translation_stage = 'queued',
+        translation_error = '上一次翻译因本地服务中断而暂停，现已继续。',
+        translation_started_at = NULL, updated_at = ?
+    WHERE translation_status = 'processing'
+  `).run(recoveredAt);
+  return Number(result.changes) || 0;
+}
+
+/**
+ * 返回前端轮询所需的轻量翻译状态和排队位置。
+ *
+ * @param {string} articleId 文章 ID。
+ * @returns {Record<string, unknown> | null} 翻译状态快照。
+ */
+export function getArticleTranslationStatus(articleId) {
+  /** row 只读取状态字段，避免每两秒返回整篇文章正文。 */
+  const row = database.prepare(`
+    SELECT id, title, translation_status, translation_stage,
+           translation_progress_percent, translation_total_sections,
+           translation_completed_sections, translation_error,
+           translation_requested_at, translation_started_at, translated_at,
+           updated_at
+    FROM articles WHERE id = ? LIMIT 1
+  `).get(articleId);
+  if (!row) return null;
+  /** queuePosition 只对 pending 任务计算从一开始的真实位置。 */
+  let queuePosition = 0;
+  if (row.translation_status === "pending") {
+    const queueRows = database.prepare(`
+      SELECT id FROM articles
+      WHERE translation_status = 'pending'
+      ORDER BY COALESCE(translation_requested_at, updated_at) ASC, id ASC
+    `).all();
+    queuePosition = queueRows.findIndex((item) => item.id === row.id) + 1;
+  }
+  return {
+    id: row.id,
+    title: row.title,
+    translationStatus: row.translation_status,
+    translationStage: row.translation_stage || "",
+    translationProgressPercent: Number(row.translation_progress_percent) || 0,
+    translationTotalSections: Number(row.translation_total_sections) || 0,
+    translationCompletedSections: Number(row.translation_completed_sections) || 0,
+    translationError: row.translation_error || "",
+    translationRequestedAt: row.translation_requested_at,
+    translationStartedAt: row.translation_started_at,
+    translatedAt: row.translated_at,
+    updatedAt: row.updated_at,
+    queuePosition,
+  };
 }
 
 /**
@@ -1346,7 +1705,10 @@ export function updateArticleTranslation(articleId, translation) {
         UPDATE articles
         SET translated_title = ?, translated_summary = ?, translated_html = ?,
             translated_text = ?, translation_status = 'ready',
-            translation_source = 'codex', translated_at = ?, updated_at = ?
+            translation_source = 'codex', translated_at = ?,
+            translation_stage = 'completed', translation_progress_percent = 100,
+            translation_completed_sections = translation_total_sections,
+            translation_error = '', updated_at = ?
         WHERE id = ?
       `)
       .run(
@@ -1503,9 +1865,28 @@ export function insertDocument(document) {
     database.exec("ROLLBACK;");
     throw error;
   }
-  /** defaultFolderPath 是上传文档首次保存时对应的一级分类目录。 */
-  const defaultFolderPath = ensureFolderPath([document.category || "其它"]);
-  assignContentToFolder("document", document.id, defaultFolderPath.at(-1).id);
+  /** importedFolderNames 是文件夹导入携带的本机相对目录。 */
+  const importedFolderNames = Array.isArray(document.folderPath) ? document.folderPath : [];
+  /** targetFolderId 是用户上传前明确选择的知识库目录。 */
+  const targetFolderId = String(document.targetFolderId || "").trim();
+  if (targetFolderId) {
+    /** selectedFolderPath 在指定目录下继续保留本机文件夹层级。 */
+    const selectedFolderPath = importedFolderNames.length > 0
+      ? ensureFolderPath(importedFolderNames, [], targetFolderId)
+      : [];
+    assignContentToFolder(
+      "document",
+      document.id,
+      selectedFolderPath.at(-1)?.id || targetFolderId,
+    );
+  } else {
+    /** initialFolderNames 未指定目标时沿用文件夹层级或自动分类目录。 */
+    const initialFolderNames = importedFolderNames.length > 0
+      ? importedFolderNames
+      : [document.category || "其它"];
+    const initialFolderPath = ensureFolderPath(initialFolderNames);
+    assignContentToFolder("document", document.id, initialFolderPath.at(-1).id);
+  }
   return getDocumentById(document.id);
 }
 
@@ -1534,6 +1915,45 @@ export function getDocumentById(documentId) {
     `)
     .get(documentId);
   return row ? mapDocumentRow(row) : null;
+}
+
+/**
+ * 修改本地文档在知识库中的展示名称，并同步全文索引。
+ *
+ * @param {string} documentId 文档 ID。
+ * @param {unknown} nextTitle 新展示名称。
+ * @returns {Record<string, unknown> | null} 更新后的文档。
+ */
+export function renameDocumentTitle(documentId, nextTitle) {
+  const displayTitle = normalizeDisplayTitle(nextTitle);
+  if (!database.prepare("SELECT id FROM documents WHERE id = ? LIMIT 1").get(String(documentId || ""))) {
+    return null;
+  }
+  const updatedAt = new Date().toISOString();
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    database.prepare(`
+      UPDATE documents SET display_title = ?, updated_at = ? WHERE id = ?
+    `).run(displayTitle, updatedAt, documentId);
+    const document = getDocumentById(documentId);
+    database.prepare("DELETE FROM document_search WHERE document_id = ?").run(documentId);
+    database.prepare(`
+      INSERT INTO document_search(document_id, title, original_name, category, summary, extracted_text)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      document.id,
+      document.title,
+      document.originalName,
+      document.category,
+      document.summary,
+      document.extractedText,
+    );
+    database.exec("COMMIT;");
+    return getDocumentById(documentId);
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
 }
 
 /**
@@ -3091,6 +3511,121 @@ export function deleteKnowledgeTarget(targetType, targetId) {
 }
 
 /**
+ * 在一个数据库事务中永久删除多项知识内容。
+ *
+ * 调用方应在执行前完成用户确认与数据库备份，并根据返回的 storedName
+ * 清理文档原始附件。任意目标不存在时整批拒绝，避免只删除一部分。
+ *
+ * @param {{ targetType: string, targetId: string }[]} items 待删除内容。
+ * @returns {Record<string, unknown>[]} 已删除内容摘要。
+ */
+export function deleteKnowledgeTargets(items) {
+  if (!Array.isArray(items) || items.length === 0) throw new Error("请选择需要删除的内容。");
+  if (items.length > 500) throw new Error("一次最多删除 500 项内容。");
+
+  /** normalizedItems 是经过类型白名单、ID 清理和去重后的删除目标。 */
+  const normalizedItems = [];
+  /** seenKeys 防止同一目标在一个事务中被重复删除。 */
+  const seenKeys = new Set();
+  for (const item of items) {
+    const normalizedType = normalizeKnowledgeTargetType(item?.targetType);
+    const normalizedId = String(item?.targetId ?? "").trim();
+    if (!normalizedId) throw new Error("存在无法识别的待删除内容。");
+    const key = `${normalizedType}:${normalizedId}`;
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    normalizedItems.push({ targetType: normalizedType, targetId: normalizedId });
+  }
+
+  /** targets 在开始写事务前确认全部主记录存在，并保留附件定位信息。 */
+  const targets = normalizedItems.map(({ targetType: normalizedType, targetId: normalizedId }) => {
+    const targetRow =
+      normalizedType === "document"
+        ? database
+            .prepare("SELECT id, title, stored_name AS storedName FROM documents WHERE id = ?")
+            .get(normalizedId)
+        : normalizedType === "article"
+          ? database.prepare("SELECT id, title FROM articles WHERE id = ?").get(normalizedId)
+          : database
+              .prepare(
+                `SELECT id, external_id AS externalId,
+                  COALESCE(NULLIF(title_zh, ''), title) AS title
+                 FROM papers WHERE id = ?`,
+              )
+              .get(normalizedId);
+    if (!targetRow) throw new Error("部分所选内容已经不存在，请刷新后重新选择。");
+    return { normalizedType, normalizedId, targetRow };
+  });
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    for (const { normalizedType, normalizedId, targetRow } of targets) {
+      database
+        .prepare("DELETE FROM reading_annotations WHERE target_type = ? AND target_id = ?")
+        .run(normalizedType, normalizedId);
+      database
+        .prepare("DELETE FROM reading_states WHERE target_type = ? AND target_id = ?")
+        .run(normalizedType, normalizedId);
+      database
+        .prepare("DELETE FROM content_tags WHERE target_type = ? AND target_id = ?")
+        .run(normalizedType, normalizedId);
+      database
+        .prepare("DELETE FROM topic_items WHERE target_type = ? AND target_id = ?")
+        .run(normalizedType, normalizedId);
+      database
+        .prepare("DELETE FROM content_folders WHERE target_type = ? AND target_id = ?")
+        .run(normalizedType, normalizedId);
+      database
+        .prepare("DELETE FROM knowledge_cards WHERE target_type = ? AND target_id = ?")
+        .run(normalizedType, normalizedId);
+      database
+        .prepare("DELETE FROM ai_conversations WHERE primary_target_type = ? AND primary_target_id = ?")
+        .run(normalizedType, normalizedId);
+      if (normalizedType !== "paper") {
+        database
+          .prepare("DELETE FROM favorites WHERE target_type = ? AND target_id = ?")
+          .run(normalizedType, normalizedId);
+      }
+      if (normalizedType === "document") {
+        database.prepare("DELETE FROM document_search WHERE document_id = ?").run(normalizedId);
+        database.prepare("DELETE FROM documents WHERE id = ?").run(normalizedId);
+      } else if (normalizedType === "article") {
+        database.prepare("DELETE FROM article_search WHERE article_id = ?").run(normalizedId);
+        database.prepare("DELETE FROM articles WHERE id = ?").run(normalizedId);
+      } else {
+        database
+          .prepare(
+            `UPDATE paper_week_status
+             SET status = 'pending', selected_paper_id = NULL, snoozed_until = NULL,
+                 updated_at = ?
+             WHERE selected_paper_id = ?`,
+          )
+          .run(new Date().toISOString(), normalizedId);
+        database
+          .prepare("UPDATE paper_candidates SET status = 'pending' WHERE external_id = ?")
+          .run(targetRow.externalId);
+        database.prepare("DELETE FROM papers WHERE id = ?").run(normalizedId);
+      }
+    }
+    database.prepare(
+      `DELETE FROM tags WHERE NOT EXISTS (
+        SELECT 1 FROM content_tags WHERE content_tags.tag_name = tags.name
+      )`,
+    ).run();
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+
+  return targets.map(({ normalizedType, normalizedId, targetRow }) => ({
+    targetType: normalizedType,
+    targetId: normalizedId,
+    ...targetRow,
+  }));
+}
+
+/**
  * 清空论文库和旧推荐状态；调用方必须先创建数据库备份并删除精确 PDF 缓存。
  *
  * @returns {{ deletedCount: number, paperIds: string[] }} 清理结果。
@@ -3322,7 +3857,9 @@ function getKnowledgeTargetSummary(targetType, targetId) {
   if (normalizedType === "article") {
     /** row 是网页文章摘要字段。 */
     const row = database.prepare(`
-      SELECT id, title, category, summary, updated_at
+      SELECT id, title, category,
+        COALESCE(NULLIF(translated_summary, ''), summary) AS summary,
+        updated_at
       FROM articles WHERE id = ? LIMIT 1
     `).get(normalizedId);
     return row ? { targetType: normalizedType, targetId: row.id, title: row.title,
@@ -3421,14 +3958,18 @@ export function removeContentTag(targetType, targetId, rawTagName) {
  *
  * @param {string[]} pathNames 从一级目录到目标目录的名称数组。
  * @param {number[]} sortOrders 各层目录可选的显示顺序；未提供时沿用路径层级。
+ * @param {string | null} rootParentId 可选的既有父目录 ID。
  * @returns {Record<string, unknown>[]} 路径中的全部文件夹。
  */
-export function ensureFolderPath(pathNames, sortOrders = []) {
+export function ensureFolderPath(pathNames, sortOrders = [], rootParentId = null) {
   if (!Array.isArray(pathNames) || pathNames.length === 0) {
     throw new Error("文件夹路径不能为空。");
   }
   /** parentId 是当前层级即将使用的父文件夹 ID。 */
-  let parentId = null;
+  let parentId = String(rootParentId || "").trim() || null;
+  if (parentId && !database.prepare("SELECT id FROM folders WHERE id = ?").get(parentId)) {
+    throw new Error("找不到指定的知识库目录。");
+  }
   /** folders 是按路径顺序返回的文件夹列表。 */
   const folders = [];
   for (const [pathIndex, pathName] of pathNames.entries()) {
@@ -3565,6 +4106,44 @@ export function renameFolder(folderId, name) {
 }
 
 /**
+ * 把一个文件夹及其整棵子树移动到新的父目录。
+ *
+ * @param {string} folderId 待移动文件夹 ID。
+ * @param {string | null} parentId 新父目录；空值表示知识库根目录。
+ * @returns {Record<string, unknown>} 移动后的文件夹。
+ */
+export function moveFolder(folderId, parentId = null) {
+  const normalizedFolderId = String(folderId || "").trim();
+  const normalizedParentId = String(parentId || "").trim() || null;
+  const folder = database.prepare("SELECT * FROM folders WHERE id = ?").get(normalizedFolderId);
+  if (!folder) throw new Error("找不到需要移动的文件夹。");
+  if ((folder.parent_id || null) === normalizedParentId) return listFolders().find((item) => item.id === folder.id);
+  if (normalizedParentId === normalizedFolderId) throw new Error("不能把文件夹移动到自身下面。");
+  if (normalizedParentId) {
+    const parentFolder = database.prepare("SELECT * FROM folders WHERE id = ?").get(normalizedParentId);
+    if (!parentFolder) throw new Error("找不到目标文件夹。");
+    /** ancestorId 沿目标父目录向根节点回溯，防止把父目录移进自己的后代。 */
+    let ancestorId = normalizedParentId;
+    while (ancestorId) {
+      if (ancestorId === normalizedFolderId) throw new Error("不能把文件夹移动到自己的子目录中。");
+      const ancestor = database.prepare("SELECT parent_id FROM folders WHERE id = ?").get(ancestorId);
+      ancestorId = ancestor?.parent_id || null;
+    }
+  }
+  const duplicate = normalizedParentId
+    ? database.prepare(`
+        SELECT id FROM folders WHERE parent_id = ? AND name = ? AND id <> ? LIMIT 1
+      `).get(normalizedParentId, folder.name, normalizedFolderId)
+    : database.prepare(`
+        SELECT id FROM folders WHERE parent_id IS NULL AND name = ? AND id <> ? LIMIT 1
+      `).get(folder.name, normalizedFolderId);
+  if (duplicate) throw new Error("目标目录下已存在同名文件夹。");
+  database.prepare("UPDATE folders SET parent_id = ?, updated_at = ? WHERE id = ?")
+    .run(normalizedParentId, new Date().toISOString(), normalizedFolderId);
+  return listFolders().find((item) => item.id === normalizedFolderId);
+}
+
+/**
  * 将一项内容移动到指定文件夹；每项内容只有一个主要位置。
  *
  * @param {string} targetType 内容类型。
@@ -3609,6 +4188,55 @@ export function assignContentToFolder(targetType, targetId, folderId, sortOrder 
     folderId: normalizedFolderId,
     sortOrder: normalizedSortOrder,
   };
+}
+
+/**
+ * 原子地把多项知识内容移动到同一文件夹。
+ *
+ * @param {{ targetType: string, targetId: string }[]} items 待移动内容。
+ * @param {string} folderId 目标文件夹 ID。
+ * @returns {Record<string, unknown>[]} 保存后的目录关系。
+ */
+export function assignContentsToFolder(items, folderId) {
+  const normalizedFolderId = String(folderId || "").trim();
+  if (!database.prepare("SELECT id FROM folders WHERE id = ?").get(normalizedFolderId)) {
+    throw new Error("找不到目标文件夹。");
+  }
+  const normalizedItems = (Array.isArray(items) ? items : []).map((item) => ({
+    targetType: normalizeKnowledgeTargetType(item?.targetType),
+    targetId: String(item?.targetId || "").trim(),
+  }));
+  if (normalizedItems.length === 0) throw new Error("请选择需要移动的内容。");
+  if (normalizedItems.length > 1000) throw new Error("一次最多移动 1000 项内容。");
+  const uniqueItems = [...new Map(
+    normalizedItems.map((item) => [`${item.targetType}:${item.targetId}`, item]),
+  ).values()];
+  for (const item of uniqueItems) {
+    if (!getKnowledgeTargetSummary(item.targetType, item.targetId)) {
+      throw new Error("待移动内容中有项目已不存在，请刷新后重试。");
+    }
+  }
+  const now = new Date().toISOString();
+  const statement = database.prepare(`
+    INSERT INTO content_folders(
+      target_type, target_id, folder_id, sort_order, created_at, updated_at
+    ) VALUES (?, ?, ?, 0, ?, ?)
+    ON CONFLICT(target_type, target_id) DO UPDATE SET
+      folder_id = excluded.folder_id,
+      sort_order = 0,
+      updated_at = excluded.updated_at
+  `);
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    for (const item of uniqueItems) {
+      statement.run(item.targetType, item.targetId, normalizedFolderId, now, now);
+    }
+    database.exec("COMMIT;");
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
+  return uniqueItems.map((item) => ({ ...item, folderId: normalizedFolderId, sortOrder: 0 }));
 }
 
 /**
@@ -3790,15 +4418,19 @@ export function searchKnowledgeBase(filters = {}) {
   /** candidateRows 收集各类型正文及个人笔记的命中项。 */
   const candidateRows = [];
   if (!targetType || targetType === "document") candidateRows.push(...database.prepare(`
-    SELECT 'document' AS target_type, id AS target_id, title, category, summary,
+    SELECT 'document' AS target_type, id AS target_id,
+      COALESCE(NULLIF(display_title, ''), title) AS title, category, summary,
       extracted_text AS search_text, updated_at, '文档正文' AS match_source
-    FROM documents WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR extracted_text LIKE ? ESCAPE '\\'
-  `).all(likeQuery, likeQuery, likeQuery));
+    FROM documents WHERE display_title LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\'
+      OR summary LIKE ? ESCAPE '\\' OR extracted_text LIKE ? ESCAPE '\\'
+  `).all(likeQuery, likeQuery, likeQuery, likeQuery));
   if (!targetType || targetType === "article") candidateRows.push(...database.prepare(`
-    SELECT 'article' AS target_type, id AS target_id, title, category, summary,
+    SELECT 'article' AS target_type, id AS target_id,
+      COALESCE(NULLIF(display_title, ''), title) AS title, category, summary,
       content_text AS search_text, updated_at, '网页正文' AS match_source
-    FROM articles WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR content_text LIKE ? ESCAPE '\\'
-  `).all(likeQuery, likeQuery, likeQuery));
+    FROM articles WHERE display_title LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\'
+      OR summary LIKE ? ESCAPE '\\' OR content_text LIKE ? ESCAPE '\\'
+  `).all(likeQuery, likeQuery, likeQuery, likeQuery));
   if (!targetType || targetType === "paper") candidateRows.push(...database.prepare(`
     SELECT 'paper' AS target_type, id AS target_id,
       COALESCE(NULLIF(title_zh, ''), title) AS title, category,

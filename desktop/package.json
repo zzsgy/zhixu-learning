@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.mjs",
     "test:ui": "node --disable-warning=ExperimentalWarning --test tests/server-integration.test.mjs tests/article-translation.test.mjs",
-    "test:import": "node --disable-warning=ExperimentalWarning --test tests/article-parser.test.mjs tests/docsify-importer.test.mjs tests/mli-paper-service.test.mjs tests/paper-library.test.mjs",
+    "test:import": "node --disable-warning=ExperimentalWarning --test tests/article-parser.test.mjs tests/docsify-importer.test.mjs tests/mli-paper-service.test.mjs tests/paper-library.test.mjs tests/pdf-layout.test.mjs",
     "test:database": "node --disable-warning=ExperimentalWarning --test tests/ai-history.test.mjs tests/paper-library.test.mjs tests/server-integration.test.mjs",
     "test:browser": "node --disable-warning=ExperimentalWarning --test tests/browser-capture.test.mjs tests/import-jobs.test.mjs",
     "test:ocr": "node --disable-warning=ExperimentalWarning --test tests/ocr-service.test.mjs tests/import-jobs.test.mjs",
@@ -20,6 +20,7 @@
   "dependencies": {
     "@mozilla/readability": "0.6.0",
     "jszip": "3.10.1",
+    "katex": "0.18.4",
     "linkedom": "0.18.13",
     "mammoth": "1.11.0",
     "marked": "^16.4.2",

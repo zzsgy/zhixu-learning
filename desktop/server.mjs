@@ -8,6 +8,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { parseHTML } from "linkedom";
 import {
   articleImageDirectory,
   attachmentDirectory,
@@ -20,6 +21,7 @@ import {
   addContentTag,
   addTopicItem,
   assignContentToFolder,
+  assignContentsToFolder,
   backfillArticleLanguages,
   createFolder,
   createImportJob,
@@ -29,13 +31,19 @@ import {
   createTopic,
   clearPaperLibrary,
   confirmVideoImportJob,
+  completeImportJob,
   deleteEmptyFolder,
   deleteKnowledgeCard,
   deleteKnowledgeTarget,
+  deleteKnowledgeTargets,
   deleteReadingAnnotation,
   dismissPaperReminder,
+  failImportJob,
   failDocumentOcr,
+  findDuplicateArticle,
+  findDuplicateDocument,
   getArticleById,
+  getArticleTranslationStatus,
   getAiConversation,
   getDocumentById,
   getDocumentStatistics,
@@ -62,6 +70,7 @@ import {
   listTopicItems,
   listTopics,
   listBrowserClients,
+  moveFolder,
   findBrowserClientByTokenHash,
   registerBrowserClient,
   queueDocumentOcr,
@@ -86,6 +95,8 @@ import {
   updateReadingState,
   removeContentTag,
   removeTopicItem,
+  renameArticleTitle,
+  renameDocumentTitle,
   renameFolder,
   reviewKnowledgeCard,
   revokeBrowserClient,
@@ -99,12 +110,14 @@ import {
 import {
   createDocumentSummary,
   extractDocumentText,
+  extractPdfReadingStructure,
   extractWordHtml,
 } from "./lib/extractor.mjs";
 import {
   detectArticleLanguage,
   fetchPublicImage,
   parseAndClassifyArticle,
+  parseAndClassifyCapturedArticle,
 } from "./lib/article-parser.mjs";
 import {
   ensureDailyClassicPaperCandidate,
@@ -125,13 +138,22 @@ import {
   triggerCodexPaperTranslationWorker,
 } from "./lib/codex-paper-translator.mjs";
 import {
+  getCodexArticleTranslationWorkerStatus,
+  initializeCodexArticleTranslationWorker,
+  triggerCodexArticleTranslationWorker,
+} from "./lib/codex-article-translator.mjs";
+import {
   inspectDocsifySource,
   parseDocsifyChapter,
 } from "./lib/docsify-importer.mjs";
 import { createImportJobRunner } from "./lib/import-job-runner.mjs";
+import { createArticleImageCache } from "./lib/article-image-cache.mjs";
 import {
   getOcrEngineStatus,
   isOcrSupportedExtension,
+  listPdfEmbeddedFigures,
+  renderPdfEmbeddedFigure,
+  renderPdfTableRegion,
   recognizeDocument,
 } from "./lib/ocr-service.mjs";
 import {
@@ -144,6 +166,12 @@ import {
   createVideoStudyPdf,
   getVideoStudyEngineStatus,
 } from "./lib/video-study-service.mjs";
+
+/** articleImageCache 合并同一远程图片的首次并发下载，避免缓存写入竞争。 */
+const articleImageCache = createArticleImageCache({
+  imageDirectory: articleImageDirectory,
+  fetchImage: fetchPublicImage,
+});
 
 /** paperScheduleIntervalMilliseconds 是后台检查新自然周的间隔。 */
 const paperScheduleIntervalMilliseconds = 6 * 60 * 60 * 1000;
@@ -183,6 +211,159 @@ function queuePaperPdfProcessing(paper) {
 const browserPairingCodeLifetimeMilliseconds = 10 * 60 * 1000;
 /** browserPairingCodes 仅在内存中保存短期配对码，不写入数据库。 */
 const browserPairingCodes = new Map();
+/** pdfReadingTextCache 缓存少量 PDF 的逐页文字标记，避免每次打开都重新解析整本文件。 */
+const pdfReadingTextCache = new Map();
+/**
+ * 合并文字坐标与内嵌插图，生成可复制的复杂页双栏结构。
+ *
+ * @param {Record<string, Record<string, unknown>>} pageLayouts PDF.js 页级版面特征。
+ * @param {Record<string, Array<Record<string, unknown>>>} figuresByPage 内嵌图片列表。
+ * @returns {Record<string, Record<string, unknown>>} 需要结构化显示的页面。
+ */
+function createPdfFigureRegions(layout) {
+  const pageWidth = Number(layout?.pageWidth) || 0;
+  const pageHeight = Number(layout?.pageHeight) || 0;
+  if (pageWidth < 100 || pageHeight < 100) return [];
+  const regions = [];
+  for (const columnName of ["left", "right"]) {
+    const captions = (layout.structuredText?.columns?.[columnName] || [])
+      .filter((line) => /^图\s*\d+(?:\.\d+)?/.test(String(line.text || "")))
+      .sort((left, right) => Number(right.y) - Number(left.y));
+    captions.forEach((caption, captionIndex) => {
+      const previousCaption = captions[captionIndex - 1];
+      const defaultTopUserCoordinate = captionIndex === 0
+        ? pageHeight * 0.948
+        : Number(previousCaption.y) - Math.max(18, Number(previousCaption.fontSize) * 2.6);
+      const bottomUserCoordinate = Number(caption.y) - Math.max(14, Number(caption.fontSize) * 2.2);
+      const numericLabels = ["left", "right"].flatMap((candidateColumn) => (
+        (layout.structuredText?.columns?.[candidateColumn] || [])
+          .filter((line) => (
+            /^(?:\d{1,2}(?:\s+|$)){1,12}$/.test(String(line.text || "").trim())
+            && Number(line.y) > Number(caption.y) + 10
+            && Number(line.y) < defaultTopUserCoordinate
+          ))
+          .map((line) => ({ ...line, column: candidateColumn }))
+      ));
+      const labelColumns = new Set(numericLabels.map((line) => line.column));
+      const spansBothColumns = labelColumns.size > 1;
+      const figureTextColumns = spansBothColumns ? ["left", "right"] : [columnName];
+      const maximumFigureTextSize = Math.max(8, Number(caption.fontSize) * 1.25);
+      const nearbyFigureLines = figureTextColumns
+        .flatMap((candidateColumn) => layout.structuredText?.columns?.[candidateColumn] || [])
+        .filter((line) => (
+          Number(line.y) > Number(caption.y) + 8
+          && Number(line.y) < defaultTopUserCoordinate
+        ))
+        .sort((left, right) => Number(left.y) - Number(right.y));
+      const includedFigureLines = [];
+      for (const line of nearbyFigureLines) {
+        const text = String(line.text || "").trim();
+        const isNumericLabel = /^(?:\d{1,2}(?:\s+|$)){1,12}$/.test(text);
+        const isNumberedLegend = /^\d{1,2}[.、)]\s*\S/.test(text);
+        const isSmallFigureText = Number(line.fontSize) <= maximumFigureTextSize;
+        if (!isNumericLabel && !isNumberedLegend && !isSmallFigureText) break;
+        includedFigureLines.push(line);
+      }
+      const nearestNonFigureLine = nearbyFigureLines[includedFigureLines.length];
+      const detectedFigureTop = includedFigureLines.length > 0
+        ? Math.max(...includedFigureLines.map((line) => Number(line.y)))
+          + Math.max(16, pageHeight * 0.035)
+        : (numericLabels.length > 0
+          ? Math.max(...numericLabels.map((line) => Number(line.y))) + pageHeight * 0.06
+          : (nearestNonFigureLine
+            ? Number(nearestNonFigureLine.y)
+              - Math.max(12, Number(nearestNonFigureLine.fontSize) * 1.5)
+            : defaultTopUserCoordinate));
+      const topUserCoordinate = Math.min(defaultTopUserCoordinate, detectedFigureTop);
+      const x = spansBothColumns
+        ? pageWidth * 0.065
+        : (columnName === "left" ? pageWidth * 0.065 : pageWidth * 0.5);
+      const width = pageWidth * (spansBothColumns ? 0.87 : 0.435);
+      const height = topUserCoordinate - bottomUserCoordinate;
+      if (height < 45) return;
+      regions.push({
+        regionIndex: regions.length,
+        column: spansBothColumns ? "both" : columnName,
+        caption: String(caption.text || "").replace(/\s+/g, " ").trim(),
+        x: Number(x.toFixed(2)),
+        y: Number((pageHeight - topUserCoordinate).toFixed(2)),
+        width: Number(width.toFixed(2)),
+        height: Number(height.toFixed(2)),
+      });
+    });
+  }
+  return regions;
+}
+
+function createPdfStructuredPages(pageLayouts, figuresByPage) {
+  const structuredPages = {};
+  for (const [pageNumber, layout] of Object.entries(pageLayouts || {})) {
+    const figures = figuresByPage?.[pageNumber] || [];
+    const reasons = [];
+    if (layout.multiColumn) reasons.push("multi-column");
+    if (Number(layout.numberedCalloutCount) >= 3 && figures.length >= 1) {
+      reasons.push("numbered-callouts");
+    }
+    if (figures.length >= 2 && Number(layout.textRowCount) >= 8) {
+      reasons.push("multi-figure");
+    }
+    const figureRegions = createPdfFigureRegions(layout);
+    if (figureRegions.length > 0) reasons.push("figure-regions");
+    if (reasons.length === 0) continue;
+    const leftCaptionCount = (layout.structuredText?.columns?.left || [])
+      .filter((line) => /^图\s*\d+(?:\.\d+)?/.test(String(line.text || ""))).length;
+    const rightCaptionCount = (layout.structuredText?.columns?.right || [])
+      .filter((line) => /^图\s*\d+(?:\.\d+)?/.test(String(line.text || ""))).length;
+    structuredPages[pageNumber] = {
+      reasons,
+      pageWidth: Number(layout.pageWidth) || 0,
+      pageHeight: Number(layout.pageHeight) || 0,
+      header: layout.structuredText?.header || [],
+      columns: layout.structuredText?.columns || { left: [], right: [] },
+      footer: layout.structuredText?.footer || [],
+      figureRegions,
+      figures: figures.map((figure, figureIndex) => ({
+        ...figure,
+        column: leftCaptionCount + rightCaptionCount >= figures.length
+          ? (figureIndex < leftCaptionCount ? "left" : "right")
+          : (figureIndex % 2 === 0 ? "left" : "right"),
+      })),
+    };
+  }
+  return structuredPages;
+}
+
+/**
+ * 返回带物理页码标记的 PDF 正文，供 HTML 阅读页按章懒加载原页图像。
+ *
+ * @param {Record<string, unknown>} document 文档记录。
+ * @param {string} filePath PDF 原始文件路径。
+ * @returns {Promise<{ markedText: string, figuresByPage: Record<string, Array<Record<string, number>>>, tablesByPage: Record<string, Array<Record<string, unknown>>>, structuredPages: Record<string, Record<string, unknown>>, outline: Array<Record<string, unknown>> }>} 阅读资源。
+ */
+async function getPdfReadingAssets(document, filePath) {
+  const fileStats = fs.statSync(filePath);
+  const cacheKey = `${document.storedName}:${fileStats.size}:${fileStats.mtimeMs}`;
+  if (pdfReadingTextCache.has(cacheKey)) return pdfReadingTextCache.get(cacheKey);
+  const [readingStructure, figuresByPage] = await Promise.all([
+    extractPdfReadingStructure(fs.readFileSync(filePath)),
+    listPdfEmbeddedFigures(filePath),
+  ]);
+  const readingAssets = {
+    markedText: readingStructure.markedText,
+    figuresByPage,
+    tablesByPage: readingStructure.tablesByPage,
+    structuredPages: createPdfStructuredPages(
+      readingStructure.pageLayouts,
+      figuresByPage,
+    ),
+    outline: readingStructure.outline,
+  };
+  pdfReadingTextCache.set(cacheKey, readingAssets);
+  while (pdfReadingTextCache.size > 6) {
+    pdfReadingTextCache.delete(pdfReadingTextCache.keys().next().value);
+  }
+  return readingAssets;
+}
 
 /**
  * 生成不与当前有效配对码冲突的六位数字。
@@ -295,8 +476,12 @@ async function processBrowserCaptureJob(job, context) {
   /** selectedText 是可选的用户选区，限制长度避免扩展提交超大正文。 */
   const selectedText = String(job.payload.selectedText || "").trim().slice(0, 8000);
   context.updateProgress({ stage: "fetching", progressPercent: 10 });
-  /** parsedArticle 是现有安全抓取和分类流程生成的网页正文。 */
-  const parsedArticle = await parseAndClassifyArticle(inputUrl);
+  /** sourceHtml 只来自已配对扩展读取的当前标签页 DOM。 */
+  const sourceHtml = String(job.payload.sourceHtml || "");
+  /** parsedArticle 对浏览器已加载页面复用相同安全清洗，否则保持原网络抓取流程。 */
+  const parsedArticle = sourceHtml
+    ? await parseAndClassifyCapturedArticle(inputUrl, sourceHtml)
+    : await parseAndClassifyArticle(inputUrl);
   context.updateProgress({ stage: "saving", progressPercent: 75 });
   /** now 是文章保存或更新的时间。 */
   const now = new Date().toISOString();
@@ -539,13 +724,26 @@ const staticMimeTypes = Object.freeze({
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
 });
+
+/** katexDistributionDirectory 是随 npm 依赖安装的本地公式渲染资源目录。 */
+const katexDistributionDirectory = path.resolve(
+  publicDirectory,
+  "..",
+  "node_modules",
+  "katex",
+  "dist",
+);
 
 /**
  * 向浏览器发送 JSON 响应。
@@ -610,6 +808,39 @@ function sanitizeFileName(rawName) {
 }
 
 /**
+ * 将文件夹选择器提供的相对文件路径转换为安全的知识库目录层级。
+ * 最后一段是文件名，因此只返回其父目录；普通文件上传返回空数组。
+ *
+ * @param {string} rawRelativePath URI 编码后的浏览器相对路径。
+ * @returns {string[]} 从所选根目录到文件父目录的名称数组。
+ */
+function sanitizeRelativeFolderPath(rawRelativePath) {
+  if (!rawRelativePath) return [];
+  /** decodedPath 只用于建立 SQLite 目录关系，不会拼接成本机磁盘路径。 */
+  let decodedPath = "";
+  try {
+    decodedPath = decodeURIComponent(rawRelativePath);
+  } catch {
+    throw new Error("文件夹相对路径编码无效。");
+  }
+  if (decodedPath.length > 2048) throw new Error("文件夹层级路径过长。");
+  /** rawSegments 同时兼容浏览器的正斜杠和 Windows 反斜杠。 */
+  const rawSegments = decodedPath.replaceAll("\\", "/").split("/");
+  rawSegments.pop();
+  if (rawSegments.length > 20) throw new Error("文件夹层级不能超过 20 层。");
+  /** folderNames 是清除控制字符后的安全目录名称。 */
+  const folderNames = rawSegments.map((segment) => {
+    const normalizedName = segment.replace(/[\u0000-\u001f]/g, "").replace(/\s+/g, " ").trim();
+    if (!normalizedName || normalizedName === "." || normalizedName === "..") {
+      throw new Error("文件夹相对路径包含无效目录名称。");
+    }
+    if (normalizedName.length > 100) throw new Error("文件夹名称不能超过 100 个字符。");
+    return normalizedName;
+  });
+  return folderNames;
+}
+
+/**
  * 判断候选文件是否严格位于允许删除的本地目录中。
  *
  * @param {string} candidatePath 候选文件绝对或相对路径。
@@ -669,6 +900,55 @@ function toArticleListItem(article) {
 }
 
 /**
+ * 从已完成的中文 HTML 译文提取一段轻量中文简介。
+ *
+ * @param {string} translatedHtml 中文全文 HTML。
+ * @returns {string} 论文列表使用的中文预览。
+ */
+function createTranslatedHtmlPreview(translatedHtml) {
+  const html = String(translatedHtml || "").trim();
+  if (!html) return "";
+  const { document } = parseHTML(`<main>${html}</main>`);
+  const root = document.querySelector("main");
+  if (!root) return "";
+  const blockTexts = Array.from(root.querySelectorAll("p,blockquote,li,td"))
+    .map((element) => String(element.textContent || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  /** preferredText 跳过作者、版本号等元数据，优先选取真正的中文正文段。 */
+  const preferredText = blockTexts.find((text) => (
+    text.length >= 80
+    && (text.match(/[\u3400-\u9fff]/g) || []).length >= 8
+    && !/^(?:作者|arxiv|来源|论文信息)[：:\s]/i.test(text)
+  ));
+  const text = String(preferredText || blockTexts[0] || root.textContent || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return "";
+  return `${text.slice(0, 260)}${text.length > 260 ? "…" : ""}`;
+}
+
+/**
+ * 将完整论文转换为不携带长正文、但包含中文简介的列表对象。
+ *
+ * @param {Record<string, unknown>} paper 完整论文对象。
+ * @returns {Record<string, unknown>} 论文列表对象。
+ */
+function toPaperListItem(paper) {
+  const translationPreviewZh = paper.abstractZh
+    || createTranslatedHtmlPreview(paper.fullTranslationHtml);
+  const {
+    sourceText: _sourceText,
+    fullTranslationHtml: _fullTranslationHtml,
+    ...listItem
+  } = paper;
+  return {
+    ...listItem,
+    translationPreviewZh,
+    tags: listContentTags("paper", paper.id),
+  };
+}
+
+/**
  * 处理上传、列表、详情、下载和人工分类接口。
  *
  * @param {http.IncomingMessage} request HTTP 请求对象。
@@ -676,6 +956,33 @@ function toArticleListItem(article) {
  * @param {URL} url 已解析请求地址。
  * @returns {Promise<boolean>} 是否已经处理本次请求。
  */
+/**
+ * 为后台任务补齐知识库保存位置，避免任务完成后只能打开内容却不知道归档目录。
+ *
+ * @param {Array<Record<string, unknown>>} jobs 后台导入任务。
+ * @returns {Array<Record<string, unknown>>} 带 location 的任务。
+ */
+function attachImportJobLocations(jobs) {
+  const targetsByKey = new Map([
+    ...listDocuments({ limit: 1000 }).map((item) => [`document:${item.id}`, item]),
+    ...listArticles({ limit: 1000 }).map((item) => [`article:${item.id}`, item]),
+  ]);
+  const foldersById = new Map(listFolders().map((folder) => [folder.id, folder]));
+  return jobs.map((job) => {
+    const target = targetsByKey.get(`${job.targetType}:${job.targetId}`);
+    const folder = target?.folderId ? foldersById.get(target.folderId) : null;
+    if (!target || !folder) return { ...job, location: null };
+    return {
+      ...job,
+      location: {
+        folderId: folder.id,
+        folderPath: folder.path,
+        folderLabel: folder.path.map((part) => part.name).join(" / "),
+      },
+    };
+  });
+}
+
 async function handleApiRequest(request, response, url) {
   if (request.method === "OPTIONS" && url.pathname.startsWith("/api/browser/")) {
     /** extensionOrigin 是仅允许浏览器扩展跨源调用的来源。 */
@@ -706,11 +1013,11 @@ async function handleApiRequest(request, response, url) {
 
   if (request.method === "GET" && url.pathname === "/api/import-jobs") {
     /** jobs 是前端任务中心最近的后台导入记录。 */
-    const jobs = listImportJobs({
+    const jobs = attachImportJobLocations(listImportJobs({
       status: url.searchParams.get("status") || "",
       jobType: url.searchParams.get("jobType") || "",
       limit: Number(url.searchParams.get("limit")) || 30,
-    });
+    }));
     sendJson(response, 200, { jobs, runner: importJobRunner.getStatus() });
     return true;
   }
@@ -719,7 +1026,9 @@ async function handleApiRequest(request, response, url) {
   const importJobMatch = url.pathname.match(/^\/api\/import-jobs\/([^/]+)$/);
   if (request.method === "GET" && importJobMatch) {
     /** job 是指定 ID 的后台导入任务。 */
-    const job = getImportJob(decodeURIComponent(importJobMatch[1]));
+    const job = attachImportJobLocations([
+      getImportJob(decodeURIComponent(importJobMatch[1])),
+    ].filter(Boolean))[0];
     if (!job) {
       sendJson(response, 404, { message: "找不到这项导入任务。" });
       return true;
@@ -967,7 +1276,8 @@ async function handleApiRequest(request, response, url) {
       return true;
     }
     /** requestBuffer 是网页地址、标题和可选选区。 */
-    const requestBuffer = await readRequestBuffer(request, 128 * 1024);
+    /** 浏览器捕获可能包含完整技术文章；解析器随后执行更严格的 15 MB HTML 上限。 */
+    const requestBuffer = await readRequestBuffer(request, 20 * 1024 * 1024);
     /** payload 是扩展提交的快速收藏内容。 */
     const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
     /** captureUrl 是仅允许 HTTP(S) 的网页地址。 */
@@ -983,8 +1293,10 @@ async function handleApiRequest(request, response, url) {
       return true;
     }
     captureUrl.hash = "";
-    /** job 是立即持久化、随后在后台执行的收藏任务。 */
-    const job = createImportJob({
+    /** sourceHtml 是扩展从用户当前标签页读取的 DOM，不接受普通网页来源。 */
+    const sourceHtml = String(payload.sourceHtml || "");
+    /** job 只保存轻量参数，避免把大段浏览器 HTML 长期留在任务数据库。 */
+    let job = createImportJob({
       jobType: "browser_capture",
       sourceLabel: String(payload.title || captureUrl.hostname),
       sourceUrl: captureUrl.toString(),
@@ -995,6 +1307,24 @@ async function handleApiRequest(request, response, url) {
         clientId: client.id,
       },
     });
+    if (sourceHtml) {
+      try {
+        /** result 在当前请求内处理已加载 DOM，原始 HTML 不进入持久化任务参数。 */
+        const result = await processBrowserCaptureJob(
+          { ...job, payload: { ...job.payload, sourceHtml } },
+          { updateProgress() {} },
+        );
+        job = completeImportJob(job.id, result);
+        sendBrowserExtensionJson(request, response, 201, { job });
+      } catch (error) {
+        job = failImportJob(job.id, error);
+        sendBrowserExtensionJson(request, response, 422, {
+          job,
+          message: job?.errorMessage || "浏览器网页收藏失败。",
+        });
+      }
+      return true;
+    }
     importJobRunner.trigger();
     sendBrowserExtensionJson(request, response, 202, { job });
     return true;
@@ -1045,6 +1375,17 @@ async function handleApiRequest(request, response, url) {
     return true;
   }
 
+  /** folderMoveMatch 匹配文件夹父目录变更地址。 */
+  const folderMoveMatch = url.pathname.match(/^\/api\/folders\/([^/]+)\/move$/);
+  if (request.method === "PATCH" && folderMoveMatch) {
+    const requestBuffer = await readRequestBuffer(request, 128 * 1024);
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    const folder = moveFolder(decodeURIComponent(folderMoveMatch[1]), payload.parentId || null);
+    createDailyBackup();
+    sendJson(response, 200, { folder, folders: listFolders() });
+    return true;
+  }
+
   /** folderMatch 匹配单个文件夹的重命名或删除地址。 */
   const folderMatch = url.pathname.match(/^\/api\/folders\/([^/]+)$/);
   if (request.method === "PATCH" && folderMatch) {
@@ -1080,6 +1421,56 @@ async function handleApiRequest(request, response, url) {
     );
     createDailyBackup();
     sendJson(response, 200, { assignment, folders: listFolders() });
+    return true;
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/folder-items/batch") {
+    const requestBuffer = await readRequestBuffer(request, 512 * 1024);
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    const assignments = assignContentsToFolder(payload.items, payload.folderId);
+    createDailyBackup();
+    sendJson(response, 200, { assignments, movedCount: assignments.length, folders: listFolders() });
+    return true;
+  }
+
+  if (request.method === "DELETE" && url.pathname === "/api/folder-items/batch") {
+    /** requestBuffer 是用户已确认永久删除的一批知识内容。 */
+    const requestBuffer = await readRequestBuffer(request, 512 * 1024);
+    /** payload.items 只包含固定内容类型和本地稳定 ID。 */
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    /** items 是交给数据库事务校验与删除的目标集合。 */
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    /** attachmentPaths 在删除数据库记录前保存需要清理的精确本地附件。 */
+    const attachmentPaths = [];
+    for (const item of items) {
+      const targetType = String(item?.targetType || "").trim();
+      const targetId = String(item?.targetId || "").trim();
+      if (targetType === "document" && targetId) {
+        const document = getDocumentById(targetId);
+        if (document?.storedName) {
+          attachmentPaths.push({
+            path: path.resolve(attachmentDirectory, document.storedName),
+            directory: attachmentDirectory,
+          });
+        }
+      } else if (targetType === "paper" && targetId) {
+        const cachedPdfPath = getCachedPaperPdfPath(targetId);
+        if (cachedPdfPath) attachmentPaths.push({ path: cachedPdfPath, directory: paperDirectory });
+      }
+    }
+    createDailyBackup();
+    /** deletedTargets 仅在所有目标均成功删除后返回。 */
+    const deletedTargets = deleteKnowledgeTargets(items);
+    for (const attachment of attachmentPaths) {
+      if (isPathInsideDirectory(attachment.path, attachment.directory)) {
+        fs.rmSync(attachment.path, { force: true });
+      }
+    }
+    sendJson(response, 200, {
+      deleted: deletedTargets,
+      deletedCount: deletedTargets.length,
+      folders: listFolders(),
+    });
     return true;
   }
 
@@ -1575,15 +1966,7 @@ async function handleApiRequest(request, response, url) {
     /** sourceType 是可选的论文来源过滤值。 */
     const sourceType = url.searchParams.get("source") ?? "";
     /** papers 是用户已经保存到统一论文库的论文。 */
-    const papers = listPapers(sourceType).map((paper) => {
-      /** sourceText 被排除，避免论文列表携带完整英文正文。 */
-      const {
-        sourceText: _sourceText,
-        fullTranslationHtml: _fullTranslationHtml,
-        ...listItem
-      } = paper;
-      return { ...listItem, tags: listContentTags("paper", paper.id) };
-    });
+    const papers = listPapers(sourceType).map(toPaperListItem);
     sendJson(response, 200, { papers });
     return true;
   }
@@ -1979,7 +2362,10 @@ async function handleApiRequest(request, response, url) {
     /** query 是地址栏中的可选搜索词。 */
     const query = url.searchParams.get("q") ?? "";
     /** documents 是符合条件的本地文档列表。 */
-    const documents = listDocuments({ category, query }).map(toDocumentListItem);
+    /** 文档库页面需要覆盖文件夹统计中的全部候选项；否则总量超过默认 200 条后，
+     * 旧目录会显示正确累计数量，却只渲染最近返回的一部分内容。列表项不含正文，
+     * 因此在本地个人知识库中一次返回 1000 条仍保持轻量。 */
+    const documents = listDocuments({ category, query, limit: 1000 }).map(toDocumentListItem);
     sendJson(response, 200, {
       documents,
       statistics: getDocumentStatistics(),
@@ -1993,7 +2379,8 @@ async function handleApiRequest(request, response, url) {
     /** query 是可选文章搜索词。 */
     const query = url.searchParams.get("q") ?? "";
     /** articles 是符合条件的本地文章列表。 */
-    const articles = listArticles({ category, query }).map(toArticleListItem);
+    /** 与普通文档使用相同上限，保证网页文章目录数量和实际列表一致。 */
+    const articles = listArticles({ category, query, limit: 1000 }).map(toArticleListItem);
     sendJson(response, 200, { articles });
     return true;
   }
@@ -2005,46 +2392,10 @@ async function handleApiRequest(request, response, url) {
       sendJson(response, 400, { message: "缺少文章图片地址。" });
       return true;
     }
-    /** imageHash 是不会暴露远程路径的稳定本地缓存名称。 */
-    const imageHash = crypto.createHash("sha256").update(remoteUrl).digest("hex");
-    /** cachedExtensions 是允许缓存的图片扩展名与 MIME 映射。 */
-    const cachedExtensions = new Map([
-      [".jpg", "image/jpeg"],
-      [".png", "image/png"],
-      [".gif", "image/gif"],
-      [".webp", "image/webp"],
-      [".svg", "image/svg+xml"],
-    ]);
-    /** cachedPath 是已经存在的本地图片缓存路径。 */
-    let cachedPath = null;
-    /** cachedContentType 是缓存文件对应的响应 MIME。 */
-    let cachedContentType = null;
-    for (const [extension, contentType] of cachedExtensions) {
-      /** candidatePath 是当前格式的候选缓存路径。 */
-      const candidatePath = path.join(articleImageDirectory, `${imageHash}${extension}`);
-      if (fs.existsSync(candidatePath)) {
-        cachedPath = candidatePath;
-        cachedContentType = contentType;
-        break;
-      }
-    }
-    if (!cachedPath) {
-      /** downloadedImage 是通过公网地址校验下载的远程图片。 */
-      const downloadedImage = await fetchPublicImage(remoteUrl);
-      /** extensionByType 把已允许的 MIME 转换为缓存扩展名。 */
-      const extensionByType = {
-        "image/jpeg": ".jpg",
-        "image/png": ".png",
-        "image/gif": ".gif",
-        "image/webp": ".webp",
-        "image/svg+xml": ".svg",
-      };
-      /** imageExtension 是远程图片实际格式对应的扩展名。 */
-      const imageExtension = extensionByType[downloadedImage.contentType];
-      cachedPath = path.join(articleImageDirectory, `${imageHash}${imageExtension}`);
-      cachedContentType = downloadedImage.contentType;
-      fs.writeFileSync(cachedPath, downloadedImage.bytes, { flag: "wx" });
-    }
+    /** cachedImage 会复用已落盘文件，并合并同一地址的首次并发请求。 */
+    const cachedImage = await articleImageCache.resolve(remoteUrl);
+    const cachedPath = cachedImage.cachedPath;
+    const cachedContentType = cachedImage.contentType;
     /** imageSize 是响应给浏览器的本地缓存图片容量。 */
     const imageSize = fs.statSync(cachedPath).size;
     response.writeHead(200, {
@@ -2072,7 +2423,34 @@ async function handleApiRequest(request, response, url) {
       return true;
     }
     /** parsedArticle 是完成抓取、清洗和分类后的文章。 */
-    const parsedArticle = await parseAndClassifyArticle(inputUrl);
+    let parsedArticle;
+    try {
+      parsedArticle = await parseAndClassifyArticle(inputUrl);
+    } catch (error) {
+      if (error && typeof error === "object" && error.code === "BROWSER_CAPTURE_REQUIRED") {
+        sendJson(response, 422, {
+          code: "BROWSER_CAPTURE_REQUIRED",
+          message: error.message,
+        });
+        return true;
+      }
+      throw error;
+    }
+    /** duplicateArticle 按最终地址、原标题和正文检查现有文章。 */
+    const duplicateArticle = findDuplicateArticle(parsedArticle);
+    if (duplicateArticle) {
+      const duplicateReason = duplicateArticle.matchReason === "content"
+        ? "正文内容相同"
+        : duplicateArticle.matchReason === "url"
+          ? "网页地址相同"
+          : "原标题相同";
+      sendJson(response, 409, {
+        code: "DUPLICATE_ARTICLE",
+        message: `文章已存在：《${duplicateArticle.title}》（${duplicateReason}），本次未保存。`,
+        duplicate: duplicateArticle,
+      });
+      return true;
+    }
     /** now 是文章首次保存或重新解析时间。 */
     const now = new Date().toISOString();
     /** article 是写入本地 SQLite 后的最终记录。 */
@@ -2094,6 +2472,25 @@ async function handleApiRequest(request, response, url) {
     /** articles 是用户已经明确加入 Codex 翻译队列的英文文章。 */
     const articles = listPendingArticleTranslations();
     sendJson(response, 200, { articles });
+    return true;
+  }
+
+  if (
+    request.method === "GET" &&
+    url.pathname === "/api/article-translation-worker/status"
+  ) {
+    /** articleId 是页面当前轮询的可选文章 ID。 */
+    const articleId = url.searchParams.get("articleId") || "";
+    /** translation 是不含正文的轻量任务状态。 */
+    const translation = articleId ? getArticleTranslationStatus(articleId) : null;
+    if (articleId && !translation) {
+      sendJson(response, 404, { message: "找不到这篇文章。" });
+      return true;
+    }
+    sendJson(response, 200, {
+      worker: getCodexArticleTranslationWorkerStatus(),
+      translation,
+    });
     return true;
   }
 
@@ -2131,13 +2528,18 @@ async function handleApiRequest(request, response, url) {
     /** articleId 是用户正在阅读的英文文章 ID。 */
     const articleId = decodeURIComponent(articleTranslationRequestMatch[1]);
     /** article 是进入等待状态后的完整文章。 */
-    const article = requestArticleTranslation(articleId);
+    const article = requestArticleTranslation(articleId, {
+      force: url.searchParams.get("force") === "1",
+    });
     if (!article) {
       sendJson(response, 404, { message: "找不到这篇文章。" });
       return true;
     }
+    /** translation 是供页面立即显示排队位置的轻量状态。 */
+    const translation = getArticleTranslationStatus(articleId);
+    void triggerCodexArticleTranslationWorker();
     createDailyBackup();
-    sendJson(response, 200, { article });
+    sendJson(response, 200, { article, translation });
     return true;
   }
 
@@ -2163,6 +2565,23 @@ async function handleApiRequest(request, response, url) {
 
   /** articleDetailMatch 匹配单篇文章详情地址。 */
   const articleDetailMatch = url.pathname.match(/^\/api\/articles\/([^/]+)$/);
+  if (request.method === "PATCH" && articleDetailMatch) {
+    const requestBuffer = await readRequestBuffer(request, 32 * 1024);
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    const title = String(payload.title || "").replace(/\s+/g, " ").trim();
+    if (!title || title.length > 180) {
+      sendJson(response, 422, { message: "名称不能为空且不能超过 180 个字符。" });
+      return true;
+    }
+    const article = renameArticleTitle(decodeURIComponent(articleDetailMatch[1]), title);
+    if (!article) {
+      sendJson(response, 404, { message: "找不到这篇文章。" });
+      return true;
+    }
+    createDailyBackup();
+    sendJson(response, 200, { article });
+    return true;
+  }
   if (request.method === "GET" && articleDetailMatch) {
     /** articleId 是地址中经过解码的文章 ID。 */
     const articleId = decodeURIComponent(articleDetailMatch[1]);
@@ -2194,6 +2613,24 @@ async function handleApiRequest(request, response, url) {
     const rawFileName = String(request.headers["x-file-name"] ?? "");
     /** originalName 是经过安全清理的原始文件名。 */
     const originalName = sanitizeFileName(rawFileName);
+    /** rawRelativePath 仅在用户通过“选择文件夹”导入时存在。 */
+    const rawRelativePath = String(request.headers["x-relative-path"] ?? "");
+    /** targetFolderId 是用户上传前明确选择的知识库目录；空值表示自动识别。 */
+    const targetFolderId = String(request.headers["x-target-folder-id"] ?? "").trim();
+    if (targetFolderId && !listFolders().some((folder) => folder.id === targetFolderId)) {
+      sendJson(response, 400, { message: "选择的知识库目录已不存在，请刷新后重试。" });
+      return true;
+    }
+    /** folderPath 是需要在知识库中创建或复用的安全目录层级。 */
+    let folderPath = [];
+    try {
+      folderPath = sanitizeRelativeFolderPath(rawRelativePath);
+    } catch (error) {
+      sendJson(response, 400, {
+        message: error instanceof Error ? error.message : "文件夹相对路径无效。",
+      });
+      return true;
+    }
     /** mimeType 是浏览器报告的文件 MIME。 */
     const mimeType =
       String(request.headers["content-type"] ?? "application/octet-stream")
@@ -2219,6 +2656,21 @@ async function handleApiRequest(request, response, url) {
     const storedPath = path.join(attachmentDirectory, storedName);
     /** sha256 是用于完整性校验和未来重复检测的摘要。 */
     const sha256 = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+    /** documentTitle 是去除扩展名后的原标题。 */
+    const documentTitle = deriveDocumentTitle(originalName);
+    /** duplicateDocument 按原标题和原始二进制摘要检查现有文档。 */
+    const duplicateDocument = findDuplicateDocument({ title: documentTitle, sha256 });
+    if (duplicateDocument) {
+      const duplicateReason = duplicateDocument.matchReason === "content"
+        ? "文件内容相同"
+        : "原标题相同";
+      sendJson(response, 409, {
+        code: "DUPLICATE_DOCUMENT",
+        message: `文档已存在：《${duplicateDocument.title}》（${duplicateReason}），本次未保存。`,
+        duplicate: duplicateDocument,
+      });
+      return true;
+    }
     /** extractionResult 是文档解析后的正文和状态。 */
     const extractionResult = await extractDocumentText({
       buffer: fileBuffer,
@@ -2244,13 +2696,15 @@ async function handleApiRequest(request, response, url) {
         extension,
         sizeBytes: fileBuffer.length,
         sha256,
-        title: deriveDocumentTitle(originalName),
+        title: documentTitle,
         category: classification.category,
         categorySource: classification.source,
         categoryConfidence: classification.confidence,
         summary: createDocumentSummary(extractionResult.text, originalName),
         extractedText: extractionResult.text,
         extractionStatus: extractionResult.status,
+        folderPath,
+        targetFolderId,
         createdAt: now,
         updatedAt: now,
       });
@@ -2278,6 +2732,23 @@ async function handleApiRequest(request, response, url) {
 
   /** detailMatch 匹配单份文档详情地址。 */
   const detailMatch = url.pathname.match(/^\/api\/documents\/([^/]+)$/);
+  if (request.method === "PATCH" && detailMatch) {
+    const requestBuffer = await readRequestBuffer(request, 32 * 1024);
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    const title = String(payload.title || "").replace(/\s+/g, " ").trim();
+    if (!title || title.length > 180) {
+      sendJson(response, 422, { message: "名称不能为空且不能超过 180 个字符。" });
+      return true;
+    }
+    const document = renameDocumentTitle(decodeURIComponent(detailMatch[1]), title);
+    if (!document) {
+      sendJson(response, 404, { message: "找不到这份文档。" });
+      return true;
+    }
+    createDailyBackup();
+    sendJson(response, 200, { document });
+    return true;
+  }
   if (request.method === "GET" && detailMatch) {
     /** documentId 是地址中经过解码的文档 ID。 */
     const documentId = decodeURIComponent(detailMatch[1]);
@@ -2293,6 +2764,18 @@ async function handleApiRequest(request, response, url) {
       if (fs.existsSync(filePath)) {
         /** renderedHtml 保留 Word 中的段落、列表、表格和图片结构。 */
         document.renderedHtml = await extractWordHtml(fs.readFileSync(filePath));
+      }
+    }
+    if (document.extension === ".pdf") {
+      /** filePath 是按章节关联 PDF 原页图像时使用的本地原文件。 */
+      const filePath = path.join(attachmentDirectory, document.storedName);
+      if (fs.existsSync(filePath)) {
+        const readingAssets = await getPdfReadingAssets(document, filePath);
+        document.extractedText = readingAssets.markedText;
+        document.pdfFigures = readingAssets.figuresByPage;
+        document.pdfTables = readingAssets.tablesByPage;
+        document.pdfStructuredPages = readingAssets.structuredPages;
+        document.pdfOutline = readingAssets.outline;
       }
     }
     sendJson(response, 200, { document });
@@ -2379,6 +2862,122 @@ async function handleApiRequest(request, response, url) {
     return true;
   }
 
+  /** pageFigureMatch 按需提取 PDF 单页中的一张真实内嵌插图。 */
+  const pageFigureMatch = url.pathname.match(/^\/api\/documents\/([^/]+)\/page-figure$/);
+  if (request.method === "GET" && pageFigureMatch) {
+    const documentId = decodeURIComponent(pageFigureMatch[1]);
+    const document = getDocumentById(documentId);
+    if (!document || document.extension !== ".pdf") {
+      sendJson(response, 404, { message: "找不到对应的 PDF 文档。" });
+      return true;
+    }
+    const pageNumber = Number.parseInt(url.searchParams.get("page") || "", 10);
+    const assetIndex = Number.parseInt(url.searchParams.get("asset") || "", 10);
+    if (!Number.isInteger(pageNumber) || !Number.isInteger(assetIndex)) {
+      sendJson(response, 400, { message: "PDF 插图参数无效。" });
+      return true;
+    }
+    const filePath = path.join(attachmentDirectory, document.storedName);
+    if (!fs.existsSync(filePath)) {
+      sendJson(response, 410, { message: "原始 PDF 已不在附件目录中。" });
+      return true;
+    }
+    const readingAssets = await getPdfReadingAssets(document, filePath);
+    const isKnownFigure = (readingAssets.figuresByPage[pageNumber] || [])
+      .some((figure) => figure.assetIndex === assetIndex);
+    if (!isKnownFigure) {
+      sendJson(response, 404, { message: "本页没有对应的内嵌插图。" });
+      return true;
+    }
+    const figureImage = await renderPdfEmbeddedFigure(filePath, pageNumber, assetIndex);
+    response.writeHead(200, {
+      "Content-Type": "image/png",
+      "Content-Length": figureImage.length,
+      "Cache-Control": "private, max-age=86400",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(figureImage);
+    return true;
+  }
+
+  /** pageFigureRegionMatch 只裁剪单张工艺图区域，保留 PDF 的矢量编号、引线和图例。 */
+  const pageFigureRegionMatch = url.pathname.match(
+    /^\/api\/documents\/([^/]+)\/page-figure-region$/,
+  );
+  if (request.method === "GET" && pageFigureRegionMatch) {
+    const documentId = decodeURIComponent(pageFigureRegionMatch[1]);
+    const document = getDocumentById(documentId);
+    if (!document || document.extension !== ".pdf") {
+      sendJson(response, 404, { message: "找不到对应的 PDF 文档。" });
+      return true;
+    }
+    const pageNumber = Number.parseInt(url.searchParams.get("page") || "", 10);
+    const regionIndex = Number.parseInt(url.searchParams.get("region") || "", 10);
+    if (!Number.isInteger(pageNumber) || !Number.isInteger(regionIndex)) {
+      sendJson(response, 400, { message: "PDF 工艺图参数无效。" });
+      return true;
+    }
+    const filePath = path.join(attachmentDirectory, document.storedName);
+    if (!fs.existsSync(filePath)) {
+      sendJson(response, 410, { message: "原始 PDF 已不在附件目录中。" });
+      return true;
+    }
+    const readingAssets = await getPdfReadingAssets(document, filePath);
+    const region = readingAssets.structuredPages?.[pageNumber]?.figureRegions
+      ?.find((candidate) => candidate.regionIndex === regionIndex);
+    if (!region) {
+      sendJson(response, 404, { message: "本页没有对应的工艺图区域。" });
+      return true;
+    }
+    const regionImage = await renderPdfTableRegion(filePath, pageNumber, region);
+    response.writeHead(200, {
+      "Content-Type": "image/png",
+      "Content-Length": regionImage.length,
+      "Cache-Control": "private, max-age=86400",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(regionImage);
+    return true;
+  }
+
+  /** pageTableMatch 按需渲染 PDF 单页中的一个矢量表格区域。 */
+  const pageTableMatch = url.pathname.match(/^\/api\/documents\/([^/]+)\/page-table$/);
+  if (request.method === "GET" && pageTableMatch) {
+    const documentId = decodeURIComponent(pageTableMatch[1]);
+    const document = getDocumentById(documentId);
+    if (!document || document.extension !== ".pdf") {
+      sendJson(response, 404, { message: "找不到对应的 PDF 文档。" });
+      return true;
+    }
+    const pageNumber = Number.parseInt(url.searchParams.get("page") || "", 10);
+    const tableIndex = Number.parseInt(url.searchParams.get("table") || "", 10);
+    if (!Number.isInteger(pageNumber) || !Number.isInteger(tableIndex)) {
+      sendJson(response, 400, { message: "PDF 表格参数无效。" });
+      return true;
+    }
+    const filePath = path.join(attachmentDirectory, document.storedName);
+    if (!fs.existsSync(filePath)) {
+      sendJson(response, 410, { message: "原始 PDF 已不在附件目录中。" });
+      return true;
+    }
+    const readingAssets = await getPdfReadingAssets(document, filePath);
+    const table = (readingAssets.tablesByPage[pageNumber] || [])
+      .find((candidate) => candidate.tableIndex === tableIndex);
+    if (!table) {
+      sendJson(response, 404, { message: "本页没有对应的表格区域。" });
+      return true;
+    }
+    const tableImage = await renderPdfTableRegion(filePath, pageNumber, table);
+    response.writeHead(200, {
+      "Content-Type": "image/png",
+      "Content-Length": tableImage.length,
+      "Cache-Control": "private, max-age=86400",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(tableImage);
+    return true;
+  }
+
   /** categoryMatch 匹配人工修改分类地址。 */
   const categoryMatch = url.pathname.match(
     /^\/api\/documents\/([^/]+)\/category$/,
@@ -2432,16 +3031,27 @@ function serveStaticFile(request, response, url) {
     sendJson(response, 405, { message: "不支持此请求方法。" });
     return;
   }
-  /** requestedPath 是去除开头斜杠后的资源路径。 */
-  const requestedPath =
-    url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
+  /** isKatexResource 表示请求命中只读的本地 KaTeX 发布目录。 */
+  const isKatexResource = url.pathname.startsWith("/vendor/katex/");
+  /** staticRoot 是当前请求被允许读取的唯一静态根目录。 */
+  const staticRoot = isKatexResource ? katexDistributionDirectory : publicDirectory;
+  /** requestedPath 是相对于选定静态根目录的资源路径。 */
+  const requestedPath = isKatexResource
+    ? decodeURIComponent(url.pathname.slice("/vendor/katex/".length))
+    : url.pathname === "/"
+      ? "index.html"
+      : decodeURIComponent(url.pathname.slice(1));
   /** resolvedPath 是经过标准化的候选文件路径。 */
-  let resolvedPath = path.resolve(publicDirectory, requestedPath);
-  if (!resolvedPath.startsWith(`${path.resolve(publicDirectory)}${path.sep}`)) {
+  let resolvedPath = path.resolve(staticRoot, requestedPath);
+  if (!resolvedPath.startsWith(`${path.resolve(staticRoot)}${path.sep}`)) {
     sendJson(response, 403, { message: "禁止访问此路径。" });
     return;
   }
   if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isFile()) {
+    if (isKatexResource) {
+      sendJson(response, 404, { message: "公式渲染资源不存在。" });
+      return;
+    }
     resolvedPath = path.join(publicDirectory, "index.html");
   }
   /** fileExtension 是静态资源扩展名。 */
@@ -2457,7 +3067,7 @@ function serveStaticFile(request, response, url) {
     // 本地个人应用优先保证修改立即可见，避免 HTML 与旧 CSS/JS 混用。
     "Cache-Control": "no-store",
     "Content-Security-Policy":
-      "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "default-src 'self'; style-src 'self'; script-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
   });
@@ -2556,11 +3166,15 @@ void runPaperSchedule();
 
 /** codexWorkerTimer 定期检查登录恢复和未完成队列。 */
 const codexWorkerTimer = setInterval(
-  () => void triggerCodexPaperTranslationWorker(),
+  () => {
+    void triggerCodexPaperTranslationWorker();
+    void triggerCodexArticleTranslationWorker();
+  },
   60 * 1000,
 );
 codexWorkerTimer.unref();
 initializeCodexPaperTranslationWorker();
+initializeCodexArticleTranslationWorker();
 cleanupVideoProcessingArtifacts();
 importJobRunner.start();
 

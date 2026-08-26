@@ -95,6 +95,16 @@ export const attachmentDirectory = path.join(dataDirectory, "attachments");
 export const articleImageDirectory = path.join(dataDirectory, "article-images");
 /** paperDirectory 是公开论文 PDF 与全文提取结果的本地缓存目录。 */
 export const paperDirectory = path.join(dataDirectory, "papers");
+/** articleTranslationWorkDirectory 保存可恢复的文章分段翻译中间结果。 */
+export const articleTranslationWorkDirectory = path.join(
+  dataDirectory,
+  "article-translations",
+);
+/** paperTranslationWorkDirectory 保存论文 Codex 翻译的短期隔离文件。 */
+export const paperTranslationWorkDirectory = path.join(
+  dataDirectory,
+  "paper-translations",
+);
 /** ocrDirectory 是扫描 PDF 页面渲染和 OCR 临时文件的受控目录。 */
 export const ocrDirectory = path.join(dataDirectory, "ocr");
 /** videoRuntimeDirectory 把大体积工具、模型和临时媒体集中到可迁移目录。 */
@@ -141,6 +151,8 @@ export const serverConfig = Object.freeze({
   tesseractPath: process.env.ZHIXU_TESSERACT_PATH?.trim() || "tesseract",
   /** pdfToPpmPath 是扫描 PDF 转换为逐页图片的本机命令。 */
   pdfToPpmPath: process.env.ZHIXU_PDFTOPPM_PATH?.trim() || "pdftoppm",
+  /** pdfImagesPath 是只提取 PDF 内嵌插图使用的本机命令。 */
+  pdfImagesPath: process.env.ZHIXU_PDFIMAGES_PATH?.trim() || "pdfimages",
   /** ocrLanguages 默认同时识别简体中文与英文。 */
   ocrLanguages: process.env.ZHIXU_OCR_LANGUAGES?.trim() || "chi_sim+eng",
   /** ocrDpi 是扫描页渲染和识别采用的分辨率。 */
@@ -181,6 +193,8 @@ export function ensureLocalDirectories() {
     attachmentDirectory,
     articleImageDirectory,
     paperDirectory,
+    articleTranslationWorkDirectory,
+    paperTranslationWorkDirectory,
     ocrDirectory,
     videoRuntimeDirectory,
     videoReportDirectory,

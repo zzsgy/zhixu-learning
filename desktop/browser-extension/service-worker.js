@@ -55,6 +55,7 @@ async function capturePage(input) {
       url: input.url,
       title: input.title || "",
       selectedText: input.selectedText || "",
+      sourceHtml: input.sourceHtml || "",
     }),
   });
   const payload = await response.json().catch(() => ({}));
@@ -81,11 +82,23 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   const url = info.linkUrl || tab?.url || info.pageUrl || "";
   if (!url) return;
-  void capturePage({
-    url,
-    title: tab?.title || "",
-    selectedText: info.selectionText || "",
-  }).catch(async (error) => {
+  void (async () => {
+    /** 只有收藏当前页或当前选区时才提交 DOM；右键其他链接仍走普通后台抓取。 */
+    let sourceHtml = "";
+    if (tab?.id && !info.linkUrl) {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => document.documentElement?.outerHTML || "",
+      });
+      sourceHtml = String(results?.[0]?.result || "");
+    }
+    await capturePage({
+      url,
+      title: tab?.title || "",
+      selectedText: info.selectionText || "",
+      sourceHtml,
+    });
+  })().catch(async (error) => {
     await chrome.storage.local.set({ lastError: error.message });
     await setBadge("!", "#b42318");
   });

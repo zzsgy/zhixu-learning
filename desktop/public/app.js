@@ -3,6 +3,7 @@
  *
  * 页面只请求当前电脑上的本地服务，不连接任何第三方前端接口。
  */
+import renderMathInElement from "/vendor/katex/contrib/auto-render.mjs";
 
 /** applicationState 保存当前筛选、文档列表和已打开文档。 */
 const applicationState = {
@@ -34,6 +35,8 @@ const applicationState = {
   selectedDocument: null,
   /** selectedArticle 是文章阅读页正在展示的完整文章。 */
   selectedArticle: null,
+  /** articleTranslationPollTimer 定时读取当前文章真实翻译进度。 */
+  articleTranslationPollTimer: null,
   /** articleLanguageMode 是文章阅读页的中文、原文或双语显示模式。 */
   articleLanguageMode: "original",
   /** selectedPaper 是论文阅读页正在展示的完整论文。 */
@@ -76,6 +79,22 @@ const applicationState = {
   pendingMoveItem: null,
   /** selectedMoveFolderId 是移动窗口中由鼠标选中的目标文件夹。 */
   selectedMoveFolderId: "",
+  /** pendingMoveItems 是移动窗口等待处理的一项或多项内容。 */
+  pendingMoveItems: [],
+  /** pendingMoveFolder 是等待变更父目录的文件夹。 */
+  pendingMoveFolder: null,
+  /** moveFolderExpandedIds 保存移动窗口中由用户展开的目录。 */
+  moveFolderExpandedIds: new Set(),
+  /** moveFolderSearchQuery 是移动窗口当前目录搜索词。 */
+  moveFolderSearchQuery: "",
+  /** libraryBatchMode 表示文档库是否正在勾选多项内容。 */
+  libraryBatchMode: false,
+  /** selectedLibraryItemKeys 保存批量整理中勾选的“类型:ID”。 */
+  selectedLibraryItemKeys: new Set(),
+  /** uploadFolderMode 是上传时自动识别或指定目录。 */
+  uploadFolderMode: "auto",
+  /** selectedUploadFolderId 是上传前由用户选中的知识库目录。 */
+  selectedUploadFolderId: "",
   /** readingTocExpanded 表示正文左侧目录当前是否展开。 */
   readingTocExpanded: true,
   /** activeTopicId 是专题页当前展开的专题 ID。 */
@@ -112,6 +131,16 @@ const applicationState = {
   importJobPollTimer: null,
   /** documentOcrPollTimer 在阅读页等待 OCR 完成时刷新文档。 */
   documentOcrPollTimer: null,
+  /** documentRenderSequence 用于取消已经离开的超长文档分批渲染。 */
+  documentRenderSequence: 0,
+  /** documentChapters 是当前本地文档按真实标题或安全长度拆出的章节。 */
+  documentChapters: [],
+  /** activeDocumentChapterIndex 是当前只渲染的一章下标。 */
+  activeDocumentChapterIndex: 0,
+  /** uploadInProgress 防止两个大批次同时解析造成内存峰值。 */
+  uploadInProgress: false,
+  /** uploadBatchHideTimer 在整批成功后收起紧凑进度提示。 */
+  uploadBatchHideTimer: null,
 };
 
 /** dom 集中保存页面中会重复访问的元素。 */
@@ -125,23 +154,42 @@ const dom = {
   themeToggleLabel: document.querySelector("#theme-toggle-label"),
   viewMode: document.querySelector("#view-mode"),
   viewModeLabel: document.querySelector("#view-mode-label"),
-  viewModeOptions: document.querySelectorAll(".view-mode-option"),
+  viewModeOptions: document.querySelectorAll("#view-mode .view-mode-option"),
   documentTotal: document.querySelector("#document-total"),
   searchInput: document.querySelector("#search-input"),
   folderBreadcrumbs: document.querySelector("#folder-breadcrumbs"),
   folderGrid: document.querySelector("#folder-grid"),
   newFolderButton: document.querySelector("#new-folder-button"),
+  batchSelectButton: document.querySelector("#batch-select-button"),
+  libraryBatchToolbar: document.querySelector("#library-batch-toolbar"),
+  batchSelectionCount: document.querySelector("#batch-selection-count"),
+  batchSelectAllButton: document.querySelector("#batch-select-all-button"),
+  batchMoveButton: document.querySelector("#batch-move-button"),
+  batchDeleteButton: document.querySelector("#batch-delete-button"),
+  batchCancelButton: document.querySelector("#batch-cancel-button"),
   favoriteFilterButton: document.querySelector("#favorite-filter-button"),
   documentGrid: document.querySelector("#document-grid"),
   emptyState: document.querySelector("#empty-state"),
   fileInput: document.querySelector("#file-input"),
+  folderInput: document.querySelector("#folder-input"),
   paperFileInput: document.querySelector("#paper-file-input"),
   choosePaperFileButton: document.querySelector("#choose-paper-file-button"),
   paperImportForm: document.querySelector("#paper-import-form"),
   paperUrlInput: document.querySelector("#paper-url-input"),
   importPaperUrlButton: document.querySelector("#import-paper-url-button"),
   chooseFilesButton: document.querySelector("#choose-files-button"),
+  chooseFolderButton: document.querySelector("#choose-folder-button"),
+  uploadDestinationControls: document.querySelector("#upload-destination-controls"),
+  uploadDestinationModes: document.querySelectorAll('input[name="upload-destination-mode"]'),
+  uploadFolderSelect: document.querySelector("#upload-folder-select"),
   dropZone: document.querySelector("#drop-zone"),
+  uploadBatchProgress: document.querySelector("#upload-batch-progress"),
+  uploadBatchLabel: document.querySelector("#upload-batch-label"),
+  uploadBatchCount: document.querySelector("#upload-batch-count"),
+  uploadBatchBar: document.querySelector("#upload-batch-bar"),
+  uploadDuplicateSummary: document.querySelector("#upload-duplicate-summary"),
+  uploadDuplicateLabel: document.querySelector("#upload-duplicate-label"),
+  uploadDuplicateList: document.querySelector("#upload-duplicate-list"),
   uploadQueue: document.querySelector("#upload-queue"),
   backupButton: document.querySelector("#backup-button"),
   browserPairingButton: document.querySelector("#browser-pairing-button"),
@@ -162,13 +210,20 @@ const dom = {
   reader: document.querySelector("#reader"),
   readerBackButton: document.querySelector("#reader-back-button"),
   readerModeSwitch: document.querySelector("#reader-mode-switch"),
-  widePreviewButton: document.querySelector("#wide-preview-button"),
+  originalDocumentLink: document.querySelector("#original-document-link"),
   readerTitle: document.querySelector("#reader-title"),
   readerMeta: document.querySelector("#reader-meta"),
   readerSummary: document.querySelector("#reader-summary"),
   readerContent: document.querySelector("#reader-content"),
-  originalPreview: document.querySelector("#original-preview"),
-  originalPreviewFrame: document.querySelector("#original-preview-frame"),
+  documentChapterNavigation: document.querySelector("#document-chapter-navigation"),
+  documentChapterPrevious: document.querySelector("#document-chapter-previous"),
+  documentChapterCounter: document.querySelector("#document-chapter-counter"),
+  documentChapterTitle: document.querySelector("#document-chapter-title"),
+  documentChapterNext: document.querySelector("#document-chapter-next"),
+  documentChapterFooter: document.querySelector("#document-chapter-footer"),
+  documentChapterFooterPrevious: document.querySelector("#document-chapter-footer-previous"),
+  documentChapterFooterCounter: document.querySelector("#document-chapter-footer-counter"),
+  documentChapterFooterNext: document.querySelector("#document-chapter-footer-next"),
   readerCategory: document.querySelector("#reader-category"),
   readerFileName: document.querySelector("#reader-file-name"),
   readerFileSize: document.querySelector("#reader-file-size"),
@@ -182,6 +237,8 @@ const dom = {
   articleSourceLink: document.querySelector("#article-source-link"),
   articleTranslationTools: document.querySelector("#article-translation-tools"),
   articleTranslationStatus: document.querySelector("#article-translation-status"),
+  articleTranslationProgress: document.querySelector("#article-translation-progress"),
+  articleTranslationProgressBar: document.querySelector("#article-translation-progress-bar"),
   articleTranslationRequest: document.querySelector("#article-translation-request"),
   articleLanguageSwitch: document.querySelector("#article-language-switch"),
   articleReaderMeta: document.querySelector("#article-reader-meta"),
@@ -192,6 +249,9 @@ const dom = {
   paperTotal: document.querySelector("#paper-total"),
   paperGrid: document.querySelector("#paper-grid"),
   paperEmptyState: document.querySelector("#paper-empty-state"),
+  paperViewMode: document.querySelector("#paper-view-mode"),
+  paperViewModeLabel: document.querySelector("#paper-view-mode-label"),
+  paperViewModeOptions: document.querySelectorAll("#paper-view-mode .view-mode-option"),
   paperSourceTabs: document.querySelector("#paper-source-tabs"),
   refreshMliPapersButton: document.querySelector("#refresh-mli-papers-button"),
   checkPaperReminderButton: document.querySelector("#check-paper-reminder-button"),
@@ -235,6 +295,7 @@ const dom = {
   readingProgressLabel: document.querySelector("#reading-progress-label"),
   readingProgressBar: document.querySelector("#reading-progress-bar"),
   readingToc: document.querySelector("#reading-toc"),
+  readingTocTitle: document.querySelector("#reading-toc-title"),
   readingSelectionHint: document.querySelector("#reading-selection-hint"),
   highlightPalette: document.querySelector("#highlight-palette"),
   annotationList: document.querySelector("#annotation-list"),
@@ -306,8 +367,18 @@ const dom = {
   paperAiButton: document.querySelector("#paper-ai-button"),
   moveFolderDialog: document.querySelector("#move-folder-dialog"),
   moveFolderForm: document.querySelector("#move-folder-form"),
+  moveFolderEyebrow: document.querySelector("#move-folder-eyebrow"),
+  moveFolderTitle: document.querySelector("#move-folder-title"),
   moveFolderItemTitle: document.querySelector("#move-folder-item-title"),
   moveFolderOptions: document.querySelector("#move-folder-options"),
+  moveFolderSearch: document.querySelector("#move-folder-search"),
+  moveFolderCollapseAll: document.querySelector("#move-folder-collapse-all"),
+  moveFolderNew: document.querySelector("#move-folder-new"),
+  moveFolderCreatePanel: document.querySelector("#move-folder-create-panel"),
+  moveFolderCreateParent: document.querySelector("#move-folder-create-parent"),
+  moveFolderCreateName: document.querySelector("#move-folder-create-name"),
+  moveFolderCreateConfirm: document.querySelector("#move-folder-create-confirm"),
+  moveFolderCreateCancel: document.querySelector("#move-folder-create-cancel"),
   moveFolderClose: document.querySelector("#move-folder-close"),
   moveFolderCancel: document.querySelector("#move-folder-cancel"),
   moveFolderConfirm: document.querySelector("#move-folder-confirm"),
@@ -327,7 +398,12 @@ async function requestJson(url, options = {}) {
   /** payload 是尝试解析的 JSON 正文。 */
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.message || `请求失败：${response.status}`);
+    /** requestError 保留服务端错误代码和重复项摘要，供批量导入集中处理。 */
+    const requestError = new Error(payload.message || `请求失败：${response.status}`);
+    requestError.code = payload.code || "";
+    requestError.status = response.status;
+    requestError.payload = payload;
+    throw requestError;
   }
   return payload;
 }
@@ -404,6 +480,8 @@ function createTextElement(tagName, className, textContent) {
  * @returns {boolean} 是否为标题。
  */
 function isReadableHeading(line, separatedBefore, separatedAfter) {
+  if (/\.{4,}\s*(?:\d+|[IVXLCDM]+)$/i.test(line)) return false;
+  if (/^\d+\s*(?:字节|位|个|项|条|行|列|秒|毫秒|%|℃|°C)/i.test(line)) return false;
   if (
     /^(第[一二三四五六七八九十百\d]+[章节部分]|chapter\s+\d+|part\s*\d+|\d+(?:\.\d+){0,3}[\s、.])/i.test(
       line,
@@ -423,14 +501,46 @@ function isReadableHeading(line, separatedBefore, separatedAfter) {
 }
 
 /**
+ * 识别 PDF 提取结果中的点线目录项，并拆分标题与页码。
+ *
+ * @param {string} line 当前正文行。
+ * @returns {{ title: string, page: string, level: number } | null} 目录项结构。
+ */
+function parseReadableTocLine(line) {
+  /** match 是“章节标题……页码”形式的目录行。 */
+  const match = line.match(/^(.+?)\s*\.{4,}\s*(\d+|[IVXLCDM]+)$/i);
+  if (!match) return null;
+  /** title 是移除点线后保留的目录标题。 */
+  const title = match[1].trim();
+  if (!title || title.length > 120) return null;
+  /** sectionNumber 用于判断章、节和小节的视觉缩进。 */
+  const sectionNumber = title.match(/^(\d+(?:\.\d+){0,3})\b/)?.[1] || "";
+  return {
+    title,
+    page: match[2],
+    level: sectionNumber ? Math.min(3, sectionNumber.split(".").length) : 1,
+  };
+}
+
+/**
  * 把 PDF 中被压成一行的密集文字重新切分为可阅读段落。
  *
  * @param {string} text 待拆分的长文本。
  * @returns {string[]} 长度受控的段落列表。
  */
+/** readableSentenceSegmenter 在整次阅读期间复用，避免表格型章节为每个短段重复创建分词器。 */
+const readableSentenceSegmenter = typeof Intl.Segmenter === "function"
+  ? new Intl.Segmenter("zh-CN", { granularity: "sentence" })
+  : null;
+
 function splitDenseText(text) {
+  /** normalizedText 是去除首尾空白后的待排版文本。 */
+  const normalizedText = String(text || "").trim();
+  if (!normalizedText) return [];
+  // 普通段落在上游已限制到约 180 字；直接返回可显著降低参数表章节的排版成本。
+  if (normalizedText.length <= 260) return [normalizedText];
   /** markedText 在常见章节编号前补充结构边界。 */
-  const markedText = text
+  const markedText = normalizedText
     .replace(/\s+(?=Part\s*\d+\b)/gi, "\n")
     .replace(
       /\s+(?=(?:第[一二三四五六七八九十百\d]+[章节部分]|[一二三四五六七八九十]+、|\d+[.、]\s*[\u4e00-\u9fffA-Z]))/g,
@@ -443,11 +553,6 @@ function splitDenseText(text) {
     .filter(Boolean);
   /** outputBlocks 保存最终长度受控的自然段。 */
   const outputBlocks = [];
-  /** sentenceSegmenter 使用浏览器的中文句子边界识别能力。 */
-  const sentenceSegmenter = new Intl.Segmenter("zh-CN", {
-    granularity: "sentence",
-  });
-
   /**
    * 将无法按句号拆开的超长片段按就近标点或空格切开。
    *
@@ -470,9 +575,10 @@ function splitDenseText(text) {
         searchWindow.lastIndexOf("："),
         searchWindow.lastIndexOf(" "),
       ];
+      /** validOffsets 排除不存在的切点，避免 Math.max 空数组得到 -Infinity。 */
+      const validOffsets = candidateOffsets.filter((offset) => offset >= 90);
       /** splitOffset 是距离目标长度最近且不会产生过短段落的切点。 */
-      const splitOffset =
-        Math.max(...candidateOffsets.filter((offset) => offset >= 90)) || 150;
+      const splitOffset = validOffsets.length > 0 ? Math.max(...validOffsets) : 150;
       chunks.push(remaining.slice(0, splitOffset + 1).trim());
       remaining = remaining.slice(splitOffset + 1).trim();
     }
@@ -482,9 +588,13 @@ function splitDenseText(text) {
 
   for (const section of structuralSections) {
     /** sentences 是当前结构区域内的句子列表。 */
-    const sentences = [...sentenceSegmenter.segment(section)].flatMap(
-      (segment) => splitOversizedSegment(segment.segment),
-    );
+    const sentences = readableSentenceSegmenter
+      ? [...readableSentenceSegmenter.segment(section)].flatMap(
+        (segment) => splitOversizedSegment(segment.segment),
+      )
+      : section
+        .split(/(?<=[。！？；.!?;])/)
+        .flatMap((segment) => splitOversizedSegment(segment));
     /** pendingBlock 是正在组合的短句段落。 */
     let pendingBlock = "";
     for (const sentence of sentences) {
@@ -517,6 +627,195 @@ function isDenseDataBlock(text) {
   return (numericCharacters + latinCharacters) / text.length > 0.42;
 }
 
+/** 清理 PDF 坐标文字中不必要的中文空格。 */
+function normalizeStructuredPdfText(value) {
+  return String(value || "")
+    .replace(/([\u3400-\u9fff])\s+(?=[\u3400-\u9fff，。！？；：）])/g, "$1")
+    .replace(/\s+([，。！？；：）])/g, "$1")
+    .replace(/（\s+/g, "（")
+    .trim();
+}
+
+/** 创建复杂页中的原始内嵌插图，而不是整页截图。 */
+function createStructuredPdfFigure(pageNumber, figureInfo, captionText, figureIndex) {
+  const figure = document.createElement("figure");
+  figure.className = "readable-structured-figure";
+  const isRegion = Number.isInteger(Number(figureInfo.regionIndex));
+  if (isRegion) figure.classList.add("is-region");
+  if (figureInfo.column === "both") figure.classList.add("is-spanning");
+  const image = document.createElement("img");
+  image.loading = "lazy";
+  image.decoding = "async";
+  image.width = Math.max(1, Math.round(Number(figureInfo.width) * (isRegion ? 2.5 : 1)) || 1);
+  image.height = Math.max(1, Math.round(Number(figureInfo.height) * (isRegion ? 2.5 : 1)) || 1);
+  const regionVersion = isRegion
+    ? [figureInfo.x, figureInfo.y, figureInfo.width, figureInfo.height]
+      .map((value) => Number(value).toFixed(2))
+      .join("-")
+    : "";
+  image.src = isRegion
+    ? `/api/documents/${encodeURIComponent(applicationState.selectedDocument.id)}/page-figure-region?page=${pageNumber}&region=${figureInfo.regionIndex}&v=${encodeURIComponent(regionVersion)}`
+    : `/api/documents/${encodeURIComponent(applicationState.selectedDocument.id)}/page-figure?page=${pageNumber}&asset=${figureInfo.assetIndex}`;
+  image.alt = captionText || `${applicationState.selectedDocument.title} 第 ${pageNumber} 页插图 ${figureIndex + 1}`;
+  figure.append(image);
+  /** 局部裁剪已包含 PDF 原始图注，只有独立内嵌图片才补 HTML 图注。 */
+  if (captionText && !isRegion) figure.append(createTextElement("figcaption", "", captionText));
+  return figure;
+}
+
+/** 把一栏坐标文字恢复为图注、编号清单和自然段。 */
+function parseStructuredPdfColumn(lines, options = {}) {
+  const sortedLines = [...(Array.isArray(lines) ? lines : [])]
+    .filter((line) => String(line?.text || "").trim())
+    .sort((left, right) => Number(right.y) - Number(left.y))
+    .map((line) => ({ ...line, text: normalizeStructuredPdfText(line.text) }))
+    /** 工艺图编号已保留在局部原图中，不把散落的 2 3 4、5、6 等再次排成正文。 */
+    .filter((line) => !(
+      options.removeDiagramLabels
+      && /^(?:\d{1,2}(?:\s+|$)){1,12}$/.test(line.text)
+    ));
+  const captions = [];
+  const calloutGroups = [];
+  const bodyLines = [];
+  let previousCalloutLine = null;
+  for (const line of sortedLines) {
+    const captionMatch = line.text.match(/^图\s*(\d+(?:\.\d+)?)\s*(.*)$/);
+    if (captionMatch) {
+      captions.push(`图 ${captionMatch[1]}${captionMatch[2] ? ` ${captionMatch[2]}` : ""}`);
+      previousCalloutLine = null;
+      continue;
+    }
+    const calloutMatch = line.text.match(/^(\d{1,2})[.、)]\s*(\S.*)$/);
+    if (calloutMatch) {
+      const currentGroup = calloutGroups.at(-1);
+      const currentIndex = Number(calloutMatch[1]);
+      if (!currentGroup || currentIndex <= Number(currentGroup.at(-1)?.index || 0)) {
+        calloutGroups.push([]);
+      }
+      calloutGroups.at(-1).push({ index: calloutMatch[1], text: calloutMatch[2] });
+      previousCalloutLine = line;
+      continue;
+    }
+    const calloutGap = previousCalloutLine ? Number(previousCalloutLine.y) - Number(line.y) : Infinity;
+    if (
+      previousCalloutLine
+      && calloutGroups.length > 0
+      && calloutGap <= Math.max(9, Number(previousCalloutLine.fontSize) * 1.7)
+    ) {
+      calloutGroups.at(-1).at(-1).text += line.text;
+      previousCalloutLine = line;
+      continue;
+    }
+    previousCalloutLine = null;
+    bodyLines.push(line);
+  }
+
+  const paragraphs = [];
+  for (const line of bodyLines) {
+    const previousLine = paragraphs.at(-1)?.lines.at(-1);
+    const gap = previousLine ? Number(previousLine.y) - Number(line.y) : Infinity;
+    const startsDefinition = /^[^：]{1,28}：/.test(line.text);
+    if (
+      !previousLine
+      || gap > Math.max(15, Number(previousLine.fontSize) * 1.65)
+      || (startsDefinition && paragraphs.at(-1).lines.length > 1)
+    ) {
+      paragraphs.push({ lines: [line] });
+    } else {
+      paragraphs.at(-1).lines.push(line);
+    }
+  }
+  return {
+    captions,
+    calloutGroups,
+    paragraphs: paragraphs.map((paragraph) => paragraph.lines.reduce((combinedText, line) => {
+      const needsSpace = /[A-Za-z0-9]$/.test(combinedText) && /^[A-Za-z0-9]/.test(line.text);
+      return `${combinedText}${combinedText && needsSpace ? " " : ""}${line.text}`;
+    }, "")),
+  };
+}
+
+/** 将复杂 PDF 页显示为可复制双栏 HTML，并把原始插图放回相应栏。 */
+function createStructuredPdfPage(pageNumber, pageData) {
+  const page = document.createElement("section");
+  page.className = "readable-structured-page";
+  page.dataset.pdfPage = String(pageNumber);
+  const headerText = (pageData.header || []).map((line) => normalizeStructuredPdfText(line.text)).join(" · ");
+  if (headerText) page.append(createTextElement("div", "readable-structured-header", headerText));
+  const columns = document.createElement("div");
+  columns.className = "readable-structured-columns";
+  const hasFigureRegions = (pageData.figureRegions || []).length > 0;
+  for (const columnName of ["left", "right"]) {
+    const column = document.createElement("div");
+    column.className = `readable-structured-column is-${columnName}`;
+    const figureRegions = (pageData.figureRegions || [])
+      .filter((region) => region.column === columnName);
+    const parsed = parseStructuredPdfColumn(pageData.columns?.[columnName] || [], {
+      removeDiagramLabels: (pageData.figureRegions || []).length > 0 || (pageData.figures || []).length > 0,
+    });
+    const figures = hasFigureRegions
+      ? figureRegions
+      : (pageData.figures || []).filter((figure) => figure.column === columnName);
+    const figureElements = figures.map((figureInfo, index) => createStructuredPdfFigure(
+      pageNumber,
+      figureInfo,
+      parsed.captions[index] || "",
+      index,
+    ));
+    const appendCalloutList = (callouts) => {
+      const calloutList = document.createElement("ol");
+      calloutList.className = "readable-structured-callouts";
+      for (const callout of callouts) {
+        const item = document.createElement("li");
+        item.value = Number(callout.index);
+        item.textContent = callout.text;
+        calloutList.append(item);
+      }
+      return calloutList;
+    };
+    figureElements.forEach((figureElement, figureIndex) => {
+      const calloutGroup = parsed.calloutGroups[figureIndex] || [];
+      if (!hasFigureRegions && calloutGroup.length >= 3) {
+        const figureWithCallouts = document.createElement("div");
+        figureWithCallouts.className = "readable-structured-figure-callouts";
+        figureWithCallouts.append(figureElement, appendCalloutList(calloutGroup));
+        column.append(figureWithCallouts);
+      } else {
+        column.append(figureElement);
+      }
+    });
+    if (!hasFigureRegions) {
+      for (const calloutGroup of parsed.calloutGroups.slice(figureElements.length)) {
+        column.append(appendCalloutList(calloutGroup));
+      }
+    }
+    for (const paragraphText of parsed.paragraphs) {
+      const paragraph = document.createElement("p");
+      const definitionMatch = paragraphText.match(/^([^：]{1,28}：)(.*)$/);
+      if (definitionMatch) {
+        paragraph.append(createTextElement("strong", "", definitionMatch[1]), definitionMatch[2]);
+      } else {
+        paragraph.textContent = paragraphText;
+      }
+      column.append(paragraph);
+    }
+    columns.append(column);
+  }
+  page.append(columns);
+  const spanningRegions = (pageData.figureRegions || []).filter((region) => region.column === "both");
+  for (const [regionIndex, region] of spanningRegions.entries()) {
+    page.append(createStructuredPdfFigure(
+      pageNumber,
+      region,
+      region.caption || "",
+      regionIndex,
+    ));
+  }
+  const footerText = (pageData.footer || []).map((line) => normalizeStructuredPdfText(line.text)).join(" ");
+  page.append(createTextElement("div", "readable-structured-footer", footerText || `原文第 ${pageNumber} 页`));
+  return page;
+}
+
 /**
  * 把 PDF/文本提取结果重新组织为安全的语义化阅读结构。
  *
@@ -533,6 +832,8 @@ function createReadableDocument(text) {
     .map((line) => line.replace(/[ \t]+/g, " ").trim());
   /** paragraphLines 暂存属于同一自然段的连续行。 */
   let paragraphLines = [];
+  /** skipPdfPageText 表示当前复杂页已由坐标文字重建，后续扁平副本不再重复显示。 */
+  let skipPdfPageText = false;
 
   /**
    * 把暂存行合并为一个自然段。
@@ -584,6 +885,77 @@ function createReadableDocument(text) {
       flushParagraph();
       continue;
     }
+    /** pdfPageMatch 只在原文位置插入本页真正的内嵌插图，不重复展示整张 PDF 页面。 */
+    const pdfPageMatch = line.match(/^\[\[ZHIXU_PDF_PAGE:(\d{1,4})\]\]$/);
+    if (pdfPageMatch && applicationState.selectedDocument?.id) {
+      flushParagraph();
+      const pageNumber = Number(pdfPageMatch[1]);
+      const structuredPage = applicationState.selectedDocument.pdfStructuredPages?.[pageNumber];
+      skipPdfPageText = Boolean(structuredPage);
+      if (structuredPage) {
+        fragment.append(createStructuredPdfPage(pageNumber, structuredPage));
+        continue;
+      }
+      const pageFigures = applicationState.selectedDocument.pdfFigures?.[pageNumber] || [];
+      pageFigures.forEach((figureInfo, figureIndex) => {
+        const figure = document.createElement("figure");
+        figure.className = "readable-document-figure";
+        const image = document.createElement("img");
+        image.loading = "lazy";
+        image.decoding = "async";
+        image.width = Math.max(1, Number(figureInfo.width) || 1);
+        image.height = Math.max(1, Number(figureInfo.height) || 1);
+        image.src = `/api/documents/${encodeURIComponent(applicationState.selectedDocument.id)}/page-figure?page=${pageNumber}&asset=${figureInfo.assetIndex}`;
+        image.alt = `${applicationState.selectedDocument.title} 第 ${pageNumber} 页插图 ${figureIndex + 1}`;
+        figure.append(
+          image,
+          createTextElement("figcaption", "", `原文第 ${pageNumber} 页插图`),
+        );
+        fragment.append(figure);
+      });
+      continue;
+    }
+    if (skipPdfPageText) continue;
+    /** pdfTableMatch 用原表局部裁剪替换会丢失合并单元格的扁平文字。 */
+    const pdfTableMatch = line.match(/^\[\[ZHIXU_PDF_TABLE:(\d{1,4}):(\d{1,3})\]\]$/);
+    if (pdfTableMatch && applicationState.selectedDocument?.id) {
+      flushParagraph();
+      const pageNumber = Number(pdfTableMatch[1]);
+      const tableIndex = Number(pdfTableMatch[2]);
+      const tableInfo = (applicationState.selectedDocument.pdfTables?.[pageNumber] || [])
+        .find((candidate) => Number(candidate.tableIndex) === tableIndex);
+      if (tableInfo) {
+        const figure = document.createElement("figure");
+        figure.className = "readable-document-table";
+        const image = document.createElement("img");
+        image.loading = "lazy";
+        image.decoding = "async";
+        image.width = Math.max(1, Math.round(Number(tableInfo.width) * 2.5) || 1);
+        image.height = Math.max(1, Math.round(Number(tableInfo.height) * 2.5) || 1);
+        image.src = `/api/documents/${encodeURIComponent(applicationState.selectedDocument.id)}/page-table?page=${pageNumber}&table=${tableIndex}`;
+        image.alt = String(tableInfo.caption || `原文第 ${pageNumber} 页表格`);
+        figure.append(image);
+        if (tableInfo.caption) {
+          figure.append(createTextElement("figcaption", "", tableInfo.caption));
+        }
+        fragment.append(figure);
+      }
+      continue;
+    }
+    /** tocItem 是 PDF 目录页中需要紧凑展示的标题与页码。 */
+    const tocItem = parseReadableTocLine(line);
+    if (tocItem) {
+      flushParagraph();
+      /** tocRow 使用两列布局替代会撑破页面的连续点号。 */
+      const tocRow = document.createElement("div");
+      tocRow.className = `readable-toc-item is-level-${tocItem.level}`;
+      tocRow.append(
+        createTextElement("span", "readable-toc-title", tocItem.title),
+        createTextElement("span", "readable-toc-page", tocItem.page),
+      );
+      fragment.append(tocRow);
+      continue;
+    }
     if (/^\d+\s*\/\s*\d+$/.test(line)) {
       flushParagraph();
       fragment.append(createTextElement("div", "page-divider", `第 ${line} 页`));
@@ -600,6 +972,21 @@ function createReadableDocument(text) {
       fragment.append(listItem);
       continue;
     }
+    /** 连续数字部件标注属于图例清单，不应被误排成章节大标题。 */
+    const numberedCalloutMatch = line.match(/^(\d{1,2})[.、)]\s*(\S.*)$/);
+    const previousIsNumberedCallout = /^\d{1,2}[.、)]\s*\S/.test(previousLine);
+    const nextIsNumberedCallout = /^\d{1,2}[.、)]\s*\S/.test(nextLine);
+    if (numberedCalloutMatch && (previousIsNumberedCallout || nextIsNumberedCallout)) {
+      flushParagraph();
+      const listItem = document.createElement("div");
+      listItem.className = "readable-numbered-callout";
+      listItem.append(
+        createTextElement("span", "readable-numbered-callout-index", numberedCalloutMatch[1]),
+        createTextElement("span", "", numberedCalloutMatch[2]),
+      );
+      fragment.append(listItem);
+      continue;
+    }
     if (isReadableHeading(line, !previousLine, !nextLine)) {
       flushParagraph();
       /** markdownHeading 是当前标题可能携带的 Markdown 层级标记。 */
@@ -610,7 +997,13 @@ function createReadableDocument(text) {
         : 2;
       /** headingText 是移除 Markdown 井号后的干净标题。 */
       const headingText = markdownHeading?.[2]?.trim() || line;
-      fragment.append(createTextElement(`h${headingLevel}`, "", headingText));
+      fragment.append(
+        createTextElement(
+          `h${headingLevel}`,
+          headingText === "目录" ? "readable-toc-heading" : "",
+          headingText,
+        ),
+      );
       continue;
     }
     if (/^\d+(?:\.\d+)?%$/.test(line)) {
@@ -637,6 +1030,506 @@ function createReadableDocument(text) {
     );
   }
   return fragment;
+}
+
+/** progressiveReadableChunkSize 是无章节结构时单页正文的最大字数。 */
+const progressiveReadableChunkSize = 4000;
+
+/**
+ * 计算排除 PDF 内部页码标记后的实际正文长度。
+ *
+ * @param {string} text 章节正文。
+ * @returns {number} 用户可见正文长度。
+ */
+function getReadableTextLength(text) {
+  return String(text || "")
+    .replace(/\[\[ZHIXU_PDF_PAGE:\d{1,4}\]\]\n?/g, "")
+    .replace(/\[\[ZHIXU_PDF_TABLE:\d{1,4}:\d{1,3}\]\]\n?/g, "")
+    .length;
+}
+
+/**
+ * 把超长提取正文按完整行拆成可分批渲染的片段。
+ *
+ * @param {string} text 文档提取正文。
+ * @returns {string[]} 保留行边界且长度受控的正文片段。
+ */
+function splitReadableTextIntoChunks(text) {
+  /** chunks 保存准备逐批转换为 HTML 的文本。 */
+  const chunks = [];
+  /** currentLines 是当前批次已经收集的完整行。 */
+  let currentLines = [];
+  /** currentLength 是当前批次包含换行符后的近似长度。 */
+  let currentLength = 0;
+
+  /** flushCurrentChunk 把当前非空批次写入结果。 */
+  function flushCurrentChunk() {
+    if (currentLines.length === 0) return;
+    chunks.push(currentLines.join("\n"));
+    currentLines = [];
+    currentLength = 0;
+  }
+
+  for (const sourceLine of String(text || "").replace(/\r\n?/g, "\n").split("\n")) {
+    /** remainingLine 是超长单行尚未加入批次的部分。 */
+    let remainingLine = sourceLine;
+    while (remainingLine.length > progressiveReadableChunkSize) {
+      flushCurrentChunk();
+      chunks.push(remainingLine.slice(0, progressiveReadableChunkSize));
+      remainingLine = remainingLine.slice(progressiveReadableChunkSize);
+    }
+    const addedLength = /^\[\[ZHIXU_PDF_(?:PAGE:\d{1,4}|TABLE:\d{1,4}:\d{1,3})\]\]$/.test(remainingLine.trim())
+      ? 0
+      : remainingLine.length + 1;
+    if (currentLines.length > 0 && currentLength + addedLength > progressiveReadableChunkSize) {
+      flushCurrentChunk();
+    }
+    currentLines.push(remainingLine);
+    currentLength += addedLength;
+  }
+  flushCurrentChunk();
+  if (chunks.length === 0) return [""];
+  /** activePageMarker 让同一物理页被拆成多段时，每段仍能找到对应原页图像。 */
+  let activePageMarker = "";
+  return chunks.map((chunk) => {
+    const pageMarkers = chunk.match(/\[\[ZHIXU_PDF_PAGE:\d{1,4}\]\]/g) || [];
+    const enrichedChunk = activePageMarker && pageMarkers.length === 0
+      ? `${activePageMarker}\n${chunk}`
+      : chunk;
+    if (pageMarkers.length > 0) activePageMarker = pageMarkers.at(-1);
+    return enrichedChunk;
+  });
+}
+
+/**
+ * 等待浏览器完成一次绘制，让长文档渲染期间点击和滚动仍能响应。
+ *
+ * @returns {Promise<void>} 下一次页面绘制后的等待结果。
+ */
+function yieldDocumentRendering() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => window.setTimeout(resolve, 16));
+  });
+}
+
+/**
+ * 识别提取文本中的章节标题。
+ *
+ * @param {string} sourceLine 原始正文行。
+ * @returns {{ title: string, level: number, numberPath: string } | null} 标题信息。
+ */
+function parseDocumentChapterHeading(sourceLine) {
+  /** line 是移除页内多余空白后的候选标题。 */
+  const line = String(sourceLine || "").replace(/[ \t]+/g, " ").trim();
+  if (!line || line.length > 100 || /\.{4,}|…{3,}/.test(line)) return null;
+  /** markdownHeading 是 Markdown 文档中的一二级标题。 */
+  const markdownHeading = line.match(/^(#{1,2})\s+(.+)$/);
+  if (markdownHeading) {
+    return { title: markdownHeading[2].trim(), level: markdownHeading[1].length, numberPath: "" };
+  }
+  /** chineseHeading 是“第一章/第二篇”等中文顶层标题。 */
+  const chineseHeading = line.match(/^(第\s*[一二三四五六七八九十百零〇0-9]+\s*[章节篇部])(?:[：:、.\-]?\s*(.*))?$/);
+  if (chineseHeading) {
+    return { title: line, level: 1, numberPath: chineseHeading[1] };
+  }
+  /** englishHeading 是英文 Chapter 标题。 */
+  const englishHeading = line.match(/^(?:chapter|part)\s+([0-9ivxlcdm]+)\b(?:[：:\-.]?\s*(.*))?$/i);
+  if (englishHeading) {
+    return { title: line, level: 1, numberPath: englishHeading[1] };
+  }
+  /** numberedHeading 是 1、1.1、1.1.1 形式的技术手册标题。 */
+  const numberedHeading = line.match(/^(\d{1,3}(?:\.\d{1,3}){0,3})\s+(.{1,80})$/);
+  if (!numberedHeading) return null;
+  /** headingBody 用于排除“4 字节”“2 个”等正文枚举。 */
+  const headingBody = numberedHeading[2].trim();
+  if (/^(?:字节|个|次|种|条|页|年|月|日|KB|MB|GB)/i.test(headingBody)) return null;
+  if (/^[<>=≤≥]/.test(headingBody)) return null;
+  if (/^[\d.,+\-×÷%°℃\s]+$/.test(headingBody)) return null;
+  if (/^(?:bar|psi|kpa|mpa|pa|mm|cm|m|kg|g|s|ms|hz|rpm)(?:\s|$)/i.test(headingBody)) return null;
+  return {
+    title: `${numberedHeading[1]} ${headingBody}`,
+    level: numberedHeading[1].split(".").length,
+    numberPath: numberedHeading[1],
+  };
+}
+
+/**
+ * 把一个仍然过长的章节按安全字数继续拆成连续阅读页。
+ *
+ * @param {{ title: string, content: string, kind: "text" }} chapter 原章节。
+ * @returns {Array<{ title: string, content: string, kind: "text" }>} 安全长度章节页。
+ */
+function splitOversizedTextChapter(chapter) {
+  if (getReadableTextLength(chapter.content) <= progressiveReadableChunkSize) return [chapter];
+  return splitReadableTextIntoChunks(chapter.content).map((content, index, chunks) => ({
+    title: chunks.length === 1 ? chapter.title : `${chapter.title}（${index + 1}/${chunks.length}）`,
+    content,
+    kind: "text",
+  }));
+}
+
+/**
+ * 按真实章标题拆分 PDF 或纯文本；超长章优先按二级标题继续拆分。
+ *
+ * @param {string} text 完整提取正文。
+ * @returns {Array<{ title: string, content: string, kind: "text" }>} 可单页渲染的章节。
+ */
+function createPdfOutlineDocumentChapters(text, pdfOutline) {
+  /** outlineEntries 是经过基本类型校验且保留原始顺序的 PDF 原生书签。 */
+  const outlineEntries = (Array.isArray(pdfOutline) ? pdfOutline : [])
+    .map((entry, index) => ({
+      index,
+      title: String(entry?.title || "").replace(/\s+/g, " ").trim(),
+      level: Number(entry?.level),
+      pageNumber: Number(entry?.pageNumber),
+    }))
+    .filter((entry) => entry.title
+      && Number.isInteger(entry.level) && entry.level >= 0
+      && Number.isInteger(entry.pageNumber) && entry.pageNumber > 0);
+  const rootEntries = outlineEntries.filter((entry) => entry.level === 0);
+  if (rootEntries.length < 2) return null;
+  /** longestSequences 选择页码递增的最长顶层书签链，排除位置错误的孤立书签。 */
+  const longestSequences = [];
+  rootEntries.forEach((entry, index) => {
+    let bestPrevious = [];
+    for (let previousIndex = 0; previousIndex < index; previousIndex += 1) {
+      const previousSequence = longestSequences[previousIndex];
+      if (rootEntries[previousIndex].pageNumber >= entry.pageNumber) continue;
+      if (previousSequence.length > bestPrevious.length) bestPrevious = previousSequence;
+    }
+    longestSequences.push([...bestPrevious, entry]);
+  });
+  const orderedRoots = longestSequences.reduce(
+    (best, sequence) => (sequence.length > best.length ? sequence : best),
+    [],
+  );
+  if (orderedRoots.length < 2) return null;
+
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+  const pageLineIndexes = new Map();
+  lines.forEach((line, index) => {
+    const pageMatch = line.trim().match(/^\[\[ZHIXU_PDF_PAGE:(\d{1,4})\]\]$/);
+    if (pageMatch) pageLineIndexes.set(Number(pageMatch[1]), index);
+  });
+  if (!pageLineIndexes.has(orderedRoots[0].pageNumber)) return null;
+
+  /** normalizeOutlineTitleMatch 允许 PDF 提取时出现半角/全角及空白差异。 */
+  const normalizeOutlineTitleMatch = (value) => String(value || "")
+    .normalize("NFKC")
+    .replace(/\s+/g, "")
+    .replace(/[：:]/g, ":")
+    .trim();
+  /** findOutlineLineIndex 在书签页内找到标题正文，使同一页的多个节也能各自成章。 */
+  function findOutlineLineIndex(entry, minimumIndex) {
+    const pageStartIndex = pageLineIndexes.get(entry.pageNumber);
+    const pageEndIndex = pageLineIndexes.get(entry.pageNumber + 1) ?? lines.length;
+    const targetTitle = normalizeOutlineTitleMatch(entry.title);
+    for (let index = Math.max(pageStartIndex + 1, minimumIndex + 1); index < pageEndIndex; index += 1) {
+      const candidateTitle = normalizeOutlineTitleMatch(lines[index]);
+      if (!candidateTitle) continue;
+      if (candidateTitle === targetTitle || candidateTitle.includes(targetTitle)) return index;
+    }
+    return pageStartIndex;
+  }
+  /** boundaries 包含顶层章和直接子节，并按其在正文中的真实行位置排列。 */
+  const boundaries = [];
+  for (const [rootIndex, root] of orderedRoots.entries()) {
+    const nextRoot = orderedRoots[rootIndex + 1];
+    const segmentEntries = outlineEntries.filter((entry) => (
+      entry.index >= root.index
+      && (!nextRoot || entry.index < nextRoot.index)
+      && entry.level <= 1
+      && entry.pageNumber >= root.pageNumber
+      && (!nextRoot || entry.pageNumber < nextRoot.pageNumber)
+    ));
+    for (const entry of segmentEntries) {
+      if (!pageLineIndexes.has(entry.pageNumber)) continue;
+      const previousBoundaryIndex = boundaries.at(-1)?.lineIndex ?? -1;
+      const lineIndex = findOutlineLineIndex(entry, previousBoundaryIndex);
+      if (lineIndex <= previousBoundaryIndex) continue;
+      boundaries.push({ ...entry, lineIndex });
+    }
+  }
+  if (boundaries.length < 2) return null;
+
+  const chapters = [];
+  const firstBoundaryLine = boundaries[0].lineIndex;
+  const frontMatterLines = lines.slice(0, firstBoundaryLine);
+  const tableOfContentsIndex = frontMatterLines.findIndex((line) => line.trim() === "目录");
+  const frontMatterContent = (tableOfContentsIndex >= 0
+    ? frontMatterLines.slice(0, tableOfContentsIndex)
+    : frontMatterLines).join("\n").trim();
+  if (frontMatterContent) {
+    chapters.push(...splitOversizedTextChapter({
+      title: "封面与前言",
+      content: frontMatterContent,
+      kind: "text",
+    }));
+  }
+  boundaries.forEach((boundary, index) => {
+    const startIndex = boundary.lineIndex;
+    const nextBoundary = boundaries[index + 1];
+    const endIndex = nextBoundary ? nextBoundary.lineIndex : lines.length;
+    const contentLines = lines.slice(startIndex, endIndex);
+    const pageMarker = `[[ZHIXU_PDF_PAGE:${boundary.pageNumber}]]`;
+    if (contentLines[0]?.trim() !== pageMarker) contentLines.unshift(pageMarker);
+    const content = contentLines.join("\n").trim();
+    if (!content) return;
+    chapters.push(...splitOversizedTextChapter({
+      title: boundary.title,
+      content,
+      kind: "text",
+    }));
+  });
+  return chapters.length >= 2 ? chapters : null;
+}
+
+/**
+ * 按真实章标题拆分 PDF 或纯文本；PDF 有原生书签时优先按书签物理页码拆分。
+ *
+ * @param {string} text 完整提取正文。
+ * @param {Array<Record<string, unknown>>} pdfOutline PDF 原生书签。
+ * @returns {Array<{ title: string, content: string, kind: "text" }>} 可单页渲染的章节。
+ */
+function createTextDocumentChapters(text, pdfOutline = []) {
+  const outlineChapters = createPdfOutlineDocumentChapters(text, pdfOutline);
+  if (outlineChapters) return outlineChapters;
+  /** lines 是保留原始换行的正文行。 */
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+  /** pageMarkerAtLine 保存每一行所在的 PDF 物理页，用于章节恰好从页中部开始的情况。 */
+  const pageMarkerAtLine = [];
+  let activePageMarker = "";
+  lines.forEach((line, index) => {
+    if (/^\[\[ZHIXU_PDF_PAGE:\d{1,4}\]\]$/.test(line.trim())) activePageMarker = line.trim();
+    pageMarkerAtLine[index] = activePageMarker;
+  });
+  /** candidates 是所有可能的章、节标题。 */
+  const candidates = lines
+    .map((line, index) => ({ index, heading: parseDocumentChapterHeading(line) }))
+    .filter((candidate) => candidate.heading);
+  /** numericTopCandidates 是数字顶层标题，按 1、2、3 的连续顺序排除正文枚举。 */
+  const numericTopCandidates = candidates.filter((candidate) =>
+    candidate.heading.level === 1 && /^\d+$/.test(candidate.heading.numberPath),
+  );
+  const sequentialNumericHeadings = [];
+  let expectedChapterNumber = 1;
+  for (const candidate of numericTopCandidates) {
+    if (Number(candidate.heading.numberPath) !== expectedChapterNumber) continue;
+    sequentialNumericHeadings.push(candidate);
+    expectedChapterNumber += 1;
+  }
+  /** namedTopHeadings 是中文、英文或 Markdown 顶层标题。 */
+  const namedTopHeadings = candidates.filter((candidate) =>
+    candidate.heading.level === 1 && !/^\d+$/.test(candidate.heading.numberPath),
+  );
+  /** topHeadings 优先采用至少两章的连续数字结构，否则使用命名标题。 */
+  const topHeadings = (sequentialNumericHeadings.length >= 2
+    ? sequentialNumericHeadings
+    : namedTopHeadings).sort((left, right) => left.index - right.index);
+  /** rawChapters 是先按章、再按必要的小节得到的章节。 */
+  const rawChapters = [];
+
+  /** appendRange 把指定行范围作为一章，并在必要时利用二级标题拆分。 */
+  function appendRange(startIndex, endIndex, title, numberPath = "") {
+    const rangeLines = lines.slice(startIndex, endIndex);
+    const startPageMarker = pageMarkerAtLine[startIndex] || "";
+    if (startPageMarker && rangeLines[0]?.trim() !== startPageMarker) {
+      rangeLines.unshift(startPageMarker);
+    }
+    const content = rangeLines.join("\n").trim();
+    if (!content) return;
+    if (getReadableTextLength(content) <= progressiveReadableChunkSize) {
+      rawChapters.push({ title, content, kind: "text" });
+      return;
+    }
+    /** subHeadings 是同一数字章下的直接二级标题。 */
+    const subHeadings = candidates.filter((candidate) => {
+      if (candidate.index <= startIndex || candidate.index >= endIndex) return false;
+      if (candidate.heading.level !== 2) return false;
+      return !numberPath || candidate.heading.numberPath.startsWith(`${numberPath}.`);
+    });
+    if (subHeadings.length === 0) {
+      rawChapters.push(...splitOversizedTextChapter({ title, content, kind: "text" }));
+      return;
+    }
+    const boundaries = [{ index: startIndex, heading: { title, numberPath } }, ...subHeadings];
+    boundaries.forEach((boundary, boundaryIndex) => {
+      const nextIndex = boundaries[boundaryIndex + 1]?.index ?? endIndex;
+      const sectionLines = lines.slice(boundary.index, nextIndex);
+      const sectionPageMarker = pageMarkerAtLine[boundary.index] || "";
+      if (sectionPageMarker && sectionLines[0]?.trim() !== sectionPageMarker) {
+        sectionLines.unshift(sectionPageMarker);
+      }
+      const sectionContent = sectionLines.join("\n").trim();
+      if (!sectionContent) return;
+      rawChapters.push(...splitOversizedTextChapter({
+        title: boundary.heading.title,
+        content: sectionContent,
+        kind: "text",
+      }));
+    });
+  }
+
+  if (topHeadings.length >= 2) {
+    if (topHeadings[0].index > 0) {
+      /** frontMatterLines 去掉已经由左侧章节栏替代的 PDF 纸面目录。 */
+      const frontMatterLines = lines.slice(0, topHeadings[0].index);
+      const tableOfContentsIndex = frontMatterLines.findIndex((line) => line.trim() === "目录");
+      const readableFrontMatter = tableOfContentsIndex >= 0
+        ? frontMatterLines.slice(0, tableOfContentsIndex)
+        : frontMatterLines;
+      const frontMatterContent = readableFrontMatter.join("\n").trim();
+      if (frontMatterContent) {
+        rawChapters.push(...splitOversizedTextChapter({
+          title: "封面与前言",
+          content: frontMatterContent,
+          kind: "text",
+        }));
+      }
+    }
+    topHeadings.forEach((candidate, index) => {
+      appendRange(
+        candidate.index,
+        topHeadings[index + 1]?.index ?? lines.length,
+        candidate.heading.title,
+        candidate.heading.numberPath,
+      );
+    });
+  } else {
+    rawChapters.push(...splitOversizedTextChapter({
+      title: "正文",
+      content: lines.join("\n").trim(),
+      kind: "text",
+    }));
+  }
+  return rawChapters.length > 0
+    ? rawChapters
+    : [{ title: "正文", content: "", kind: "text" }];
+}
+
+/**
+ * 将 Word 正文节点序列化成仅供安全重建器读取的 HTML。
+ *
+ * @param {Node[]} nodes 同一章节的 Word 节点。
+ * @returns {string} 章节 HTML。
+ */
+function serializeWordChapterNodes(nodes) {
+  const wrapper = document.createElement("div");
+  for (const node of nodes) wrapper.append(node.cloneNode(true));
+  return wrapper.innerHTML;
+}
+
+/**
+ * 把 Word 章节按顶层段落或表格行限制到安全渲染长度。
+ *
+ * @param {Node[]} nodes 同一 Word 章节的节点。
+ * @param {string} title 章节标题。
+ * @returns {Array<{ title: string, content: string, kind: "word" }>} Word 章节页。
+ */
+function splitWordChapterNodes(nodes, title) {
+  const pageNodeGroups = [];
+  let currentNodes = [];
+  let currentLength = 0;
+  const flushCurrentNodes = () => {
+    if (currentNodes.length === 0) return;
+    pageNodeGroups.push(currentNodes);
+    currentNodes = [];
+    currentLength = 0;
+  };
+  for (const node of nodes) {
+    const nodeLength = (node.textContent || "").length;
+    /** 超长表格按行拆页，避免单一 TABLE 节点绕过章节上限。 */
+    if (node.nodeType === Node.ELEMENT_NODE && node.nodeName === "TABLE"
+      && nodeLength > progressiveReadableChunkSize) {
+      flushCurrentNodes();
+      const rows = Array.from(node.querySelectorAll("tr"));
+      let rowGroup = [];
+      let rowGroupLength = 0;
+      const flushRows = () => {
+        if (rowGroup.length === 0) return;
+        const table = document.createElement("table");
+        for (const row of rowGroup) table.append(row.cloneNode(true));
+        pageNodeGroups.push([table]);
+        rowGroup = [];
+        rowGroupLength = 0;
+      };
+      for (const row of rows) {
+        const rowLength = (row.textContent || "").length;
+        if (rowGroup.length > 0 && rowGroupLength + rowLength > progressiveReadableChunkSize) {
+          flushRows();
+        }
+        rowGroup.push(row);
+        rowGroupLength += rowLength;
+      }
+      flushRows();
+      continue;
+    }
+    /** 极长单段落按纯文本切页，避免一个节点独占浏览器主线程。 */
+    if (nodeLength > progressiveReadableChunkSize) {
+      flushCurrentNodes();
+      const textContent = node.textContent || "";
+      for (let offset = 0; offset < textContent.length; offset += progressiveReadableChunkSize) {
+        const safeTagName = node.nodeType === Node.ELEMENT_NODE
+          && ["P", "LI", "BLOCKQUOTE"].includes(node.nodeName)
+          ? node.nodeName.toLowerCase()
+          : "p";
+        const textNode = document.createElement(safeTagName);
+        textNode.textContent = textContent.slice(offset, offset + progressiveReadableChunkSize);
+        pageNodeGroups.push([textNode]);
+      }
+      continue;
+    }
+    if (currentNodes.length > 0 && currentLength + nodeLength > progressiveReadableChunkSize) {
+      flushCurrentNodes();
+    }
+    currentNodes.push(node);
+    currentLength += nodeLength;
+  }
+  flushCurrentNodes();
+  const groups = pageNodeGroups.length > 0 ? pageNodeGroups : [[]];
+  return groups.map((group, index) => ({
+    title: groups.length === 1 ? title : `${title}（${index + 1}/${groups.length}）`,
+    content: serializeWordChapterNodes(group),
+    kind: "word",
+  }));
+}
+
+/**
+ * 按 Word 的 H1/H2 结构拆分章节；没有标题时按正文长度分页。
+ *
+ * @param {string} rawHtml Mammoth 生成的完整 Word HTML。
+ * @returns {Array<{ title: string, content: string, kind: "word" }>} Word 章节。
+ */
+function createWordDocumentChapters(rawHtml) {
+  const parsedDocument = new DOMParser().parseFromString(rawHtml, "text/html");
+  const nodes = Array.from(parsedDocument.body.childNodes);
+  const headingNodes = nodes.filter((node) =>
+    node.nodeType === Node.ELEMENT_NODE && ["H1", "H2"].includes(node.nodeName),
+  );
+  const preferredTag = headingNodes.filter((node) => node.nodeName === "H1").length >= 2
+    ? "H1"
+    : "H2";
+  const boundaries = nodes
+    .map((node, index) => ({ node, index }))
+    .filter(({ node }) => node.nodeType === Node.ELEMENT_NODE && node.nodeName === preferredTag);
+  const chapters = [];
+  if (boundaries.length >= 2) {
+    if (boundaries[0].index > 0) {
+      chapters.push(...splitWordChapterNodes(
+        nodes.slice(0, boundaries[0].index),
+        "封面与前言",
+      ));
+    }
+    boundaries.forEach((boundary, index) => {
+      const chapterNodes = nodes.slice(boundary.index, boundaries[index + 1]?.index ?? nodes.length);
+      chapters.push(...splitWordChapterNodes(
+        chapterNodes,
+        boundary.node.textContent.trim() || `第 ${index + 1} 章`,
+      ));
+    });
+    return chapters;
+  }
+  return splitWordChapterNodes(nodes, "正文");
 }
 
 /**
@@ -712,7 +1605,7 @@ function createWordDocument(rawHtml) {
     if (tagName === "IMG") {
       /** imageSource 仅允许 Mammoth 生成的本地内嵌图片。 */
       const imageSource = sourceElement.getAttribute("src") || "";
-      if (!/^data:image\/(?:png|jpeg|gif|webp);base64,/i.test(imageSource)) return;
+      if (!/^data:image\/(?:png|jpe?g|gif|webp|bmp);base64,/i.test(imageSource)) return;
       safeElement.setAttribute("src", imageSource);
       safeElement.setAttribute("alt", sourceElement.getAttribute("alt") || "");
     }
@@ -735,6 +1628,119 @@ function createWordDocument(rawHtml) {
     appendSafeNode(childNode, fragment);
   }
   return fragment;
+}
+
+/**
+ * 更新文档章节顶部和底部的翻页控件。
+ *
+ * @returns {void}
+ */
+function updateDocumentChapterNavigation() {
+  const chapters = applicationState.documentChapters;
+  const chapterIndex = applicationState.activeDocumentChapterIndex;
+  const hasMultipleChapters = chapters.length > 1;
+  dom.documentChapterNavigation.hidden = !hasMultipleChapters;
+  dom.documentChapterFooter.hidden = !hasMultipleChapters;
+  if (!hasMultipleChapters) return;
+  const chapter = chapters[chapterIndex];
+  const counterText = `第 ${chapterIndex + 1} / ${chapters.length} 章`;
+  dom.documentChapterCounter.textContent = counterText;
+  dom.documentChapterFooterCounter.textContent = `${counterText} · ${chapter.title}`;
+  dom.documentChapterTitle.textContent = chapter.title;
+  dom.documentChapterPrevious.disabled = chapterIndex === 0;
+  dom.documentChapterFooterPrevious.disabled = chapterIndex === 0;
+  dom.documentChapterNext.disabled = chapterIndex >= chapters.length - 1;
+  dom.documentChapterFooterNext.disabled = chapterIndex >= chapters.length - 1;
+}
+
+/**
+ * 在左侧目录中显示整份文档的章节，而不是当前页全部小标题。
+ *
+ * @returns {void}
+ */
+function buildDocumentChapterTableOfContents() {
+  dom.readingToc.replaceChildren();
+  dom.readingTocTitle.textContent = "文档章节";
+  applicationState.documentChapters.slice(0, 500).forEach((chapter, index) => {
+    const tocButton = document.createElement("button");
+    tocButton.type = "button";
+    tocButton.className = "reading-toc-level-h2 document-chapter-toc-button";
+    tocButton.classList.toggle("is-active", index === applicationState.activeDocumentChapterIndex);
+    tocButton.setAttribute("aria-current", index === applicationState.activeDocumentChapterIndex ? "page" : "false");
+    tocButton.textContent = chapter.title.slice(0, 100);
+    tocButton.addEventListener("click", () => {
+      void renderDocumentChapter(index, { scrollToTop: true, saveProgress: true });
+    });
+    dom.readingToc.append(tocButton);
+  });
+}
+
+/**
+ * 只渲染当前选中的一个文档章节。
+ *
+ * @param {number} requestedIndex 目标章节下标。
+ * @param {{ scrollToTop?: boolean, saveProgress?: boolean }} options 翻页行为。
+ * @returns {Promise<boolean>} 是否成功显示目标章节。
+ */
+async function renderDocumentChapter(requestedIndex, options = {}) {
+  const chapters = applicationState.documentChapters;
+  if (chapters.length === 0) return false;
+  const chapterIndex = Math.min(chapters.length - 1, Math.max(0, Math.trunc(requestedIndex)));
+  const chapter = chapters[chapterIndex];
+  const renderSequence = applicationState.documentRenderSequence + 1;
+  applicationState.documentRenderSequence = renderSequence;
+  applicationState.activeDocumentChapterIndex = chapterIndex;
+  dom.readerContent.replaceChildren(
+    createTextElement("div", "readable-render-status", `正在打开：${chapter.title}`),
+  );
+  updateDocumentChapterNavigation();
+  await yieldDocumentRendering();
+  if (renderSequence !== applicationState.documentRenderSequence) return false;
+  /** fragment 是当前章节转换后的安全 HTML；异常时改用纯文本，避免永久停在加载状态。 */
+  let fragment;
+  try {
+    fragment = chapter.kind === "word"
+      ? createWordDocument(chapter.content)
+      : createReadableDocument(chapter.content);
+  } catch (error) {
+    console.error("文档章节排版失败，已改用纯文本显示。", error);
+    /** fallbackText 是不经过复杂排版的章节正文。 */
+    const fallbackText = chapter.kind === "word"
+      ? new DOMParser().parseFromString(chapter.content, "text/html").body.textContent
+      : chapter.content;
+    fragment = document.createDocumentFragment();
+    fragment.append(
+      createTextElement("div", "readable-render-warning", "本章排版失败，已切换为纯文本阅读。"),
+      createTextElement("pre", "readable-plain-fallback", fallbackText || "本章没有可显示的正文。"),
+    );
+  }
+  dom.readerContent.replaceChildren(fragment);
+  await yieldDocumentRendering();
+  if (renderSequence !== applicationState.documentRenderSequence) return false;
+  applicationState.activeReadingSurface = dom.readerContent;
+  if (options.scrollToTop) {
+    const readerTop = window.scrollY
+      + (dom.documentChapterNavigation.hidden
+        ? dom.readerContent.getBoundingClientRect().top
+        : dom.documentChapterNavigation.getBoundingClientRect().top)
+      - 24;
+    window.scrollTo({ top: Math.max(0, readerTop), behavior: "auto" });
+  }
+  if (applicationState.readingWorkspace) {
+    buildDocumentChapterTableOfContents();
+    applyReadingHighlights();
+    renderReadingAnnotations();
+    const progressPercent = calculateReadingProgress();
+    renderReadingProgress(progressPercent);
+    if (options.saveProgress) {
+      const currentStatus = applicationState.readingWorkspace.state.status;
+      void saveReadingState({
+        progressPercent,
+        status: currentStatus === "unread" && progressPercent >= 2 ? "reading" : currentStatus,
+      });
+    }
+  }
+  return true;
 }
 
 /**
@@ -920,6 +1926,10 @@ function closeReadingWorkspace() {
   applicationState.pendingReadingSelection = null;
   applicationState.readingAiSelection = null;
   applicationState.readingAiConversationId = "";
+  applicationState.documentChapters = [];
+  applicationState.activeDocumentChapterIndex = 0;
+  dom.documentChapterNavigation.hidden = true;
+  dom.documentChapterFooter.hidden = true;
   dom.readingWorkbench.hidden = true;
   dom.readingWorkbenchToggle.hidden = true;
   dom.readingTocSidebar.hidden = true;
@@ -1164,9 +2174,12 @@ async function removeCurrentTopic(topicId) {
  */
 function buildReadingTableOfContents(readingSurface) {
   dom.readingToc.replaceChildren();
-  /** headings 是正文中可进入目录的二至四级标题。 */
-  const headings = Array.from(readingSurface.querySelectorAll("h1, h2, h3, h4"))
+  dom.readingTocTitle.textContent = dom.paperReader.hidden ? "文章目录" : "论文目录";
+  /** allHeadings 是正文中全部可进入目录的二至四级标题。 */
+  const allHeadings = Array.from(readingSurface.querySelectorAll("h1, h2, h3, h4"))
     .filter((heading) => heading.textContent.trim());
+  /** headings 限制首次目录节点数量，避免超长手册再次阻塞主线程。 */
+  const headings = allHeadings.slice(0, 240);
   if (headings.length === 0) {
     dom.readingToc.append(
       createTextElement("p", "reading-toc-empty", "当前正文没有可识别的章节标题。"),
@@ -1185,6 +2198,15 @@ function buildReadingTableOfContents(readingSurface) {
     });
     dom.readingToc.append(tocButton);
   });
+  if (allHeadings.length > headings.length) {
+    dom.readingToc.append(
+      createTextElement(
+        "p",
+        "reading-toc-limit-note",
+        `目录较长，已先展示前 ${headings.length} 节；正文仍完整保留。`,
+      ),
+    );
+  }
 }
 
 /**
@@ -1206,7 +2228,14 @@ function calculateReadingProgress() {
   const readableDistance = Math.max(1, readingSurface.scrollHeight - window.innerHeight * 0.35);
   /** currentDistance 是阅读焦点进入正文后的纵向距离。 */
   const currentDistance = window.scrollY + window.innerHeight * 0.35 - surfaceTop;
-  return Math.min(100, Math.max(0, (currentDistance / readableDistance) * 100));
+  /** localProgress 是当前可见正文页内部的滚动百分比。 */
+  const localProgress = Math.min(100, Math.max(0, (currentDistance / readableDistance) * 100));
+  /** chapters 仅在本地文档章节阅读模式中存在。 */
+  const chapters = applicationState.documentChapters;
+  if (!dom.reader.hidden && chapters.length > 1) {
+    return ((applicationState.activeDocumentChapterIndex + localProgress / 100) / chapters.length) * 100;
+  }
+  return localProgress;
 }
 
 /**
@@ -1281,6 +2310,13 @@ function restoreReadingProgress(progressPercent) {
   /** normalizedProgress 是可用于定位的阅读百分比。 */
   const normalizedProgress = Math.min(100, Math.max(0, Number(progressPercent) || 0));
   if (!readingSurface || normalizedProgress < 1) return;
+  /** localProgress 把整本文档进度还原为当前章节内部进度。 */
+  const chapters = applicationState.documentChapters;
+  const localProgress = !dom.reader.hidden && chapters.length > 1
+    ? Math.min(100, Math.max(0,
+      (normalizedProgress / 100 * chapters.length - applicationState.activeDocumentChapterIndex) * 100,
+    ))
+    : normalizedProgress;
   window.requestAnimationFrame(() => {
     window.requestAnimationFrame(() => {
       /** surfaceRectangle 是恢复时正文相对视口的位置和高度。 */
@@ -1294,7 +2330,7 @@ function restoreReadingProgress(progressPercent) {
       );
       /** targetTop 是还原后的页面滚动位置。 */
       const targetTop =
-        surfaceTop + readableDistance * (normalizedProgress / 100) - window.innerHeight * 0.35;
+        surfaceTop + readableDistance * (localProgress / 100) - window.innerHeight * 0.35;
       window.scrollTo({ top: Math.max(0, targetTop), behavior: "auto" });
     });
   });
@@ -1770,7 +2806,24 @@ async function initializeReadingWorkspace(targetType, targetId, readingSurface) 
     renderReadingAiSelection();
     setReadingWorkbenchTab("tools");
     renderReadingProgress(payload.workspace.state.progressPercent);
-    buildReadingTableOfContents(readingSurface);
+    /** savedChapterIndex 把整本文档的历史进度定位到对应章节。 */
+    if (targetType === "document" && applicationState.documentChapters.length > 1) {
+      const chapterCount = applicationState.documentChapters.length;
+      const normalizedProgress = Math.min(
+        100,
+        Math.max(0, Number(payload.workspace.state.progressPercent) || 0),
+      );
+      const savedChapterIndex = Math.min(
+        chapterCount - 1,
+        Math.floor((normalizedProgress / 100) * chapterCount),
+      );
+      if (savedChapterIndex !== applicationState.activeDocumentChapterIndex) {
+        await renderDocumentChapter(savedChapterIndex, { scrollToTop: false, saveProgress: false });
+      }
+      buildDocumentChapterTableOfContents();
+    } else {
+      buildReadingTableOfContents(readingSurface);
+    }
     dom.readingTocSidebar.hidden = false;
     /** savedTocExpanded 是用户上次选择的左侧目录状态。 */
     let savedTocExpanded = true;
@@ -1795,41 +2848,6 @@ async function initializeReadingWorkspace(targetType, targetId, readingSurface) 
     closeReadingWorkspace();
     showToast(error.message);
   }
-}
-
-/**
- * 切换 PDF 原版预览与清爽阅读模式。
- *
- * @param {"original" | "readable"} mode 目标阅读模式。
- * @returns {void}
- */
-function setReaderMode(mode) {
-  /** showOriginal 表示当前文档是否采用原版预览。 */
-  const showOriginal = mode === "original";
-  dom.originalPreview.hidden = !showOriginal;
-  dom.readerContent.hidden = showOriginal;
-  if (!showOriginal) {
-    dom.reader.classList.remove("is-wide-preview");
-    dom.widePreviewButton.textContent = "⇱ 展开至页面宽度";
-    dom.widePreviewButton.setAttribute("aria-pressed", "false");
-  }
-  for (const button of dom.readerModeSwitch.querySelectorAll("button")) {
-    button.classList.toggle("is-active", button.dataset.readerMode === mode);
-  }
-}
-
-/**
- * 切换 PDF 在标准双栏与页面宽度阅读布局之间的状态。
- *
- * @returns {void}
- */
-function toggleWidePreview() {
-  /** isWide 表示 PDF 是否已占用阅读页的全部可用宽度。 */
-  const isWide = dom.reader.classList.toggle("is-wide-preview");
-  dom.widePreviewButton.textContent = isWide
-    ? "⇲ 恢复标准布局"
-    : "⇱ 展开至页面宽度";
-  dom.widePreviewButton.setAttribute("aria-pressed", String(isWide));
 }
 
 /**
@@ -2211,17 +3229,15 @@ function updateFloatingReaderBackButton() {
 }
 
 /**
- * 清理离开原始文档阅读页时使用的预览状态。
+ * 清理离开原始文档阅读页时使用的渲染状态。
  *
  * @returns {void}
  */
 function resetDocumentReaderPreview() {
+  applicationState.documentRenderSequence += 1;
   dom.reader.classList.remove("is-word-reader");
   dom.readerContent.classList.remove("is-word-document");
-  dom.reader.classList.remove("is-wide-preview");
-  dom.widePreviewButton.textContent = "⇱ 展开至页面宽度";
-  dom.widePreviewButton.setAttribute("aria-pressed", "false");
-  dom.originalPreviewFrame.src = "about:blank";
+  dom.originalDocumentLink.href = "#";
 }
 
 /**
@@ -2276,6 +3292,39 @@ const importJobStageLabels = Object.freeze({
   completed: "已完成",
   failed: "失败",
 });
+
+/**
+ * 从任务中心跳到归档文件夹并突出对应文章或文档。
+ *
+ * @param {Record<string, unknown>} job 已完成的后台任务。
+ * @returns {Promise<void>}
+ */
+async function locateImportJobTarget(job) {
+  await loadLibrary();
+  const targetItems = job.targetType === "article"
+    ? applicationState.articles
+    : applicationState.documents;
+  const target = targetItems.find((item) => item.id === job.targetId);
+  if (!target) {
+    showToast("这项内容已不在文档库中，可能已经被删除。");
+    return;
+  }
+  applicationState.searchQuery = "";
+  dom.searchInput.value = "";
+  applicationState.favoriteOnly = false;
+  applicationState.activeTag = "";
+  applicationState.activeFolderId = target.folderId || job.location?.folderId || "";
+  showView("library");
+  renderLibrary();
+  window.requestAnimationFrame(() => {
+    const itemKey = `${job.targetType}:${job.targetId}`;
+    const card = [...dom.documentGrid.children].find((item) => item.dataset.itemKey === itemKey);
+    if (!card) return;
+    card.classList.add("is-located");
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => card.classList.remove("is-located"), 3200);
+  });
+}
 
 /**
  * 渲染最近后台导入任务并提供打开结果或失败重试入口。
@@ -2343,6 +3392,11 @@ function renderImportJobs() {
         `${importJobStageLabels[job.stage] || job.stage} · ${Math.round(job.progressPercent || 0)}%`,
       ),
     );
+    if (job.location?.folderLabel) {
+      copy.append(
+        createTextElement("small", "import-job-location", `所在目录：${job.location.folderLabel}`),
+      );
+    }
     if (job.errorMessage) copy.append(createTextElement("p", "", job.errorMessage));
     item.append(copy);
     if (job.stage === "awaiting_confirmation") {
@@ -2447,6 +3501,14 @@ function renderImportJobs() {
         if (job.targetType === "document") void openDocument(job.targetId);
         else void openArticle(job.targetId);
       });
+      if (job.location?.folderId) {
+        const locateButton = createTextElement("button", "text-button", "查看位置");
+        locateButton.type = "button";
+        locateButton.addEventListener("click", () => {
+          void locateImportJobTarget(job).catch((error) => showToast(error.message));
+        });
+        completedActions.append(locateButton);
+      }
       completedActions.append(openButton);
       if (job.result?.pdfUrl) {
         const pdfButton = createTextElement("a", "text-button", "打开图文 PDF");
@@ -2631,6 +3693,16 @@ function showView(viewName) {
  * @param {Record<string, unknown>} article 完整文章对象。
  * @returns {DocumentFragment} 可插入阅读页的原文片段。
  */
+function setArticleImageSource(image, remoteSource) {
+  /** proxySource 始终通过本机缓存代理读取远程图片。 */
+  const proxySource = `/api/article-images?url=${encodeURIComponent(remoteSource)}`;
+  image.setAttribute("src", proxySource);
+  /** 首次网络或缓存失败时自动重试一次，不在阅读页永久留下破图。 */
+  image.addEventListener("error", () => {
+    image.setAttribute("src", `${proxySource}&retry=${Date.now()}`);
+  }, { once: true });
+}
+
 function createArticleOriginalContent(article) {
   /** parsedContent 是从服务端白名单 HTML 创建的隔离文档。 */
   const parsedContent = new DOMParser().parseFromString(
@@ -2661,10 +3733,7 @@ function createArticleOriginalContent(article) {
     /** remoteSource 是服务端已清洗过的公开图片地址。 */
     const remoteSource = image.getAttribute("src") || "";
     if (/^https?:\/\//i.test(remoteSource)) {
-      image.setAttribute(
-        "src",
-        `/api/article-images?url=${encodeURIComponent(remoteSource)}`,
-      );
+      setArticleImageSource(image, remoteSource);
       image.removeAttribute("referrerpolicy");
     }
     /** loading 设为 eager，避免原网页懒加载规则留下占位图。 */
@@ -2711,17 +3780,60 @@ function renderArticleTranslationControls(article) {
   /** translationReady 表示数据库已有 Codex 中文全文。 */
   const translationReady =
     article.translationStatus === "ready" && Boolean(article.translatedHtml);
+  /** translationActive 表示文章已经排队或正在分段翻译。 */
+  const translationActive = ["pending", "processing"].includes(article.translationStatus);
+  /** translationFailed 表示后台工作器已保存可重试错误。 */
+  const translationFailed = article.translationStatus === "failed";
   dom.articleTranslationTools.hidden = !canTranslate;
   dom.articleLanguageSwitch.hidden = !translationReady;
   dom.articleTranslationRequest.hidden =
-    !canTranslate || article.translationStatus === "pending" || translationReady;
-  dom.articleTranslationRequest.disabled = article.translationStatus === "pending";
+    !canTranslate || translationActive || translationReady;
+  dom.articleTranslationRequest.disabled = translationActive;
+  dom.articleTranslationRequest.textContent = translationFailed
+    ? "重新翻译"
+    : "加入 Codex 翻译";
+  /** progressPercent 是页面进度条使用的受限整数。 */
+  const progressPercent = Math.min(
+    Math.max(Math.round(Number(article.translationProgressPercent) || 0), 0),
+    100,
+  );
+  dom.articleTranslationProgress.hidden = !translationActive;
+  dom.articleTranslationProgressBar.style.width = `${progressPercent}%`;
+  dom.articleTranslationProgress.setAttribute("aria-valuenow", String(progressPercent));
   if (!canTranslate) {
     dom.articleTranslationStatus.textContent = "";
   } else if (translationReady) {
     dom.articleTranslationStatus.textContent = "Codex 中文译文已完成";
   } else if (article.translationStatus === "pending") {
-    dom.articleTranslationStatus.textContent = "等待 Codex 翻译";
+    /** queuePosition 是后台状态接口返回的真实队列位置。 */
+    const queuePosition = Number(article.queuePosition) || 0;
+    /** workerWaitingMessage 在 Codex 未登录时解释为何仍在排队。 */
+    const workerWaitingMessage = article.translationWorkerStatus === "waiting"
+      ? ` · ${article.translationWorkerMessage || "等待本机 Codex 就绪"}`
+      : "";
+    dom.articleTranslationStatus.textContent = `排队中${queuePosition ? ` · 第 ${queuePosition} 位` : ""}${workerWaitingMessage}`;
+  } else if (article.translationStatus === "processing") {
+    /** totalSections 和 completedSections 构成真实分段完成度。 */
+    const totalSections = Number(article.translationTotalSections) || 0;
+    const completedSections = Number(article.translationCompletedSections) || 0;
+    /** stageLabels 是非翻译阶段的用户可读说明。 */
+    const stageLabels = {
+      preparing: "正在准备原文",
+      validating: "正在检查译文完整性",
+      saving: "正在保存中文译文",
+    };
+    /** translatingLabel 表示当前实际处理的分段序号。 */
+    const translatingLabel = totalSections > 0
+      ? `正在翻译第 ${Math.min(completedSections + 1, totalSections)}/${totalSections} 节`
+      : "正在切分文章";
+    const stageLabel = article.translationStage === "translating"
+      ? translatingLabel
+      : stageLabels[article.translationStage] || "正在启动 Codex 翻译";
+    dom.articleTranslationStatus.textContent = `${stageLabel} · ${progressPercent}%`;
+  } else if (translationFailed) {
+    /** conciseError 避免底层命令长日志挤占阅读页操作栏。 */
+    const conciseError = String(article.translationError || "可以重新翻译").slice(0, 180);
+    dom.articleTranslationStatus.textContent = `翻译失败：${conciseError}`;
   } else {
     dom.articleTranslationStatus.textContent =
       article.sourceLanguage === "mixed" ? "检测到中英混合原文" : "检测到英文原文";
@@ -2791,7 +3903,29 @@ function renderArticleReadingMode() {
   } else {
     dom.articleReaderContent.replaceChildren(createArticleOriginalContent(article));
   }
+  renderReadingMath(dom.articleReaderContent);
   renderArticleTranslationControls(article);
+}
+
+/**
+ * 把正文中保留的 LaTeX 公式转换为本地 KaTeX 排版；代码块保持原样。
+ *
+ * @param {HTMLElement} readingSurface 已插入页面的文章或论文正文容器。
+ * @returns {void}
+ */
+function renderReadingMath(readingSurface) {
+  renderMathInElement(readingSurface, {
+    delimiters: [
+      { left: "$$", right: "$$", display: true },
+      { left: "\\[", right: "\\]", display: true },
+      { left: "\\(", right: "\\)", display: false },
+      { left: "$", right: "$", display: false },
+    ],
+    ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code", "option"],
+    throwOnError: false,
+    strict: "ignore",
+    trust: false,
+  });
 }
 
 /**
@@ -2811,15 +3945,69 @@ async function requestCurrentArticleTranslation() {
       `/api/articles/${encodeURIComponent(article.id)}/translation-request`,
       { method: "POST" },
     );
-    applicationState.selectedArticle = payload.article;
-    renderArticleTranslationControls(payload.article);
-    showToast("已加入 Codex 翻译队列；英文原文会完整保留。");
+    applicationState.selectedArticle = {
+      ...payload.article,
+      ...(payload.translation || {}),
+    };
+    renderArticleTranslationControls(applicationState.selectedArticle);
+    showToast("已加入 Codex 自动翻译队列；页面会显示真实分段进度。");
+    void pollArticleTranslation(article.id).catch((error) => showToast(error.message));
   } catch (error) {
     showToast(error.message);
   } finally {
-    dom.articleTranslationRequest.disabled = false;
-    dom.articleTranslationRequest.textContent = "加入 Codex 翻译";
+    if (applicationState.selectedArticle) {
+      renderArticleTranslationControls(applicationState.selectedArticle);
+    }
   }
+}
+
+/**
+ * 轮询当前文章的轻量翻译状态，完成时只额外读取一次完整译文。
+ *
+ * @param {string} articleId 当前文章 ID。
+ * @returns {Promise<void>} 本轮轮询完成。
+ */
+async function pollArticleTranslation(articleId) {
+  window.clearTimeout(applicationState.articleTranslationPollTimer);
+  if (
+    applicationState.selectedArticle?.id !== articleId
+    || dom.articleReader.hidden
+  ) return;
+  /** payload 是工作器和当前文章的轻量状态。 */
+  const payload = await requestJson(
+    `/api/article-translation-worker/status?articleId=${encodeURIComponent(articleId)}`,
+  );
+  if (applicationState.selectedArticle?.id !== articleId) return;
+  /** translation 是不含长正文的实时任务进度。 */
+  const translation = payload.translation || {};
+  applicationState.selectedArticle = {
+    ...applicationState.selectedArticle,
+    ...translation,
+    translationWorkerStatus: payload.worker?.status || "",
+    translationWorkerMessage: payload.worker?.message || "",
+  };
+  renderArticleTranslationControls(applicationState.selectedArticle);
+  if (translation.translationStatus === "ready") {
+    /** detailPayload 只在完成时加载一次包含中文全文的文章详情。 */
+    const detailPayload = await requestJson(
+      `/api/articles/${encodeURIComponent(articleId)}`,
+    );
+    if (applicationState.selectedArticle?.id !== articleId) return;
+    applicationState.selectedArticle = detailPayload.article;
+    applicationState.articleLanguageMode = "translation";
+    renderArticleReadingMode();
+    applicationState.activeReadingSurface = dom.articleReaderContent;
+    buildReadingTableOfContents(dom.articleReaderContent);
+    applyReadingHighlights();
+    showToast("Codex 中文译文已完成。英文原文仍完整保留。");
+    await loadLibrary();
+    return;
+  }
+  if (translation.translationStatus === "failed") return;
+  applicationState.articleTranslationPollTimer = window.setTimeout(
+    () => void pollArticleTranslation(articleId).catch((error) => showToast(error.message)),
+    2000,
+  );
 }
 
 /**
@@ -2831,6 +4019,7 @@ async function requestCurrentArticleTranslation() {
  */
 async function openArticle(articleId, options = {}) {
   try {
+    window.clearTimeout(applicationState.articleTranslationPollTimer);
     closeReadingWorkspace();
     /** payload 是完整文章详情响应。 */
     const payload = await requestJson(
@@ -2872,6 +4061,9 @@ async function openArticle(articleId, options = {}) {
     renderArticleReadingMode();
     window.scrollTo({ top: 0, behavior: "smooth" });
     await initializeReadingWorkspace("article", article.id, dom.articleReaderContent);
+    if (["pending", "processing"].includes(article.translationStatus)) {
+      void pollArticleTranslation(article.id).catch((error) => showToast(error.message));
+    }
   } catch (error) {
     showToast(error.message);
   }
@@ -3113,17 +4305,9 @@ function renderCategoryTabs(statistics = {}) {
   }
 }
 
-/**
- * 返回文档库中完成分类与收藏筛选后的项目。
- *
- * @returns {Record<string, unknown>[]} 当前可见项目。
- */
-function getVisibleLibraryItems() {
-  if (applicationState.searchQuery) {
-    return applicationState.searchResults;
-  }
-  /** allItems 将上传文件和 URL 文章转换为统一知识条目。 */
-  const allItems = [
+/** 将文档与网页文章补齐统一的内容类型。 */
+function getUnifiedLibraryItems() {
+  return [
     ...applicationState.documents.map((item) => ({
       ...item,
       targetType: "document",
@@ -3133,6 +4317,19 @@ function getVisibleLibraryItems() {
       targetType: "article",
     })),
   ];
+}
+
+/**
+ * 返回文档库中完成分类与收藏筛选后的项目。
+ *
+ * @returns {Record<string, unknown>[]} 当前可见项目。
+ */
+function getVisibleLibraryItems() {
+  if (applicationState.searchQuery) {
+    return applicationState.searchResults;
+  }
+  /** allItems 是已经补齐 targetType 的统一知识条目。 */
+  const allItems = getUnifiedLibraryItems();
   /** filteredItems 是当前文件夹或重点视图中的最终候选内容。 */
   const filteredItems = allItems
     .filter(
@@ -3478,6 +4675,32 @@ async function deleteKnowledgeItem(item) {
 }
 
 /**
+ * 修改文档或网页文章在知识库中的展示名称。
+ *
+ * @param {Record<string, unknown>} item 文档库条目。
+ * @returns {Promise<void>}
+ */
+async function renameKnowledgeItem(item) {
+  if (!["document", "article"].includes(item.targetType)) return;
+  const nextTitle = window.prompt("修改显示名称：", item.title);
+  const normalizedTitle = String(nextTitle || "").replace(/\s+/g, " ").trim();
+  if (!normalizedTitle || normalizedTitle === item.title) return;
+  try {
+    const targetId = item.targetId || item.id;
+    const resourceName = item.targetType === "article" ? "articles" : "documents";
+    await requestJson(`/api/${resourceName}/${encodeURIComponent(targetId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: normalizedTitle }),
+    });
+    await loadLibrary();
+    showToast("名称已修改。");
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+/**
  * 返回当前文件夹从根目录开始的路径。
  *
  * @returns {Record<string, unknown>[]} 当前文件夹面包屑。
@@ -3631,9 +4854,13 @@ function renderFolderGrid() {
         `${folder.itemCount} 项内容${folder.childCount ? ` · ${folder.childCount} 个子文件夹` : ""}`,
       ),
     );
-    /** actions 是重命名和安全删除入口。 */
+    /** actions 是移动、重命名和安全删除入口。 */
     const actions = document.createElement("div");
     actions.className = "folder-card-actions";
+    /** moveButton 会把当前文件夹整棵子树移动到其它目录。 */
+    const moveButton = createTextElement("button", "", "移动");
+    moveButton.type = "button";
+    moveButton.addEventListener("click", () => moveLibraryFolder(folder));
     /** renameButton 是文件夹重命名按钮。 */
     const renameButton = createTextElement("button", "", "重命名");
     renameButton.type = "button";
@@ -3642,10 +4869,379 @@ function renderFolderGrid() {
     const deleteButton = createTextElement("button", "is-danger", "删除");
     deleteButton.type = "button";
     deleteButton.addEventListener("click", () => void deleteLibraryFolder(folder));
-    actions.append(renameButton, deleteButton);
+    actions.append(moveButton, renameButton, deleteButton);
     card.append(openButton, actions);
     dom.folderGrid.append(card);
   }
+}
+
+/** 返回按完整路径排序的全部知识库目录。 */
+function getSortedFolderOptions() {
+  return [...applicationState.folders].sort((left, right) =>
+    left.path.map((part) => part.name).join("/").localeCompare(
+      right.path.map((part) => part.name).join("/"),
+      "zh-CN",
+      { numeric: true },
+    ),
+  );
+}
+
+/** 刷新上传区域的知识库目标目录下拉框。 */
+function renderUploadFolderOptions() {
+  const previousValue = applicationState.selectedUploadFolderId;
+  dom.uploadFolderSelect.replaceChildren(new Option("请选择目录", ""));
+  for (const folder of getSortedFolderOptions()) {
+    const label = folder.path.map((part) => part.name).join(" / ");
+    dom.uploadFolderSelect.append(new Option(label, folder.id));
+  }
+  const selectionStillExists = applicationState.folders.some((folder) => folder.id === previousValue);
+  applicationState.selectedUploadFolderId = selectionStillExists ? previousValue : "";
+  dom.uploadFolderSelect.value = applicationState.selectedUploadFolderId;
+  dom.uploadFolderSelect.disabled = applicationState.uploadFolderMode !== "selected";
+}
+
+/** 检查上传目标设置，指定目录模式下必须先选择有效目录。 */
+function validateUploadDestination() {
+  if (applicationState.uploadFolderMode !== "selected") return true;
+  const valid = applicationState.folders.some(
+    (folder) => folder.id === applicationState.selectedUploadFolderId,
+  );
+  if (!valid) showToast("请先选择要保存到的知识库目录。");
+  return valid;
+}
+
+/** 返回指定上传目录的完整可读路径，用于上传状态与完成提示。 */
+function getUploadFolderPathLabel(folderId) {
+  const folder = applicationState.folders.find((item) => item.id === folderId);
+  return folder ? folder.path.map((part) => part.name).join(" / ") : "";
+}
+
+/** 返回统一内容条目的批量选择键。 */
+function getLibraryItemKey(item) {
+  return `${item.targetType}:${item.id}`;
+}
+
+/** 更新批量整理工具栏的数量与按钮状态。 */
+function renderLibraryBatchToolbar() {
+  const selectedCount = applicationState.selectedLibraryItemKeys.size;
+  dom.libraryBatchToolbar.hidden = !applicationState.libraryBatchMode;
+  dom.batchSelectButton.classList.toggle("is-active", applicationState.libraryBatchMode);
+  dom.batchSelectButton.setAttribute("aria-pressed", String(applicationState.libraryBatchMode));
+  dom.batchSelectButton.textContent = applicationState.libraryBatchMode ? "正在批量整理" : "批量整理";
+  dom.batchSelectionCount.textContent = `已选择 ${selectedCount} 项`;
+  dom.batchMoveButton.disabled = selectedCount === 0;
+  dom.batchDeleteButton.disabled = selectedCount === 0;
+}
+
+/** 进入或退出文档库批量整理模式。 */
+function setLibraryBatchMode(active) {
+  applicationState.libraryBatchMode = Boolean(active);
+  if (!applicationState.libraryBatchMode) applicationState.selectedLibraryItemKeys.clear();
+  renderLibrary();
+}
+
+/** 选择或取消选择当前目录中显示的全部内容。 */
+function toggleSelectAllVisibleItems() {
+  const visibleItems = getVisibleLibraryItems();
+  const allSelected = visibleItems.length > 0 && visibleItems.every(
+    (item) => applicationState.selectedLibraryItemKeys.has(getLibraryItemKey(item)),
+  );
+  for (const item of visibleItems) {
+    const key = getLibraryItemKey(item);
+    if (allSelected) applicationState.selectedLibraryItemKeys.delete(key);
+    else applicationState.selectedLibraryItemKeys.add(key);
+  }
+  renderDocumentGrid();
+  renderLibraryBatchToolbar();
+}
+
+/** 返回当前批量勾选且仍存在于本地列表的内容。 */
+function getSelectedLibraryItems() {
+  const itemMap = new Map();
+  for (const item of [
+    ...getUnifiedLibraryItems(),
+    ...applicationState.papers.map((item) => ({ ...item, targetType: "paper" })),
+    ...applicationState.searchResults,
+  ]) {
+    itemMap.set(getLibraryItemKey(item), item);
+  }
+  return [...applicationState.selectedLibraryItemKeys]
+    .map((key) => itemMap.get(key))
+    .filter(Boolean);
+}
+
+/** 经二次确认后，在一个服务端事务中永久删除当前勾选的全部内容。 */
+async function deleteSelectedLibraryItems() {
+  /** items 是当前仍然存在于文档库缓存中的所选内容。 */
+  const items = getSelectedLibraryItems();
+  if (items.length === 0) {
+    showToast("请先选择需要删除的内容。");
+    return;
+  }
+  /** titlePreview 帮助用户在最终确认前核对前几项内容。 */
+  const titlePreview = items
+    .slice(0, 5)
+    .map((item) => `• ${String(item.titleZh || item.title || "未命名内容")}`)
+    .join("\n");
+  const remainingLabel = items.length > 5 ? `\n• 以及另外 ${items.length - 5} 项` : "";
+  /** confirmed 明确提示批量永久删除不可恢复。 */
+  const confirmed = window.confirm(
+    `确定永久删除所选 ${items.length} 项内容吗？\n\n${titlePreview}${remainingLabel}\n\n原始附件、阅读进度、批注、标签和专题关系也会删除。此操作无法撤销。`,
+  );
+  if (!confirmed) return;
+
+  dom.batchDeleteButton.disabled = true;
+  try {
+    const result = await requestJson("/api/folder-items/batch", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        items: items.map((item) => ({ targetType: item.targetType, targetId: item.id })),
+      }),
+    });
+    const selectedKeys = new Set(items.map(getLibraryItemKey));
+    if (
+      applicationState.readingWorkspace &&
+      selectedKeys.has(`${applicationState.readingWorkspace.targetType}:${applicationState.readingWorkspace.targetId}`)
+    ) {
+      closeReadingWorkspace();
+    }
+    applicationState.selectedLibraryItemKeys.clear();
+    applicationState.libraryBatchMode = false;
+    await Promise.all([loadLibrary(), loadPapers(), loadTopics()]);
+    showView("library");
+    showToast(`已永久删除 ${Number(result.deletedCount || items.length)} 项内容。`);
+  } catch (error) {
+    showToast(error.message);
+    renderLibraryBatchToolbar();
+  }
+}
+
+/** 返回移动窗口允许展示的目录；移动整棵目录时排除自身及后代。 */
+function getMoveFolderTreeFolders() {
+  const sourceFolder = applicationState.pendingMoveFolder;
+  if (!sourceFolder) return getSortedFolderOptions();
+  return getSortedFolderOptions().filter((candidate) =>
+    !candidate.path.some((pathItem) => pathItem.id === sourceFolder.id),
+  );
+}
+
+/** 返回移动窗口中不能被选中、但仍需保留层级结构的目录 ID。 */
+function getDisabledMoveFolderIds() {
+  const sourceFolder = applicationState.pendingMoveFolder;
+  return new Set(sourceFolder?.parentId ? [sourceFolder.parentId] : []);
+}
+
+/** 返回目录在移动树中的完整中文路径。 */
+function getMoveFolderPathLabel(folder) {
+  return folder.path.map((part) => part.name).join(" / ");
+}
+
+/** 根据当前来源位置，默认只展开来源目录所在路径。 */
+function expandMoveFolderSourcePath() {
+  const sourceFolder = applicationState.pendingMoveFolder;
+  let sourceFolderId = sourceFolder?.parentId || "";
+  if (!sourceFolder) {
+    const itemFolderIds = new Set(
+      applicationState.pendingMoveItems.map((item) => String(item.folderId || "")),
+    );
+    sourceFolderId = itemFolderIds.size === 1
+      ? [...itemFolderIds][0]
+      : applicationState.activeFolderId;
+  }
+  const folder = applicationState.folders.find((candidate) => candidate.id === sourceFolderId);
+  for (const pathItem of folder?.path || []) {
+    applicationState.moveFolderExpandedIds.add(pathItem.id);
+  }
+}
+
+/** 更新弹窗内新建文件夹将使用的父目录说明。 */
+function updateMoveFolderCreateParentLabel() {
+  const selectedId = applicationState.selectedMoveFolderId;
+  const selectedFolder = applicationState.folders.find((folder) => folder.id === selectedId);
+  dom.moveFolderCreateParent.textContent = selectedFolder
+    ? `将在“${getMoveFolderPathLabel(selectedFolder)}”下新建子文件夹`
+    : "将在文档库根目录下创建一级文件夹";
+}
+
+/** 选中移动目标目录并刷新树中高亮。 */
+function selectMoveFolderTarget(folderId) {
+  applicationState.selectedMoveFolderId = folderId;
+  dom.moveFolderConfirm.disabled = !folderId;
+  updateMoveFolderCreateParentLabel();
+  renderMoveFolderTree();
+}
+
+/** 创建移动目录树中的单行节点。 */
+function createMoveFolderTreeRow(folder, depth, childFolders, disabledIds) {
+  const row = document.createElement("div");
+  row.className = "move-folder-tree-row";
+  row.style.setProperty("--tree-depth", String(depth));
+  const hasChildren = childFolders.length > 0;
+  const expanded = applicationState.moveFolderExpandedIds.has(folder.id)
+    || Boolean(applicationState.moveFolderSearchQuery);
+  const toggleButton = document.createElement("button");
+  toggleButton.type = "button";
+  toggleButton.className = `move-folder-toggle${hasChildren ? "" : " is-placeholder"}`;
+  toggleButton.textContent = expanded ? "▾" : "▸";
+  toggleButton.setAttribute("aria-label", expanded ? `折叠${folder.name}` : `展开${folder.name}`);
+  toggleButton.setAttribute("aria-expanded", String(expanded));
+  toggleButton.disabled = !hasChildren;
+  toggleButton.addEventListener("click", () => {
+    if (expanded) applicationState.moveFolderExpandedIds.delete(folder.id);
+    else applicationState.moveFolderExpandedIds.add(folder.id);
+    renderMoveFolderTree();
+  });
+
+  const disabled = disabledIds.has(folder.id);
+  const optionButton = document.createElement("button");
+  optionButton.type = "button";
+  optionButton.className = "move-folder-option";
+  optionButton.setAttribute("role", "treeitem");
+  optionButton.setAttribute("aria-level", String(depth + 1));
+  optionButton.setAttribute("aria-selected", String(applicationState.selectedMoveFolderId === folder.id));
+  optionButton.classList.toggle("is-selected", applicationState.selectedMoveFolderId === folder.id);
+  optionButton.classList.toggle("is-disabled", disabled);
+  optionButton.disabled = disabled;
+  if (disabled) optionButton.title = "文件夹已经位于这个目录下";
+  const folderIcon = createTextElement("span", "move-folder-icon", "▰");
+  const optionText = document.createElement("span");
+  optionText.append(
+    createTextElement("strong", "", folder.name),
+    createTextElement(
+      "small",
+      "",
+      `${folder.itemCount || 0} 项内容${folder.childCount ? ` · ${folder.childCount} 个子文件夹` : ""}`,
+    ),
+  );
+  optionButton.append(folderIcon, optionText);
+  optionButton.addEventListener("click", () => selectMoveFolderTarget(folder.id));
+  row.append(toggleButton, optionButton);
+  return { row, expanded };
+}
+
+/** 按需渲染可折叠目录树，搜索时只显示命中项及其祖先。 */
+function renderMoveFolderTree() {
+  const folders = getMoveFolderTreeFolders();
+  const folderIds = new Set(folders.map((folder) => folder.id));
+  const childrenByParentId = new Map();
+  for (const folder of folders) {
+    const parentId = folder.parentId && folderIds.has(folder.parentId) ? folder.parentId : "";
+    if (!childrenByParentId.has(parentId)) childrenByParentId.set(parentId, []);
+    childrenByParentId.get(parentId).push(folder);
+  }
+  for (const children of childrenByParentId.values()) {
+    children.sort((left, right) => left.name.localeCompare(right.name, "zh-CN", { numeric: true }));
+  }
+
+  const query = applicationState.moveFolderSearchQuery.trim().toLocaleLowerCase("zh-CN");
+  const visibleIds = new Set();
+  if (query) {
+    for (const folder of folders) {
+      if (getMoveFolderPathLabel(folder).toLocaleLowerCase("zh-CN").includes(query)) {
+        for (const pathItem of folder.path) visibleIds.add(pathItem.id);
+      }
+    }
+  }
+  const disabledIds = getDisabledMoveFolderIds();
+  dom.moveFolderOptions.replaceChildren();
+
+  if (applicationState.pendingMoveFolder?.parentId && !query) {
+    const rootRow = document.createElement("div");
+    rootRow.className = "move-folder-tree-row is-root";
+    rootRow.style.setProperty("--tree-depth", "0");
+    const spacer = document.createElement("span");
+    spacer.className = "move-folder-toggle is-placeholder";
+    const rootButton = document.createElement("button");
+    rootButton.type = "button";
+    rootButton.className = "move-folder-option";
+    rootButton.setAttribute("role", "treeitem");
+    rootButton.setAttribute("aria-level", "1");
+    rootButton.setAttribute("aria-selected", String(applicationState.selectedMoveFolderId === "__root__"));
+    rootButton.classList.toggle("is-selected", applicationState.selectedMoveFolderId === "__root__");
+    rootButton.append(
+      createTextElement("span", "move-folder-icon", "⌂"),
+      createTextElement("span", "", "文档库根目录"),
+    );
+    rootButton.addEventListener("click", () => selectMoveFolderTarget("__root__"));
+    rootRow.append(spacer, rootButton);
+    dom.moveFolderOptions.append(rootRow);
+  }
+
+  let renderedCount = 0;
+  const appendChildren = (parentId, depth) => {
+    for (const folder of childrenByParentId.get(parentId) || []) {
+      if (query && !visibleIds.has(folder.id)) continue;
+      const childFolders = (childrenByParentId.get(folder.id) || []).filter(
+        (child) => !query || visibleIds.has(child.id),
+      );
+      const { row, expanded } = createMoveFolderTreeRow(folder, depth, childFolders, disabledIds);
+      dom.moveFolderOptions.append(row);
+      renderedCount += 1;
+      if (expanded) appendChildren(folder.id, depth + 1);
+    }
+  };
+  appendChildren("", 0);
+  if (renderedCount === 0 && !(applicationState.pendingMoveFolder?.parentId && !query)) {
+    dom.moveFolderOptions.append(createTextElement(
+      "p",
+      "move-folder-empty",
+      query ? "没有找到匹配的文件夹。" : "还没有可用的目标文件夹，可在上方新建。",
+    ));
+  }
+}
+
+/** 显示移动弹窗内的紧凑新建目录表单。 */
+function openMoveFolderCreatePanel() {
+  updateMoveFolderCreateParentLabel();
+  dom.moveFolderCreateName.value = "";
+  dom.moveFolderCreatePanel.hidden = false;
+  window.requestAnimationFrame(() => dom.moveFolderCreateName.focus());
+}
+
+/** 在当前选中目录下创建子文件夹，并自动将其选为移动目标。 */
+async function createMoveFolderFromDialog() {
+  const name = dom.moveFolderCreateName.value.trim();
+  if (!name) {
+    showToast("请输入新文件夹名称。");
+    dom.moveFolderCreateName.focus();
+    return;
+  }
+  const selectedParent = applicationState.folders.find(
+    (folder) => folder.id === applicationState.selectedMoveFolderId,
+  );
+  dom.moveFolderCreateConfirm.disabled = true;
+  try {
+    const payload = await requestJson("/api/folders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ parentId: selectedParent?.id || null, name }),
+    });
+    applicationState.folders = payload.folders;
+    if (selectedParent) applicationState.moveFolderExpandedIds.add(selectedParent.id);
+    applicationState.moveFolderSearchQuery = "";
+    dom.moveFolderSearch.value = "";
+    dom.moveFolderCreatePanel.hidden = true;
+    selectMoveFolderTarget(payload.folder.id);
+    showToast(`文件夹“${payload.folder.name}”已创建并选中。`);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    dom.moveFolderCreateConfirm.disabled = false;
+  }
+}
+
+/** 清理移动弹窗的临时状态。 */
+function resetMoveFolderDialogState() {
+  applicationState.pendingMoveItem = null;
+  applicationState.pendingMoveItems = [];
+  applicationState.pendingMoveFolder = null;
+  applicationState.selectedMoveFolderId = "";
+  applicationState.moveFolderExpandedIds.clear();
+  applicationState.moveFolderSearchQuery = "";
+  dom.moveFolderSearch.value = "";
+  dom.moveFolderCreatePanel.hidden = true;
+  dom.moveFolderCreateName.value = "";
 }
 
 /**
@@ -3654,47 +5250,81 @@ function renderFolderGrid() {
  * @param {Record<string, unknown>} item 文档或网页文章。
  * @returns {void}
  */
-function moveKnowledgeItem(item) {
-  /** folderOptions 是按完整路径排序的所有可选目录。 */
-  const folderOptions = [...applicationState.folders].sort((left, right) =>
-    left.path.map((part) => part.name).join("/").localeCompare(
-      right.path.map((part) => part.name).join("/"),
-      "zh-CN",
-    ),
-  );
-  applicationState.pendingMoveItem = item;
+function openMoveFolderDialog(items) {
+  const moveItems = (Array.isArray(items) ? items : [items]).filter(Boolean);
+  if (moveItems.length === 0) return;
+  applicationState.pendingMoveItem = moveItems.length === 1 ? moveItems[0] : null;
+  applicationState.pendingMoveItems = moveItems;
+  applicationState.pendingMoveFolder = null;
   applicationState.selectedMoveFolderId = "";
-  dom.moveFolderItemTitle.textContent = `《${item.title}》`;
+  dom.moveFolderEyebrow.textContent = "MOVE CONTENT";
+  dom.moveFolderTitle.textContent = "移动到文件夹";
+  dom.moveFolderItemTitle.textContent = moveItems.length === 1
+    ? `《${moveItems[0].title}》`
+    : `已选择 ${moveItems.length} 项内容，将统一移动到同一目录。`;
   dom.moveFolderConfirm.disabled = true;
-  dom.moveFolderOptions.replaceChildren();
-  for (const folder of folderOptions) {
-    /** optionButton 是无需输入编号即可选择的单个文件夹。 */
-    const optionButton = document.createElement("button");
-    optionButton.type = "button";
-    optionButton.className = "move-folder-option";
-    optionButton.setAttribute("role", "option");
-    optionButton.setAttribute("aria-selected", "false");
-    optionButton.style.paddingLeft = `${12 + Math.min(folder.path.length - 1, 4) * 14}px`;
-    /** optionText 包含文件夹名称和完整路径，避免同名目录混淆。 */
-    const optionText = document.createElement("span");
-    optionText.append(
-      createTextElement("strong", "", folder.name),
-      createTextElement("small", "", folder.path.map((part) => part.name).join(" / ")),
-    );
-    optionButton.append(optionText);
-    optionButton.addEventListener("click", () => {
-      applicationState.selectedMoveFolderId = folder.id;
-      for (const candidateButton of dom.moveFolderOptions.querySelectorAll(".move-folder-option")) {
-        /** selected 表示当前按钮是否就是用户最后点击的目标。 */
-        const selected = candidateButton === optionButton;
-        candidateButton.classList.toggle("is-selected", selected);
-        candidateButton.setAttribute("aria-selected", String(selected));
-      }
-      dom.moveFolderConfirm.disabled = false;
-    });
-    dom.moveFolderOptions.append(optionButton);
-  }
+  applicationState.moveFolderExpandedIds.clear();
+  applicationState.moveFolderSearchQuery = "";
+  dom.moveFolderSearch.value = "";
+  dom.moveFolderCreatePanel.hidden = true;
+  expandMoveFolderSourcePath();
+  updateMoveFolderCreateParentLabel();
+  renderMoveFolderTree();
   dom.moveFolderDialog.showModal();
+}
+
+/** 打开单项内容的移动窗口。 */
+function moveKnowledgeItem(item) {
+  openMoveFolderDialog([item]);
+}
+
+/** 打开文件夹父目录选择窗口，并排除自身及全部后代。 */
+function moveLibraryFolder(folder) {
+  applicationState.pendingMoveItem = null;
+  applicationState.pendingMoveItems = [];
+  applicationState.pendingMoveFolder = folder;
+  applicationState.selectedMoveFolderId = "";
+  dom.moveFolderEyebrow.textContent = "MOVE FOLDER";
+  dom.moveFolderTitle.textContent = "移动文件夹";
+  dom.moveFolderItemTitle.textContent = `“${folder.name}”及其中全部内容会一起移动。`;
+  dom.moveFolderConfirm.disabled = true;
+  applicationState.moveFolderExpandedIds.clear();
+  applicationState.moveFolderSearchQuery = "";
+  dom.moveFolderSearch.value = "";
+  dom.moveFolderCreatePanel.hidden = true;
+  expandMoveFolderSourcePath();
+  updateMoveFolderCreateParentLabel();
+  renderMoveFolderTree();
+  dom.moveFolderDialog.showModal();
+}
+
+/** 确认移动一个文件夹到新的父目录。 */
+async function confirmMoveLibraryFolder() {
+  const folder = applicationState.pendingMoveFolder;
+  const selectedId = applicationState.selectedMoveFolderId;
+  if (!folder || !selectedId) return;
+  const targetFolder = selectedId === "__root__"
+    ? null
+    : applicationState.folders.find((item) => item.id === selectedId);
+  if (selectedId !== "__root__" && !targetFolder) return;
+  dom.moveFolderConfirm.disabled = true;
+  try {
+    const payload = await requestJson(`/api/folders/${encodeURIComponent(folder.id)}/move`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ parentId: targetFolder?.id || null }),
+    });
+    applicationState.folders = payload.folders;
+    dom.moveFolderDialog.close();
+    renderLibrary();
+    showToast(`文件夹“${folder.name}”已移动到${targetFolder
+      ? `“${targetFolder.path.map((part) => part.name).join(" / ")}”下`
+      : "文档库根目录"}。`);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    dom.moveFolderConfirm.disabled = false;
+  }
 }
 
 /**
@@ -3703,29 +5333,42 @@ function moveKnowledgeItem(item) {
  * @returns {Promise<void>}
  */
 async function confirmMoveKnowledgeItem() {
-  /** item 是打开移动窗口时保存的知识条目。 */
-  const item = applicationState.pendingMoveItem;
+  if (applicationState.pendingMoveFolder) {
+    await confirmMoveLibraryFolder();
+    return;
+  }
+  /** items 是打开移动窗口时保存的一项或多项知识条目。 */
+  const items = applicationState.pendingMoveItems;
   /** targetFolder 是用户鼠标点击选中的目标目录。 */
   const targetFolder = applicationState.folders.find(
     (folder) => folder.id === applicationState.selectedMoveFolderId,
   );
-  if (!item || !targetFolder) return;
+  if (!Array.isArray(items) || items.length === 0 || !targetFolder) return;
   dom.moveFolderConfirm.disabled = true;
   try {
-    await requestJson("/api/folder-items", {
+    const isBatch = items.length > 1;
+    await requestJson(isBatch ? "/api/folder-items/batch" : "/api/folder-items", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        targetType: item.targetType,
-        targetId: item.id,
-        folderId: targetFolder.id,
-      }),
+      body: JSON.stringify(isBatch
+        ? {
+          items: items.map((item) => ({ targetType: item.targetType, targetId: item.id })),
+          folderId: targetFolder.id,
+        }
+        : {
+          targetType: items[0].targetType,
+          targetId: items[0].id,
+          folderId: targetFolder.id,
+        }),
     });
     dom.moveFolderDialog.close();
     applicationState.pendingMoveItem = null;
+    applicationState.pendingMoveItems = [];
     applicationState.selectedMoveFolderId = "";
+    applicationState.libraryBatchMode = false;
+    applicationState.selectedLibraryItemKeys.clear();
     await loadLibrary();
-    showToast(`已移动到“${targetFolder.path.map((part) => part.name).join(" / ")}”。`);
+    showToast(`${items.length} 项内容已移动到“${targetFolder.path.map((part) => part.name).join(" / ")}”。`);
   } catch (error) {
     showToast(error.message);
   } finally {
@@ -3738,6 +5381,66 @@ async function confirmMoveKnowledgeItem() {
  *
  * @returns {void}
  */
+/**
+ * 判断一段简介是否已经包含足够的中文信息。
+ *
+ * @param {unknown} value 候选简介。
+ * @returns {boolean} 是否适合作为中文列表简介。
+ */
+function hasChineseSummary(value) {
+  return (String(value || "").match(/[\u3400-\u9fff]/g) || []).length >= 4;
+}
+
+/**
+ * 为文档库条目选择中文优先的列表简介。
+ *
+ * @param {Record<string, unknown>} item 文档或网页文章。
+ * @returns {string} 不展示整段英文的中文简介或状态。
+ */
+function getChineseLibrarySummary(item) {
+  const candidates = item.targetType === "article"
+    ? [item.excerpt, item.translatedSummary, item.summary]
+    : [item.excerpt, item.summary];
+  const chineseSummary = candidates.find(hasChineseSummary);
+  if (chineseSummary) return String(chineseSummary).trim();
+  if (item.targetType === "article") {
+    if (["pending", "processing"].includes(item.translationStatus)) {
+      return "中文简介正在生成，完成后会自动更新。";
+    }
+    if (item.translationStatus === "failed") {
+      return "中文简介生成失败，可进入文章阅读页重新翻译。";
+    }
+    return "这是一篇英文文章，中文简介尚未生成。";
+  }
+  return "这是一份英文文档，打开后可查看正文内容。";
+}
+
+/**
+ * 为论文库选择中文摘要；未完成时只显示中文状态，不回退到英文摘要。
+ *
+ * @param {Record<string, unknown>} paper 论文列表对象。
+ * @returns {string} 中文摘要或中文状态。
+ */
+function getChinesePaperSummary(paper) {
+  const chineseSummary = [
+    paper.abstractZh,
+    paper.translationPreviewZh,
+    paper.curatorNote,
+    paper.abstract,
+  ].find(hasChineseSummary);
+  if (chineseSummary) return String(chineseSummary).trim();
+  if (paper.fullTranslationStatus === "ready") {
+    return "中文全文已经完成，打开后可查看详细内容。";
+  }
+  if (paper.fullTranslationStatus === "failed") {
+    return "中文摘要暂未生成，可进入论文阅读页重新翻译。";
+  }
+  if (["pending", "processing"].includes(paper.fullTranslationStatus)) {
+    return "中文摘要正在生成，完成后会自动更新。";
+  }
+  return "这是一篇英文论文，中文摘要尚未生成。";
+}
+
 function renderDocumentGrid() {
   /** visibleItems 是经过分类和重点状态筛选的统一条目。 */
   const visibleItems = getVisibleLibraryItems();
@@ -3753,11 +5456,41 @@ function renderDocumentGrid() {
     const card = document.createElement("article");
     card.className = "document-card";
     card.dataset.category = documentItem.category;
+    const itemKey = getLibraryItemKey(documentItem);
+    card.dataset.itemKey = itemKey;
+    const itemSelected = applicationState.selectedLibraryItemKeys.has(itemKey);
+    card.classList.toggle("is-selection-mode", applicationState.libraryBatchMode);
+    card.classList.toggle("is-selected", itemSelected);
+    /** selectionLabel 是批量整理模式下显示的勾选入口。 */
+    const selectionLabel = document.createElement("label");
+    selectionLabel.className = "library-selection-control";
+    selectionLabel.hidden = !applicationState.libraryBatchMode;
+    const selectionCheckbox = document.createElement("input");
+    selectionCheckbox.type = "checkbox";
+    selectionCheckbox.checked = itemSelected;
+    selectionCheckbox.setAttribute("aria-label", `选择《${documentItem.title}》`);
+    selectionCheckbox.addEventListener("change", () => {
+      if (selectionCheckbox.checked) applicationState.selectedLibraryItemKeys.add(itemKey);
+      else applicationState.selectedLibraryItemKeys.delete(itemKey);
+      card.classList.toggle("is-selected", selectionCheckbox.checked);
+      renderLibraryBatchToolbar();
+    });
+    selectionLabel.append(selectionCheckbox, createTextElement("span", "", "选择"));
     /** openButton 是打开对应文件阅读页或文章阅读页的主要操作。 */
     const openButton = document.createElement("button");
     openButton.type = "button";
     openButton.className = "library-card-open";
-    openButton.addEventListener("click", () => openKnowledgeItem(documentItem));
+    openButton.addEventListener("click", () => {
+      if (!applicationState.libraryBatchMode) {
+        openKnowledgeItem(documentItem);
+        return;
+      }
+      const nextSelected = !applicationState.selectedLibraryItemKeys.has(itemKey);
+      if (nextSelected) applicationState.selectedLibraryItemKeys.add(itemKey);
+      else applicationState.selectedLibraryItemKeys.delete(itemKey);
+      renderDocumentGrid();
+      renderLibraryBatchToolbar();
+    });
     /** favoriteButton 用星标区分重点文档与普通文档。 */
     const favoriteButton = document.createElement("button");
     favoriteButton.type = "button";
@@ -3786,6 +5519,14 @@ function renderDocumentGrid() {
     moveButton.textContent = "移动";
     moveButton.title = `移动《${documentItem.title}》`;
     moveButton.addEventListener("click", () => moveKnowledgeItem(documentItem));
+    /** renameButton 修改知识库展示名称，不改变原始附件文件名或来源地址。 */
+    const renameButton = document.createElement("button");
+    renameButton.type = "button";
+    renameButton.className = "content-rename-button";
+    renameButton.textContent = "改名";
+    renameButton.title = `修改《${documentItem.title}》的显示名称`;
+    renameButton.hidden = documentItem.targetType === "paper";
+    renameButton.addEventListener("click", () => void renameKnowledgeItem(documentItem));
 
     /** metadata 是卡片顶部分类和日期。 */
     const metadata = document.createElement("div");
@@ -3825,11 +5566,7 @@ function renderDocumentGrid() {
     appendHighlightedText(title, documentItem.title, applicationState.searchQuery);
     /** summary 是正文摘要或搜索命中片段。 */
     const summary = document.createElement("p");
-    appendHighlightedText(
-      summary,
-      documentItem.excerpt || documentItem.summary,
-      applicationState.searchQuery,
-    );
+    appendHighlightedText(summary, getChineseLibrarySummary(documentItem), applicationState.searchQuery);
     openButton.append(
       metadata,
       title,
@@ -3842,8 +5579,9 @@ function renderDocumentGrid() {
     /** actionGroup 把收藏和删除固定在独立操作列，避免与来源文字重叠。 */
     const actionGroup = document.createElement("div");
     actionGroup.className = "document-card-actions";
-    actionGroup.append(favoriteButton, moveButton, deleteButton);
-    card.append(openButton, actionGroup);
+    actionGroup.hidden = applicationState.libraryBatchMode;
+    actionGroup.append(favoriteButton, renameButton, moveButton, deleteButton);
+    card.append(selectionLabel, openButton, actionGroup);
     dom.documentGrid.append(card);
   }
 }
@@ -3874,9 +5612,11 @@ function renderLibrary() {
   dom.newFolderButton.disabled = Boolean(
     applicationState.searchQuery || applicationState.favoriteOnly,
   );
+  renderLibraryBatchToolbar();
   renderFolderBreadcrumbs();
   renderFolderGrid();
   renderDocumentGrid();
+  renderUploadFolderOptions();
 }
 
 /**
@@ -4179,6 +5919,8 @@ function renderPapers() {
     footer.append(deleteButton);
     /** title 是优先展示 Codex 中文翻译的论文标题。 */
     const title = createTextElement("h3", "", paper.titleZh || paper.title);
+    /** paperSummary 是中文优先且不会回退到整段英文的论文简介。 */
+    const paperSummary = getChinesePaperSummary(paper);
     /** contentElements 是按阅读顺序放入论文卡片的元素。 */
     const contentElements = [
       metadata,
@@ -4226,14 +5968,18 @@ function renderPapers() {
       createTextElement(
         "p",
         "paper-abstract",
-        paper.abstractZh || paper.abstract || "该论文暂未提供摘要。",
+        paperSummary,
       ),
-      ...(paper.curatorNote
+      ...(paper.curatorNote && paper.curatorNote.trim() !== paperSummary
         ? [createTextElement("p", "paper-curator-note", paper.curatorNote)]
         : []),
       footer,
     );
-    card.replaceChildren(...contentElements);
+    /** content 把标题、状态、作者和摘要组成可在列表模式压缩的主体区域。 */
+    const content = document.createElement("div");
+    content.className = "paper-card-content";
+    content.replaceChildren(...contentElements.slice(1, -1));
+    card.replaceChildren(metadata, content, footer);
     dom.paperGrid.append(card);
   }
 }
@@ -4259,7 +6005,7 @@ async function loadPapers() {
 }
 
 /**
- * 仅保留 Codex 全文译文中的阅读型 HTML 标签。
+ * 仅保留 Codex 全文译文中的阅读型 HTML 标签和受控代理图片。
  *
  * @param {string} translatedHtml 数据库中的 Codex 中文译文。
  * @returns {DocumentFragment} 可安全插入页面的正文片段。
@@ -4287,6 +6033,8 @@ function createSafePaperTranslation(translatedHtml) {
     "EM",
     "SUB",
     "SUP",
+    "BR",
+    "IMG",
   ]);
   /** parsedDocument 是隔离解析后的全文译文文档。 */
   const parsedDocument = new DOMParser().parseFromString(
@@ -4299,7 +6047,7 @@ function createSafePaperTranslation(translatedHtml) {
   const fragment = document.createDocumentFragment();
 
   /**
-   * 递归复制文本与白名单标签，不复制任何属性。
+   * 递归复制文本与白名单标签；图片只复制 alt 并改写为本地代理地址。
    *
    * @param {Node} sourceNode 隔离文档节点。
    * @param {Node} targetNode 当前安全目标节点。
@@ -4313,6 +6061,19 @@ function createSafePaperTranslation(translatedHtml) {
     if (sourceNode.nodeType !== Node.ELEMENT_NODE) return;
     /** sourceElement 是当前待检查的 HTML 元素。 */
     const sourceElement = /** @type {Element} */ (sourceNode);
+    if (sourceElement.tagName === "IMG") {
+      /** remoteSource 只接受数据库已验证的公开 HTTP(S) 图片。 */
+      const remoteSource = sourceElement.getAttribute("src") || "";
+      if (!/^https?:\/\//i.test(remoteSource)) return;
+      /** safeImage 始终通过本地图片代理加载，避免第三方防盗链与隐私请求。 */
+      const safeImage = document.createElement("img");
+      setArticleImageSource(safeImage, remoteSource);
+      safeImage.alt = sourceElement.getAttribute("alt") || "";
+      safeImage.loading = "eager";
+      safeImage.decoding = "async";
+      targetNode.append(safeImage);
+      return;
+    }
     /** safeParent 是允许标签时新建的无属性元素，否则沿用上级节点。 */
     const safeParent = allowedTags.has(sourceElement.tagName)
       ? document.createElement(sourceElement.tagName.toLowerCase())
@@ -4427,6 +6188,7 @@ function schedulePaperTranslationPolling(paperId) {
         dom.paperReaderContent.replaceChildren(
           createSafePaperTranslation(paper.fullTranslationHtml),
         );
+        renderReadingMath(dom.paperReaderContent);
         await initializeReadingWorkspace("paper", paper.id, dom.paperReaderContent);
         showToast("Codex 已完成论文中文全文翻译。");
       }
@@ -4489,6 +6251,7 @@ async function openPaper(paperId, options = {}) {
       dom.paperReaderContent.append(
         createSafePaperTranslation(paper.fullTranslationHtml),
       );
+      renderReadingMath(dom.paperReaderContent);
     } else if (paper.sourceType === "mli") {
       dom.paperReadingStatus.textContent =
         "该条目来自李沐论文精读目录。中文视频是主要解读入口，论文原文和 PDF 用于进一步核对。";
@@ -4739,10 +6502,14 @@ async function pollDocumentOcr(documentId) {
   dom.readerStatus.textContent = documentItem.extractionStatus;
   if (documentItem.ocrStatus === "completed") {
     dom.readerSummary.textContent = documentItem.summary;
-    dom.readerContent.replaceChildren(createReadableDocument(documentItem.extractedText || ""));
-    applicationState.activeReadingSurface = dom.readerContent;
-    buildReadingTableOfContents(dom.readerContent);
-    applyReadingHighlights();
+    applicationState.documentChapters = createTextDocumentChapters(
+      documentItem.extractedText || "",
+      documentItem.pdfOutline || [],
+    );
+    applicationState.activeDocumentChapterIndex = 0;
+    const rendered = await renderDocumentChapter(0, { scrollToTop: false, saveProgress: false });
+    if (!rendered) return;
+    buildDocumentChapterTableOfContents();
     showToast("OCR 已完成，清爽阅读正文和全文索引已更新。");
     await loadLibrary();
     return;
@@ -4813,15 +6580,13 @@ async function openDocument(documentId, options = {}) {
     dom.readerTitle.textContent = documentItem.title;
     dom.readerMeta.textContent = `${documentItem.category} · ${formatDate(documentItem.createdAt)}`;
     dom.readerSummary.textContent = documentItem.summary;
-    /** isWordDocument 表示当前正文应采用 Word 结构化纸张视图。 */
+    /** isWordDocument 表示当前正文可采用保留结构的 Word HTML 视图。 */
     const isWordDocument =
       documentItem.extension === ".docx" && Boolean(documentItem.renderedHtml);
     dom.reader.classList.toggle("is-word-reader", isWordDocument);
     dom.readerContent.classList.toggle("is-word-document", isWordDocument);
     dom.readerContent.replaceChildren(
-      isWordDocument
-        ? createWordDocument(documentItem.renderedHtml)
-        : createReadableDocument(documentItem.extractedText || ""),
+      createTextElement("div", "readable-render-status", "正在打开文档…"),
     );
     dom.readerFileName.textContent = documentItem.originalName;
     dom.readerFileSize.textContent = formatFileSize(documentItem.sizeBytes);
@@ -4834,19 +6599,24 @@ async function openDocument(documentId, options = {}) {
           ? "人工调整"
           : "本地规则";
     dom.downloadLink.href = `/api/documents/${encodeURIComponent(documentId)}/download`;
-    /** supportsOriginalPreview 表示浏览器能够直接呈现原始 PDF。 */
-    const supportsOriginalPreview =
+    /** supportsOriginalView 表示浏览器能够在新标签页直接呈现原始 PDF。 */
+    const supportsOriginalView =
       documentItem.extension === ".pdf" ||
       documentItem.mimeType === "application/pdf";
     /** previewRevision 防止重建 PDF 后浏览器继续显示旧缓存。 */
     const previewRevision = encodeURIComponent(documentItem.updatedAt || "current");
-    dom.readerModeSwitch.hidden = !supportsOriginalPreview;
-    dom.originalPreviewFrame.src = supportsOriginalPreview
-      ? `/api/documents/${encodeURIComponent(documentId)}/view?v=${previewRevision}#toolbar=1&navpanes=0&view=FitH`
-      : "about:blank";
-    setReaderMode(supportsOriginalPreview ? "original" : "readable");
+    dom.readerModeSwitch.hidden = !supportsOriginalView;
+    dom.originalDocumentLink.href = supportsOriginalView
+      ? `/api/documents/${encodeURIComponent(documentId)}/view?v=${previewRevision}`
+      : "";
     dom.readerCategory.value = documentItem.category;
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.scrollTo({ top: 0, behavior: "auto" });
+    applicationState.documentChapters = isWordDocument
+      ? createWordDocumentChapters(documentItem.renderedHtml)
+      : createTextDocumentChapters(documentItem.extractedText || "", documentItem.pdfOutline || []);
+    applicationState.activeDocumentChapterIndex = 0;
+    const rendered = await renderDocumentChapter(0, { scrollToTop: false, saveProgress: false });
+    if (!rendered) return;
     await initializeReadingWorkspace("document", documentItem.id, dom.readerContent);
     if (documentItem.ocrStatus === "queued" || documentItem.ocrStatus === "running") {
       void pollDocumentOcr(documentItem.id).catch((error) => showToast(error.message));
@@ -4878,12 +6648,24 @@ function createQueueItem(file) {
 }
 
 /**
+ * 上传成功后平滑移除临时状态行，避免成功通知长期占据导入页面。
+ *
+ * @param {HTMLElement} queueItem 已完成的上传状态行。
+ * @returns {void}
+ */
+function dismissSuccessfulQueueItem(queueItem) {
+  queueItem.classList.add("is-removing");
+  window.setTimeout(() => queueItem.remove(), 180);
+}
+
+/**
  * 上传一个文件并等待解析分类完成。
  *
  * @param {File} file 浏览器文件对象。
- * @returns {Promise<void>}
+ * @param {{ preserveRelativePath?: boolean, relativePath?: string, quietSuccess?: boolean, targetFolderId?: string, targetFolderLabel?: string }} options 批量导入选项。
+ * @returns {Promise<{ status: "uploaded" | "duplicate" | "failed", duplicate?: Record<string, unknown> }>} 上传结果。
  */
-async function uploadFile(file) {
+async function uploadFile(file, options = {}) {
   /** queueItem 是本文件对应的界面状态行。 */
   const queueItem = createQueueItem(file);
   /** statusElement 是状态行右侧文字。 */
@@ -4891,39 +6673,279 @@ async function uploadFile(file) {
   statusElement.textContent = "正在提取正文并分类…";
   try {
     /** payload 是上传完成后的文档对象。 */
+    /** relativePath 是文件夹选择器提供的根目录内相对路径。 */
+    const relativePath = options.preserveRelativePath
+      ? options.relativePath || file.webkitRelativePath || ""
+      : "";
+    /** requestHeaders 只在文件夹导入时携带相对路径，普通上传行为保持不变。 */
+    const requestHeaders = {
+      "Content-Type": file.type || "application/octet-stream",
+      "X-File-Name": encodeURIComponent(file.name),
+    };
+    if (relativePath) requestHeaders["X-Relative-Path"] = encodeURIComponent(relativePath);
+    if (options.targetFolderId) requestHeaders["X-Target-Folder-Id"] = options.targetFolderId;
     const payload = await requestJson("/api/documents", {
       method: "POST",
-      headers: {
-        "Content-Type": file.type || "application/octet-stream",
-        "X-File-Name": encodeURIComponent(file.name),
-      },
+      headers: requestHeaders,
       body: file,
     });
     queueItem.classList.add("is-complete");
-    statusElement.textContent = payload.importJob
-      ? `已保存 · OCR 后台处理中 · ${payload.document.category}`
-      : `已保存 · ${payload.document.category}`;
-    showToast(`《${payload.document.title}》已归入“${payload.document.category}”。`);
+    /** targetFolderLabel 明确展示实际目录，避免把自动识别分类误认为保存位置。 */
+    const targetFolderLabel = String(options.targetFolderLabel || "").trim();
+    statusElement.textContent = targetFolderLabel
+      ? `已保存到 ${targetFolderLabel}${payload.importJob ? " · OCR 后台处理中" : ""}`
+      : payload.importJob
+        ? `已保存 · OCR 后台处理中 · 自动分类：${payload.document.category}`
+        : `已保存 · 自动分类：${payload.document.category}`;
+    if (!options.quietSuccess) {
+      showToast(
+        targetFolderLabel
+          ? `《${payload.document.title}》已保存到“${targetFolderLabel}”${payload.importJob ? "，OCR 将在后台继续处理。" : "。"}`
+          : payload.importJob
+            ? `《${payload.document.title}》已保存，OCR 将在后台继续处理。`
+            : `《${payload.document.title}》已按内容归入“${payload.document.category}”。`,
+      );
+    }
+    dismissSuccessfulQueueItem(queueItem);
+    return { status: "uploaded" };
   } catch (error) {
+    if (error.code === "DUPLICATE_DOCUMENT") {
+      statusElement.textContent = "重复，已跳过";
+      dismissSuccessfulQueueItem(queueItem);
+      if (!options.quietSuccess) showToast(error.message);
+      return {
+        status: "duplicate",
+        duplicate: {
+          fileName: file.name,
+          title: error.payload?.duplicate?.title || "已有文档",
+          matchReason: error.payload?.duplicate?.matchReason || "title",
+        },
+      };
+    }
     queueItem.classList.add("is-error");
     statusElement.textContent = error.message;
+    return { status: "failed" };
+  }
+}
+
+/**
+ * 更新多文件或文件夹导入的紧凑总进度。
+ *
+ * @param {string} label 当前阶段说明。
+ * @param {number} completed 已处理文件数。
+ * @param {number} total 总文件数。
+ * @param {number} failures 失败文件数。
+ * @param {number} duplicates 重复文件数。
+ * @returns {void}
+ */
+function updateUploadBatchProgress(label, completed, total, failures = 0, duplicates = 0) {
+  const safeTotal = Math.max(Number(total) || 0, 1);
+  const safeCompleted = Math.min(Math.max(Number(completed) || 0, 0), safeTotal);
+  dom.uploadBatchProgress.hidden = false;
+  dom.uploadBatchProgress.classList.toggle("is-error", failures > 0);
+  dom.uploadBatchProgress.classList.toggle("is-warning", failures === 0 && duplicates > 0);
+  dom.uploadBatchLabel.textContent = label;
+  const resultParts = [`${safeCompleted} / ${safeTotal}`];
+  if (duplicates > 0) resultParts.push(`${duplicates} 个重复`);
+  if (failures > 0) resultParts.push(`${failures} 个失败`);
+  dom.uploadBatchCount.textContent = resultParts.join(" · ");
+  dom.uploadBatchBar.style.width = `${Math.round((safeCompleted / safeTotal) * 100)}%`;
+}
+
+/**
+ * 在批量进度区集中列出被查重跳过的文件，不为每个文件弹出通知。
+ *
+ * @param {Record<string, unknown>[]} duplicates 重复文件摘要。
+ * @returns {void}
+ */
+function renderUploadDuplicateSummary(duplicates) {
+  dom.uploadDuplicateList.replaceChildren();
+  dom.uploadDuplicateSummary.hidden = duplicates.length === 0;
+  dom.uploadDuplicateSummary.open = duplicates.length > 0;
+  dom.uploadDuplicateLabel.textContent = `重复文件未导入（${duplicates.length} 个）`;
+  for (const duplicate of duplicates) {
+    const reason = duplicate.matchReason === "content" ? "文件内容相同" : "原标题相同";
+    dom.uploadDuplicateList.append(
+      createTextElement("li", "", `${duplicate.fileName}（与《${duplicate.title}》${reason}）`),
+    );
+  }
+}
+
+/**
+ * 过滤文件夹中常见的系统索引和 Office 临时文件。
+ *
+ * @param {File} file 文件夹选择器返回的文件。
+ * @returns {boolean} 是否应跳过。
+ */
+function shouldSkipFolderFile(file, relativePath = "") {
+  const fileName = String(file.name || "");
+  const pathSegments = String(relativePath || file.webkitRelativePath || "").split("/").filter(Boolean);
+  return /^(?:\.DS_Store|Thumbs\.db|desktop\.ini)$/i.test(fileName)
+    || /^~\$/.test(fileName)
+    || pathSegments.some((segment, index) => index > 0 && segment.startsWith("."));
+}
+
+/**
+ * 递归读取原生目录选择器返回的目录句柄，并保留从所选根目录开始的相对路径。
+ *
+ * @param {FileSystemDirectoryHandle} directoryHandle 当前目录句柄。
+ * @param {string} relativeDirectory 当前目录相对路径。
+ * @returns {Promise<{ file: File, relativePath: string }[]>} 可交给批量上传的文件记录。
+ */
+async function collectDirectoryUploadEntries(directoryHandle, relativeDirectory = directoryHandle.name) {
+  /** handles 先按名称排序，让批量进度和最终目录顺序保持稳定。 */
+  const handles = [];
+  for await (const childHandle of directoryHandle.values()) handles.push(childHandle);
+  handles.sort((left, right) => left.name.localeCompare(right.name, "zh-CN", { numeric: true }));
+  /** uploadEntries 汇总当前目录和全部后代文件。 */
+  const uploadEntries = [];
+  for (const childHandle of handles) {
+    const relativePath = `${relativeDirectory}/${childHandle.name}`;
+    if (childHandle.kind === "directory") {
+      uploadEntries.push(...await collectDirectoryUploadEntries(childHandle, relativePath));
+      continue;
+    }
+    uploadEntries.push({ file: await childHandle.getFile(), relativePath });
+  }
+  return uploadEntries;
+}
+
+/**
+ * 打开 Chrome/Edge 原生目录选择器；不支持该接口时回退到 webkitdirectory。
+ *
+ * @returns {Promise<void>}
+ */
+async function chooseImportFolder() {
+  if (!validateUploadDestination()) return;
+  if (typeof window.showDirectoryPicker !== "function") {
+    dom.folderInput.click();
+    return;
+  }
+  try {
+    /** directoryHandle 是用户在原生目录窗口中确认的目标文件夹。 */
+    const directoryHandle = await window.showDirectoryPicker({ mode: "read", id: "zhixu-folder-import" });
+    const uploadEntries = await collectDirectoryUploadEntries(directoryHandle);
+    if (uploadEntries.length === 0) {
+      showToast("所选文件夹中没有可导入的文件。");
+      return;
+    }
+    await uploadFiles(uploadEntries, { preserveRelativePaths: true });
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    showToast(error instanceof Error ? error.message : "无法读取所选文件夹。");
   }
 }
 
 /**
  * 顺序上传用户选择的全部文件，避免同时解析大文件造成内存峰值。
  *
- * @param {FileList | File[]} files 待上传文件集合。
+ * @param {FileList | File[] | { file: File, relativePath: string }[]} files 待上传文件集合。
+ * @param {{ preserveRelativePaths?: boolean }} options 批量导入选项。
  * @returns {Promise<void>}
  */
-async function uploadFiles(files) {
-  /** fileArray 是便于遍历的文件数组。 */
-  const fileArray = Array.from(files);
-  if (fileArray.length === 0) return;
+async function uploadFiles(files, options = {}) {
+  if (applicationState.uploadInProgress) {
+    showToast("已有一批文档正在导入，请等待当前批次完成。");
+    return;
+  }
+  if (!validateUploadDestination()) return;
+  /** targetFolderId 固定本批开始时的目标，避免上传途中切换位置。 */
+  const targetFolderId = applicationState.uploadFolderMode === "selected"
+    ? applicationState.selectedUploadFolderId
+    : "";
+  /** targetFolderLabel 与目录 ID 同时冻结，上传中刷新目录列表也不会改变完成提示。 */
+  const targetFolderLabel = getUploadFolderPathLabel(targetFolderId);
+  /** sourceEntries 统一普通 File、webkitdirectory File 和原生目录句柄文件。 */
+  const sourceEntries = Array.from(files).map((entry) => {
+    if (entry?.file) {
+      return { file: entry.file, relativePath: String(entry.relativePath || "") };
+    }
+    return { file: entry, relativePath: String(entry.webkitRelativePath || "") };
+  });
+  /** fileEntries 在文件夹模式下排除系统和临时文件。 */
+  const fileEntries = options.preserveRelativePaths
+    ? sourceEntries.filter((entry) => !shouldSkipFolderFile(entry.file, entry.relativePath))
+    : sourceEntries;
+  if (fileEntries.length === 0) return;
+  /** skippedCount 是文件夹内自动忽略的临时文件数量。 */
+  const skippedCount = sourceEntries.length - fileEntries.length;
+  /** rootFolderName 是文件夹选择器返回路径中的第一级目录。 */
+  const rootFolderName = options.preserveRelativePaths
+    ? String(fileEntries[0].relativePath || "").split("/").filter(Boolean)[0] || "所选文件夹"
+    : "所选文档";
+  /** showBatchProgress 表示应使用汇总进度避免逐文件通知刷屏。 */
+  const showBatchProgress = options.preserveRelativePaths || fileEntries.length > 1;
+  window.clearTimeout(applicationState.uploadBatchHideTimer);
+  applicationState.uploadInProgress = true;
+  dom.chooseFilesButton.disabled = true;
+  dom.chooseFolderButton.disabled = true;
+  for (const control of dom.uploadDestinationModes) control.disabled = true;
+  dom.uploadFolderSelect.disabled = true;
+  dom.dropZone.setAttribute("aria-busy", "true");
+  renderUploadDuplicateSummary([]);
   showView("upload");
-  for (const file of fileArray) await uploadFile(file);
-  dom.fileInput.value = "";
-  await loadLibrary();
+  if (showBatchProgress) {
+    updateUploadBatchProgress(`正在导入“${rootFolderName}”`, 0, fileEntries.length);
+  }
+  let failures = 0;
+  /** duplicates 收集整批中被服务端查重跳过的文件。 */
+  const duplicates = [];
+  try {
+    for (const [fileIndex, entry] of fileEntries.entries()) {
+      const result = await uploadFile(entry.file, {
+        preserveRelativePath: Boolean(options.preserveRelativePaths),
+        relativePath: entry.relativePath,
+        quietSuccess: showBatchProgress,
+        targetFolderId,
+        targetFolderLabel,
+      });
+      if (result.status === "failed") failures += 1;
+      if (result.status === "duplicate" && result.duplicate) duplicates.push(result.duplicate);
+      if (showBatchProgress) {
+        updateUploadBatchProgress(
+          failures > 0 ? `“${rootFolderName}”已完成，但有文件需要处理` : `正在导入“${rootFolderName}”`,
+          fileIndex + 1,
+          fileEntries.length,
+          failures,
+          duplicates.length,
+        );
+      }
+    }
+    await loadLibrary();
+    renderUploadDuplicateSummary(duplicates);
+    /** importedCount 是排除重复和失败后的实际新增文件数。 */
+    const importedCount = fileEntries.length - duplicates.length - failures;
+    if (showBatchProgress && failures === 0 && duplicates.length === 0) {
+      updateUploadBatchProgress(`“${rootFolderName}”导入完成`, fileEntries.length, fileEntries.length);
+      showToast(`已导入 ${importedCount} 个文件${skippedCount ? `，跳过 ${skippedCount} 个临时文件` : ""}。`);
+      applicationState.uploadBatchHideTimer = window.setTimeout(() => {
+        dom.uploadBatchProgress.hidden = true;
+      }, 3200);
+    } else if (showBatchProgress) {
+      const finalLabel = failures > 0
+        ? `“${rootFolderName}”导入完成，但有文件需要处理`
+        : `“${rootFolderName}”导入完成，重复文件已跳过`;
+      updateUploadBatchProgress(
+        finalLabel,
+        fileEntries.length,
+        fileEntries.length,
+        failures,
+        duplicates.length,
+      );
+      showToast(
+        `实际导入 ${importedCount} 个，重复未导入 ${duplicates.length} 个${failures ? `，失败 ${failures} 个` : ""}。`,
+      );
+    }
+  } finally {
+    dom.fileInput.value = "";
+    dom.folderInput.value = "";
+    dom.chooseFilesButton.disabled = false;
+    dom.chooseFolderButton.disabled = false;
+    for (const control of dom.uploadDestinationModes) control.disabled = false;
+    dom.uploadFolderSelect.disabled = applicationState.uploadFolderMode !== "selected";
+    dom.dropZone.removeAttribute("aria-busy");
+    applicationState.uploadInProgress = false;
+  }
 }
 
 /**
@@ -5084,9 +7106,55 @@ function setupViewMode() {
   });
 }
 
+/**
+ * 初始化论文库网格 / 列表切换，并单独记住论文库的显示偏好。
+ *
+ * @returns {void}
+ */
+function setupPaperViewMode() {
+  if (!dom.paperViewMode || !dom.paperViewModeLabel || !dom.paperGrid) return;
+  /** PAPER_VIEW_MODE_LABELS 是论文库模式对应的中文标签。 */
+  const PAPER_VIEW_MODE_LABELS = { grid: "网格", list: "列表" };
+  /** applyPaperViewMode 同步列表容器、下拉标签和无障碍选中状态。 */
+  const applyPaperViewMode = (mode) => {
+    const nextMode = mode === "list" ? "list" : "grid";
+    dom.paperGrid.classList.toggle("is-list", nextMode === "list");
+    dom.paperViewModeLabel.textContent = PAPER_VIEW_MODE_LABELS[nextMode];
+    for (const option of dom.paperViewModeOptions) {
+      option.setAttribute(
+        "aria-checked",
+        String(option.dataset.paperViewMode === nextMode),
+      );
+    }
+  };
+  /** currentMode 优先读取论文库自己的持久化设置。 */
+  let currentMode = "grid";
+  try {
+    const savedMode = window.localStorage.getItem("zhixu-paper-view-mode");
+    if (savedMode === "list" || savedMode === "grid") currentMode = savedMode;
+  } catch (error) {}
+  applyPaperViewMode(currentMode);
+  for (const option of dom.paperViewModeOptions) {
+    option.addEventListener("click", (event) => {
+      event.preventDefault();
+      const mode = option.dataset.paperViewMode === "list" ? "list" : "grid";
+      try {
+        window.localStorage.setItem("zhixu-paper-view-mode", mode);
+      } catch (error) {}
+      applyPaperViewMode(mode);
+      dom.paperViewMode.open = false;
+    });
+  }
+  document.addEventListener("click", (event) => {
+    if (!dom.paperViewMode.open) return;
+    if (!dom.paperViewMode.contains(event.target)) dom.paperViewMode.open = false;
+  });
+}
+
 async function initializeApplication() {
   setupThemeToggle();
   setupViewMode();
+  setupPaperViewMode();
   setupReadingFontSize();
   setupReadingLineHeight();
   setupReadingWorkbenchResize();
@@ -5169,18 +7237,37 @@ async function initializeApplication() {
     button.addEventListener("click", () => showView("upload"));
   }
   dom.topUploadButton.addEventListener("click", () => showView("upload"));
+  for (const modeControl of dom.uploadDestinationModes) {
+    modeControl.addEventListener("change", () => {
+      applicationState.uploadFolderMode = modeControl.value === "selected" ? "selected" : "auto";
+      dom.uploadFolderSelect.disabled = applicationState.uploadFolderMode !== "selected";
+      if (applicationState.uploadFolderMode === "selected") dom.uploadFolderSelect.focus();
+    });
+  }
+  dom.uploadFolderSelect.addEventListener("change", () => {
+    applicationState.selectedUploadFolderId = dom.uploadFolderSelect.value;
+  });
   dom.chooseFilesButton.addEventListener("click", (event) => {
     event.stopPropagation();
-    dom.fileInput.click();
+    if (validateUploadDestination()) dom.fileInput.click();
   });
-  dom.dropZone.addEventListener("click", () => dom.fileInput.click());
+  dom.chooseFolderButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void chooseImportFolder();
+  });
+  dom.dropZone.addEventListener("click", () => {
+    if (validateUploadDestination()) dom.fileInput.click();
+  });
   dom.dropZone.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      dom.fileInput.click();
+      if (validateUploadDestination()) dom.fileInput.click();
     }
   });
   dom.fileInput.addEventListener("change", () => void uploadFiles(dom.fileInput.files));
+  dom.folderInput.addEventListener("change", () => {
+    void uploadFiles(dom.folderInput.files, { preserveRelativePaths: true });
+  });
   dom.choosePaperFileButton.addEventListener("click", () => dom.paperFileInput.click());
   dom.paperFileInput.addEventListener("change", () => {
     void uploadPaperFile(dom.paperFileInput.files?.[0]);
@@ -5215,17 +7302,38 @@ async function initializeApplication() {
   dom.newFolderButton.addEventListener("click", () => {
     void createLibraryFolder();
   });
+  dom.batchSelectButton.addEventListener("click", () => {
+    setLibraryBatchMode(!applicationState.libraryBatchMode);
+  });
+  dom.batchSelectAllButton.addEventListener("click", toggleSelectAllVisibleItems);
+  dom.batchMoveButton.addEventListener("click", () => {
+    openMoveFolderDialog(getSelectedLibraryItems());
+  });
+  dom.batchDeleteButton.addEventListener("click", () => {
+    void deleteSelectedLibraryItems();
+  });
+  dom.batchCancelButton.addEventListener("click", () => setLibraryBatchMode(false));
   dom.topicCreateForm.addEventListener("submit", (event) => {
     event.preventDefault();
     void createLearningTopic().catch((error) => showToast(error.message));
   });
   dom.readerBackButton.addEventListener("click", () => void returnToPreviousPage("library"));
-  for (const button of dom.readerModeSwitch.querySelectorAll("button")) {
+  for (const button of [dom.documentChapterPrevious, dom.documentChapterFooterPrevious]) {
     button.addEventListener("click", () => {
-      setReaderMode(button.dataset.readerMode);
+      void renderDocumentChapter(applicationState.activeDocumentChapterIndex - 1, {
+        scrollToTop: true,
+        saveProgress: true,
+      });
     });
   }
-  dom.widePreviewButton.addEventListener("click", toggleWidePreview);
+  for (const button of [dom.documentChapterNext, dom.documentChapterFooterNext]) {
+    button.addEventListener("click", () => {
+      void renderDocumentChapter(applicationState.activeDocumentChapterIndex + 1, {
+        scrollToTop: true,
+        saveProgress: true,
+      });
+    });
+  }
   dom.readerCategory.addEventListener("change", async () => {
     if (!applicationState.selectedDocument) return;
     try {
@@ -5316,14 +7424,30 @@ async function initializeApplication() {
   });
   dom.moveFolderClose.addEventListener("click", () => dom.moveFolderDialog.close());
   dom.moveFolderCancel.addEventListener("click", () => dom.moveFolderDialog.close());
-  dom.moveFolderDialog.addEventListener("cancel", () => {
-    applicationState.pendingMoveItem = null;
-    applicationState.selectedMoveFolderId = "";
+  dom.moveFolderSearch.addEventListener("input", () => {
+    applicationState.moveFolderSearchQuery = dom.moveFolderSearch.value;
+    renderMoveFolderTree();
   });
-  dom.moveFolderDialog.addEventListener("close", () => {
-    applicationState.pendingMoveItem = null;
-    applicationState.selectedMoveFolderId = "";
+  dom.moveFolderCollapseAll.addEventListener("click", () => {
+    applicationState.moveFolderExpandedIds.clear();
+    renderMoveFolderTree();
   });
+  dom.moveFolderNew.addEventListener("click", openMoveFolderCreatePanel);
+  dom.moveFolderCreateCancel.addEventListener("click", () => {
+    dom.moveFolderCreatePanel.hidden = true;
+  });
+  dom.moveFolderCreateConfirm.addEventListener("click", () => void createMoveFolderFromDialog());
+  dom.moveFolderCreateName.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void createMoveFolderFromDialog();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      dom.moveFolderCreatePanel.hidden = true;
+    }
+  });
+  dom.moveFolderDialog.addEventListener("cancel", resetMoveFolderDialogState);
+  dom.moveFolderDialog.addEventListener("close", resetMoveFolderDialogState);
   dom.moveFolderForm.addEventListener("submit", (event) => {
     event.preventDefault();
     void confirmMoveKnowledgeItem();
