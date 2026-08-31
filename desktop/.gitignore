@@ -1,0 +1,10 @@
+# 本地知识库正文、附件、备份及私密配置均不得提交到 Git。
+data/
+.env.local
+node_modules/
+.npm-cache/
+.test-data/
+work/
+output/
+release/
+npm-debug.log*

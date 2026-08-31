@@ -1,0 +1,22 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #14211c;
+  background: #f5f1e8;
+}
+
+body { width: 320px; margin: 0; }
+main { padding: 22px; }
+header { border-bottom: 1px solid #c8c1b5; padding-bottom: 16px; }
+header span { color: #165dff; font: 11px Consolas, monospace; letter-spacing: 0.12em; }
+h1 { margin: 8px 0 0; font-size: 22px; }
+section { padding-top: 18px; }
+p { color: #57625d; font-size: 13px; line-height: 1.6; }
+label { display: block; margin-bottom: 7px; font-size: 12px; font-weight: 700; }
+input { box-sizing: border-box; width: 100%; border: 1px solid #a9b0ac; border-radius: 4px; padding: 10px; font: 20px Consolas, monospace; letter-spacing: 0.32em; text-align: center; }
+button { width: 100%; margin-top: 10px; border: 1px solid #165dff; border-radius: 4px; padding: 10px 12px; color: white; background: #165dff; font-weight: 700; cursor: pointer; }
+button.secondary { color: #165dff; background: transparent; }
+button.text-button { border: 0; color: #6b746f; background: transparent; font-weight: 500; }
+button:disabled { cursor: wait; opacity: 0.55; }
+.connection { margin-top: 0; color: #167447; font-weight: 700; }
+#status { min-height: 38px; margin: 16px 0 0; border-top: 1px solid #ddd6ca; padding-top: 12px; }

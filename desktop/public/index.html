@@ -1,0 +1,1033 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="知序电脑本地知识库：文档上传、正文提取、自动分类和全文检索。"
+    />
+    <title>知序｜本地知识库</title>
+    <script src="/theme-init.js?v=20260818-2"></script>
+    <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260829-1" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" aria-label="返回知序首页">
+          <span class="brand-mark">知</span>
+          <span><strong>知序</strong><small>LOCAL KNOWLEDGE</small></span>
+        </a>
+
+        <nav aria-label="主导航">
+          <button class="nav-item is-active" data-view="activity" type="button">
+            <span>ACTIVITY</span><strong>学习统计</strong>
+          </button>
+          <button class="nav-item" data-view="library" type="button">
+            <span>LIBRARY</span><strong>文档库</strong>
+          </button>
+          <button class="nav-item" data-view="papers" type="button">
+            <span>PAPERS</span><strong>论文库</strong>
+          </button>
+          <button class="nav-item" data-view="topics" type="button" hidden>
+            <span>TOPICS</span><strong>专题</strong>
+          </button>
+          <button class="nav-item" data-view="cards" type="button" hidden>
+            <span>REVIEW</span><strong>卡片复习</strong>
+          </button>
+          <button class="nav-item" data-view="ai" type="button" hidden>
+            <span>ASK</span><strong>资料问答</strong>
+          </button>
+          <button class="nav-item" data-view="github" type="button">
+            <span>PROJECTS</span><strong>项目研读</strong>
+          </button>
+          <button class="nav-item" data-view="upload" type="button">
+            <span>IMPORT</span><strong>导入内容</strong>
+          </button>
+          <button class="nav-item" data-view="storage" type="button">
+            <span>LOCAL</span><strong>本地存储</strong>
+          </button>
+        </nav>
+
+        <div class="local-status">
+          <span class="status-dot"></span>
+          <div><strong>仅本机可访问</strong><small>SQLite + 本地附件</small></div>
+        </div>
+
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切换深色或浅色模式">
+          <span class="theme-toggle-dot" aria-hidden="true"></span>
+          <span id="theme-toggle-label">深色模式</span>
+        </button>
+      </aside>
+
+      <button
+        class="floating-reader-back"
+        id="floating-reader-back"
+        type="button"
+        aria-label="返回上一个页面"
+        title="返回上一个页面"
+        hidden
+      >
+        <span aria-hidden="true">←</span><strong>返回</strong>
+      </button>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="page-eyebrow">LEARNING ACTIVITY</p>
+            <h1 id="page-title">学习与资料统计</h1>
+          </div>
+          <div class="topbar-actions">
+            <span class="database-state">本地数据库已连接</span>
+            <button class="primary-button" id="top-upload-button" type="button">
+              上传文档
+            </button>
+          </div>
+        </header>
+
+        <section class="view" id="library-view">
+          <div class="library-hero">
+            <div>
+              <h2>文件与网页文章，都汇入同一座知识库。</h2>
+            </div>
+            <div class="hero-stat">
+              <span id="document-total">0</span>
+              <small>全部内容</small>
+            </div>
+          </div>
+
+          <div class="library-toolbar">
+            <label class="search-field">
+              <span>全文检索</span>
+              <input
+                id="search-input"
+                type="search"
+                placeholder="搜索标题、摘要或正文……"
+                autocomplete="off"
+              />
+            </label>
+            <div class="library-filters">
+              <button class="secondary-button" id="new-folder-button" type="button">
+                ＋ 新建文件夹
+              </button>
+              <button class="secondary-button" id="batch-select-button" type="button" aria-pressed="false">
+                批量整理
+              </button>
+              <details class="view-mode" id="view-mode">
+                <summary class="view-mode-button" aria-label="切换文档列表视图">
+                  <span>视图</span>
+                  <strong id="view-mode-label">网格</strong>
+                  <span class="view-mode-caret" aria-hidden="true">⌄</span>
+                </summary>
+                <div class="view-mode-menu" role="menu">
+                  <button
+                    type="button"
+                    class="view-mode-option"
+                    data-view-mode="grid"
+                    role="menuitemradio"
+                    aria-checked="true"
+                  >
+                    <span class="view-mode-check" aria-hidden="true">✓</span>
+                    <span>网格</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="view-mode-option"
+                    data-view-mode="list"
+                    role="menuitemradio"
+                    aria-checked="false"
+                  >
+                    <span class="view-mode-check" aria-hidden="true">✓</span>
+                    <span>列表</span>
+                  </button>
+                </div>
+              </details>
+              <button
+                class="favorite-filter-button"
+                id="favorite-filter-button"
+                type="button"
+                aria-pressed="false"
+              >
+                ☆ 只看重点
+              </button>
+            </div>
+          </div>
+
+          <div class="library-batch-toolbar" id="library-batch-toolbar" hidden>
+            <strong id="batch-selection-count">已选择 0 项</strong>
+            <span>勾选需要统一整理的文档或网页文章</span>
+            <div>
+              <button class="secondary-button" id="batch-select-all-button" type="button">选择当前页全部</button>
+              <button class="primary-button" id="batch-move-button" type="button" disabled>移动所选内容</button>
+              <button class="danger-button" id="batch-delete-button" type="button" disabled>删除所选内容</button>
+              <button class="secondary-button" id="batch-cancel-button" type="button">退出批量整理</button>
+            </div>
+          </div>
+
+          <nav class="folder-breadcrumbs" id="folder-breadcrumbs" aria-label="文件夹路径"></nav>
+          <div class="folder-grid" id="folder-grid"></div>
+          <div class="document-grid" id="document-grid"></div>
+          <div class="empty-state" id="empty-state" hidden>
+            <span>00</span>
+            <h3>文档库还是空的</h3>
+            <p>上传第一份文件或解析一篇公开网页，系统会自动提取正文并分类保存。</p>
+            <button class="primary-button" data-open-upload type="button">开始导入</button>
+          </div>
+        </section>
+
+        <section class="view" id="topics-view">
+          <div class="topics-hero">
+            <div>
+              <p class="eyebrow">LEARNING PATHS</p>
+              <h2>把零散资料，组织成可以持续推进的学习专题。</h2>
+              <p>一个专题可以同时收纳文档、网页文章和论文，适合长期追踪某条技术路线。</p>
+            </div>
+            <form class="topic-create-form" id="topic-create-form">
+              <label>专题名称<input id="topic-name-input" maxlength="80" required placeholder="例如：LLM Agent 工程化" /></label>
+              <label>专题说明<textarea id="topic-description-input" rows="3" maxlength="2000" placeholder="记录目标、边界或学习顺序"></textarea></label>
+              <button class="primary-button" type="submit">新建专题</button>
+            </form>
+          </div>
+          <div class="topic-layout">
+            <div class="topic-grid" id="topic-grid"></div>
+            <section class="topic-detail" id="topic-detail">
+              <p class="eyebrow">TOPIC CONTENTS</p>
+              <h2 id="topic-detail-title">选择一个专题</h2>
+              <p id="topic-detail-description">专题内的文档、文章和论文会显示在这里。</p>
+              <div class="topic-item-list" id="topic-item-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="cards-view">
+          <div class="cards-hero">
+            <div>
+              <p class="eyebrow">SOURCE CARDS</p>
+              <h2>把真正读过的原文，变成每天能复习的知识。</h2>
+              <p>每张卡片都保留来源、原文选区和返回入口；只有你确认后才会进入复习队列。</p>
+            </div>
+            <div class="cards-stat-grid">
+              <div><strong id="card-due-total">0</strong><span>今日待复习</span></div>
+              <div><strong id="card-total">0</strong><span>全部卡片</span></div>
+            </div>
+          </div>
+          <section class="review-session" id="review-session">
+            <header><div><p class="eyebrow">TODAY REVIEW</p><h2>今日复习</h2></div><span id="review-position">0 / 0</span></header>
+            <div class="review-empty" id="review-empty">今天没有到期卡片，可以放心去阅读新内容。</div>
+            <article class="review-card" id="review-card" hidden>
+              <span id="review-card-type"></span>
+              <h3 id="review-question"></h3>
+              <button class="primary-button" id="review-reveal-button" type="button">显示答案</button>
+              <div class="review-answer" id="review-answer" hidden>
+                <p id="review-answer-text"></p>
+                <blockquote id="review-source-quote"></blockquote>
+                <button class="text-button" id="review-open-source" type="button">返回原文</button>
+              </div>
+              <div class="review-rating" id="review-rating" hidden>
+                <button data-review-rating="again" type="button">忘记</button>
+                <button data-review-rating="hard" type="button">困难</button>
+                <button data-review-rating="good" type="button">记得</button>
+                <button data-review-rating="easy" type="button">熟练</button>
+              </div>
+            </article>
+          </section>
+          <div class="card-library-heading"><div><span>ALL CARDS</span><h2>全部知识卡片</h2></div></div>
+          <div class="knowledge-card-grid" id="knowledge-card-grid"></div>
+          <div class="empty-state" id="knowledge-card-empty" hidden>
+            <span>00</span><h3>还没有知识卡片</h3>
+            <p>打开任意文档、文章或论文，选中原文后点击“制作知识卡片”。</p>
+          </div>
+        </section>
+
+        <section class="view" id="ai-view">
+          <div class="ai-hero">
+            <div>
+              <p class="eyebrow">GROUNDED AI</p>
+              <h2>回看每一次阅读中的问题，也可以比较多份资料。</h2>
+              <p>单篇追问在文档、文章或论文阅读页内完成；这里集中查询历史记录，并发起两至六份资料的横向比较。</p>
+            </div>
+            <div class="ai-privacy-note">
+              <strong id="ai-status-label">正在检查 AI 配置…</strong>
+              <span>只有点击“开始分析”后，所选资料的相关片段才会发送到 DeepSeek；API Key 始终留在本机服务端。</span>
+            </div>
+          </div>
+          <section class="ai-history-panel">
+            <header>
+              <div><p class="eyebrow">QUESTION HISTORY</p><h2>问答记录</h2></div>
+              <label>搜索记录<input id="ai-history-search" type="search" placeholder="搜索问题或回答……" /></label>
+            </header>
+            <div class="ai-history-layout">
+              <div class="ai-history-list" id="ai-history-list"></div>
+              <article class="ai-history-detail" id="ai-history-detail">
+                <p>选择左侧记录，查看完整对话和引用来源。</p>
+              </article>
+            </div>
+          </section>
+          <div class="ai-compare-heading"><p class="eyebrow">MULTI-SOURCE COMPARE</p><h2>多资料比较</h2></div>
+          <div class="ai-workspace">
+            <aside class="ai-source-panel">
+              <header><div><span>01</span><h3>选择资料</h3></div><small id="ai-source-count">0 / 6</small></header>
+              <label class="ai-source-search">筛选资料<input id="ai-source-search" type="search" placeholder="按标题或分类筛选…" /></label>
+              <div class="ai-source-list" id="ai-source-list"></div>
+            </aside>
+            <form class="ai-question-panel" id="ai-question-form">
+              <header><span>02</span><h3>提出比较问题</h3></header>
+              <div class="ai-mode-switch" id="ai-mode-switch">
+                <button class="is-active" data-ai-mode="compare" type="button">多资料对比</button>
+              </div>
+              <label>你想弄清楚什么？<textarea id="ai-question-input" rows="6" maxlength="4000" placeholder="例如：这几份资料对 Agent 记忆机制的定义、实现路线和局限分别是什么？" required></textarea></label>
+              <button class="primary-button" id="ai-submit-button" type="submit">开始比较</button>
+              <small>回答会标注 [S1-C1] 形式的出处；没有通过原文核验的引用不会展示。</small>
+            </form>
+          </div>
+          <section class="ai-answer-panel" id="ai-answer-panel" hidden>
+            <header><div><p class="eyebrow">VERIFIED ANSWER</p><h2>有出处的回答</h2></div><span id="ai-answer-stats"></span></header>
+            <div class="ai-evidence-warning" id="ai-evidence-warning" hidden>证据不足：以下内容没有获得足够的可核验引文，请把它当作线索而不是结论。</div>
+            <div class="ai-answer-text" id="ai-answer-text"></div>
+            <div class="ai-citation-list" id="ai-citation-list"></div>
+          </section>
+        </section>
+
+        <section class="view" id="papers-view">
+          <div class="paper-library-hero">
+            <div>
+              <p class="eyebrow">DAILY CLASSIC PAPER</p>
+              <h2>每天认识一篇经典论文，按技术脉络打牢基础。</h2>
+              <p>
+                推荐从神经语言模型、Transformer、RAG、向量检索和 Agent 基础论文开始，
+                再逐步延伸到深度学习与生物学经典工作。
+              </p>
+            </div>
+            <div class="hero-stat">
+              <span id="paper-total">0</span>
+              <small>已选论文</small>
+            </div>
+          </div>
+          <div class="paper-library-heading">
+            <div>
+              <span>SELECTED PAPERS</span>
+              <h2>我的论文</h2>
+            </div>
+            <div class="paper-library-actions">
+              <details class="view-mode" id="paper-view-mode">
+                <summary class="view-mode-button" aria-label="切换论文库展示视图">
+                  <span>视图</span>
+                  <strong id="paper-view-mode-label">网格</strong>
+                  <span class="view-mode-caret" aria-hidden="true">⌄</span>
+                </summary>
+                <div class="view-mode-menu" role="menu">
+                  <button
+                    type="button"
+                    class="view-mode-option"
+                    data-paper-view-mode="grid"
+                    role="menuitemradio"
+                    aria-checked="true"
+                  >
+                    <span class="view-mode-check" aria-hidden="true">✓</span>
+                    <span>网格</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="view-mode-option"
+                    data-paper-view-mode="list"
+                    role="menuitemradio"
+                    aria-checked="false"
+                  >
+                    <span class="view-mode-check" aria-hidden="true">✓</span>
+                    <span>列表</span>
+                  </button>
+                </div>
+              </details>
+              <button class="secondary-button" data-open-upload type="button">导入论文</button>
+              <button class="secondary-button" id="check-paper-reminder-button" type="button">
+                查看今日推荐
+              </button>
+            </div>
+          </div>
+          <div class="paper-source-tabs" id="paper-source-tabs">
+            <button class="is-active" data-paper-source="" type="button">全部</button>
+            <button data-paper-source="classic" type="button">每日经典</button>
+            <button data-paper-source="manual" type="button">手动导入</button>
+          </div>
+          <div class="paper-grid" id="paper-grid"></div>
+          <div class="empty-state" id="paper-empty-state">
+            <span>00</span>
+            <h3>论文库还没有内容</h3>
+            <p>选择今日经典论文，或从本地文件和公开链接导入自己的论文。</p>
+            <button class="primary-button" id="empty-paper-reminder-button" type="button">
+              查看今日推荐
+            </button>
+          </div>
+        </section>
+
+        <section class="view is-active" id="activity-view">
+          <div class="activity-hero">
+            <div>
+              <p class="eyebrow">LEARNING ACTIVITY</p>
+              <h2>看见阅读节奏，也看见知识库怎样增长。</h2>
+              <p id="activity-tracking-note">阅读时长从启用本页后按活跃阅读时间精确记录。</p>
+            </div>
+            <div class="activity-range" role="group" aria-label="统计时间范围">
+              <button data-activity-days="7" type="button">7 天</button>
+              <button class="is-active" data-activity-days="30" type="button">30 天</button>
+              <button data-activity-days="90" type="button">90 天</button>
+              <button data-activity-days="365" type="button">1 年</button>
+            </div>
+          </div>
+
+          <div class="activity-summary-grid" aria-label="学习活动摘要">
+            <article><span>READING TIME</span><strong id="activity-reading-time">0 分钟</strong><small>活跃阅读时长</small></article>
+            <article><span>READ ITEMS</span><strong id="activity-read-items">0</strong><small>阅读过的内容</small></article>
+            <article><span>ACTIVE DAYS</span><strong id="activity-active-days">0</strong><small>有阅读记录的天数</small></article>
+            <article><span>NEW ITEMS</span><strong id="activity-new-items">0</strong><small>新增文档、文章与论文</small></article>
+          </div>
+
+          <div class="activity-chart-grid">
+            <article class="activity-panel activity-panel-wide">
+              <header><div><span>READING TREND</span><h3>阅读活跃度</h3></div><small>活跃分钟 / 时间节点</small></header>
+              <div class="activity-chart" id="activity-reading-chart" role="img" aria-label="阅读活跃度折线图"></div>
+            </article>
+            <article class="activity-panel">
+              <header><div><span>PROGRESS</span><h3>阅读进度分布</h3></div><small>当前状态</small></header>
+              <div class="activity-progress-chart" id="activity-progress-chart"></div>
+            </article>
+          </div>
+
+          <article class="activity-panel activity-library-panel">
+            <header><div><span>KNOWLEDGE LIBRARY</span><h3>资料库内容统计</h3></div><small>一级目录含全部后代，二级目录缩进显示</small></header>
+            <div class="activity-library-chart" id="activity-library-chart" role="img" aria-label="论文库与文档库一级、二级目录内容统计"></div>
+          </article>
+
+          <article class="activity-panel activity-github-panel">
+            <header>
+              <div><span>GITHUB PROJECTS</span><h3>项目研读统计</h3></div>
+              <small>收藏规模 · 活跃度 · 技术语言</small>
+            </header>
+            <div class="activity-github-statistics" id="activity-github-statistics"></div>
+          </article>
+
+          <div class="activity-list-grid">
+            <article class="activity-panel">
+              <header><div><span>CONTINUE READING</span><h3>最近阅读</h3></div><small>点击继续</small></header>
+              <div class="activity-list" id="activity-recent-reading"></div>
+            </article>
+            <article class="activity-panel">
+              <header><div><span>RECENTLY ADDED</span><h3>最近入库</h3></div><small>按导入时间</small></header>
+              <div class="activity-list" id="activity-recent-imports"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="github-view">
+          <div class="github-study-hero">
+            <div class="github-study-intro">
+              <p class="eyebrow">GITHUB 项目研读</p>
+              <h2>把一个开源项目，读成一份可复用的技术档案。</h2>
+              <p>提交公开 GitHub 仓库链接，知序会读取项目元数据、README、目录树和关键配置，再从定位、架构、核心模块、执行链路与学习价值等角度形成研读报告。</p>
+            </div>
+            <form class="github-study-form" id="github-project-form">
+              <label for="github-project-url">GitHub 项目链接</label>
+              <div>
+                <input id="github-project-url" type="url" inputmode="url" autocomplete="url" required placeholder="https://github.com/owner/repository" />
+                <button class="primary-button" id="github-analyze-button" type="submit">深度研读</button>
+              </div>
+              <small id="github-analysis-status" aria-live="polite">仅支持公开仓库；若已配置 DeepSeek，公开仓库片段会用于分析，结果保存在本机。</small>
+            </form>
+          </div>
+
+          <div class="github-study-layout">
+            <aside class="github-project-index">
+              <header>
+                <div><span>项目研读档案</span><h3>项目档案</h3></div>
+                <strong id="github-project-count">0</strong>
+              </header>
+              <div class="github-project-list" id="github-project-list"></div>
+            </aside>
+            <article class="github-project-detail" id="github-project-detail">
+              <div class="github-project-empty">
+                <span>GH</span>
+                <h3>从一个值得拆解的项目开始</h3>
+                <p>粘贴仓库主页链接。完成后，这里会呈现项目画像、代码结构、关键模块、运行链路、优势风险与建议学习路径。</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="upload-view">
+          <div class="import-method-grid">
+          <div class="document-import-stack">
+          <div class="upload-layout import-method-card">
+            <div class="upload-intro">
+              <p class="eyebrow">DOCUMENT INBOX</p>
+              <h2>导入本地文档</h2>
+              <p>上传文件或整个文件夹，原件与目录层级均保存在本机。</p>
+              <p class="import-support-summary">
+                PDF、Office、图片、文本与代码文件 · 单文件最大
+                <strong id="upload-limit-label">200 MB</strong>
+              </p>
+              <fieldset class="upload-destination" id="upload-destination-controls">
+                <legend>保存到知识库</legend>
+                <label>
+                  <input type="radio" name="upload-destination-mode" value="auto" checked />
+                  <span><strong>系统自动识别</strong><small>按内容分类；导入文件夹时保留原目录层级</small></span>
+                </label>
+                <label>
+                  <input type="radio" name="upload-destination-mode" value="selected" />
+                  <span><strong>指定知识库目录</strong><small>由你选择保存位置</small></span>
+                </label>
+                <select id="upload-folder-select" disabled aria-label="选择知识库目录">
+                  <option value="">请选择目录</option>
+                </select>
+              </fieldset>
+            </div>
+            <div class="drop-zone" id="drop-zone" tabindex="0" role="button">
+              <input id="file-input" type="file" multiple hidden />
+              <input id="folder-input" type="file" webkitdirectory multiple hidden />
+              <span class="drop-number">01</span>
+              <h3>拖放或选择文件</h3>
+              <p>支持多选，也可整批导入文件夹</p>
+              <div class="drop-actions">
+                <button class="secondary-button" id="choose-files-button" type="button">
+                  选择文档
+                </button>
+                <button class="secondary-button" id="choose-folder-button" type="button">
+                  选择文件夹
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="upload-batch-progress" id="upload-batch-progress" role="status" aria-live="polite" hidden>
+            <div>
+              <strong id="upload-batch-label">准备导入</strong>
+              <span id="upload-batch-count">0 / 0</span>
+            </div>
+            <div class="upload-batch-track" aria-hidden="true">
+              <span id="upload-batch-bar"></span>
+            </div>
+            <details class="upload-duplicate-summary" id="upload-duplicate-summary" hidden>
+              <summary id="upload-duplicate-label">重复文件未导入</summary>
+              <ul id="upload-duplicate-list"></ul>
+            </details>
+          </div>
+          <div class="upload-queue" id="upload-queue"></div>
+          </div>
+          <div class="paper-import-layout import-method-card">
+            <div class="paper-import-copy">
+              <p class="eyebrow">PAPER INBOX</p>
+              <h2>导入论文</h2>
+              <p>选择本地 PDF，或粘贴 arXiv、论文 PDF 与公开论文链接。</p>
+              <input id="paper-file-input" type="file" accept="application/pdf,.pdf" hidden />
+              <button class="secondary-button" id="choose-paper-file-button" type="button">选择本地 PDF</button>
+            </div>
+            <form class="paper-import-form" id="paper-import-form">
+              <label for="paper-url-input">论文链接</label>
+              <textarea id="paper-url-input" rows="3" placeholder="https://arxiv.org/abs/1706.03762"></textarea>
+              <button class="primary-button" id="import-paper-url-button" type="submit">识别并导入论文</button>
+              <small>公开 PDF 缓存到本机；论文网页保存标题、摘要和正文。</small>
+            </form>
+          </div>
+          <div class="article-import-layout import-method-card">
+            <div class="article-import-copy">
+              <p class="eyebrow">ARTICLE INBOX</p>
+              <h2>保存网页文章</h2>
+              <p>提取公开网页、微信公众号文章或教程目录的可读正文。</p>
+            </div>
+            <form class="article-import-form" id="article-import-form">
+              <label for="article-url-input">文章或教程系列链接</label>
+              <textarea
+                id="article-url-input"
+                placeholder="文章、Docsify 根链接，或 GitHub 的 tree/main/docs 目录"
+                rows="3"
+              ></textarea>
+              <button class="primary-button" id="parse-article-button" type="submit">
+                解析并保存
+              </button>
+              <small>教程目录会先展示章节预览，再按顺序批量导入。</small>
+              <div class="docsify-preview" id="docsify-preview" hidden></div>
+            </form>
+          </div>
+          <div class="article-import-layout video-import-layout import-method-card">
+            <div class="article-import-copy">
+              <p class="eyebrow">VIDEO INBOX</p>
+              <h2>视频转图文 PDF</h2>
+              <p>读取公开视频字幕并提取 PPT、流程图和关键演示画面。</p>
+            </div>
+            <form class="article-import-form" id="video-import-form">
+              <label for="video-url-input">公开视频链接</label>
+              <textarea
+                id="video-url-input"
+                placeholder="https://www.youtube.com/watch?v=... 或 https://www.bilibili.com/video/BV..."
+                rows="3"
+              ></textarea>
+              <button class="primary-button" id="import-video-button" type="submit">
+                整理为图文 PDF 并保存
+              </button>
+              <small>无字幕时可转本地语音；临时文件会在任务结束后清理。</small>
+            </form>
+          </div>
+          </div>
+        </section>
+
+        <section class="view" id="storage-view">
+          <div class="storage-hero">
+            <p class="eyebrow">LOCAL FIRST</p>
+            <h2>数据由你掌控，网络只在需要 AI 时使用。</h2>
+            <p>
+              数据库、正文索引、原始文件和备份全部保存在本项目的
+              <code>desktop/data</code> 目录。删除程序前请先复制该目录。
+            </p>
+          </div>
+          <div class="storage-grid">
+            <article>
+              <span>01</span>
+              <h3>SQLite 主数据库</h3>
+              <p>保存标题、分类、摘要、提取正文和完整性摘要。</p>
+            </article>
+            <article>
+              <span>02</span>
+              <h3>本地原始附件</h3>
+              <p>上传文件不进入云端数据库，可随时下载原件。</p>
+            </article>
+            <article>
+              <span>03</span>
+              <h3>每日自动备份</h3>
+              <p>每天第一次变更后生成完整数据库备份，默认保留30天。</p>
+              <button class="secondary-button" id="backup-button" type="button">
+                立即确认备份
+              </button>
+            </article>
+            <article class="browser-integration-card">
+              <span>04</span>
+              <h3>浏览器快速收藏</h3>
+              <p>安装本地 Chrome/Edge 扩展后，可收藏当前网页、链接或选中文字。</p>
+              <button class="secondary-button" id="browser-pairing-button" type="button">
+                生成配对码
+              </button>
+              <div class="browser-pairing-code" id="browser-pairing-code" hidden>
+                <strong>000000</strong>
+                <small>十分钟内在扩展中输入，仅可使用一次。</small>
+              </div>
+              <div class="browser-client-list" id="browser-client-list"></div>
+            </article>
+            <article class="import-job-card">
+              <span>05</span>
+              <h3>后台导入任务</h3>
+              <p>浏览器收藏、OCR、视频字幕和图文 PDF 共用此任务中心；失败任务可在这里重试。</p>
+              <button class="secondary-button" id="refresh-import-jobs" type="button">
+                刷新任务状态
+              </button>
+              <div class="import-job-toolbar">
+                <label>
+                  显示
+                  <select id="import-job-filter">
+                    <option value="priority">重点任务</option>
+                    <option value="active">处理中</option>
+                    <option value="attention">需要处理</option>
+                    <option value="completed">已完成</option>
+                    <option value="video">视频</option>
+                    <option value="ocr">OCR</option>
+                    <option value="all">全部历史</option>
+                  </select>
+                </label>
+                <button class="text-button" id="show-import-job-history" type="button">
+                  查看全部历史
+                </button>
+              </div>
+              <small class="import-job-summary" id="import-job-summary"></small>
+              <div class="import-job-list" id="import-job-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="reader" id="reader" hidden aria-live="polite">
+          <header class="reader-header">
+            <button class="back-button" id="reader-back-button" type="button">
+              ← 返回文档库
+            </button>
+            <div class="reader-header-actions">
+              <div class="reader-mode-switch" id="reader-mode-switch" hidden>
+                <span class="is-active" aria-current="page">HTML 阅读</span>
+                <a
+                  id="original-document-link"
+                  href="#"
+                  target="_blank"
+                  rel="noopener"
+                >
+                  ↗ 新标签页查看原版
+                </a>
+              </div>
+              <button class="secondary-button" id="document-ai-button" type="button">用 AI 追问</button>
+              <a class="primary-button" id="download-link" href="#">下载原文件</a>
+            </div>
+          </header>
+          <div class="reader-layout">
+            <article class="reader-article">
+              <p class="eyebrow" id="reader-meta"></p>
+              <h1 id="reader-title"></h1>
+              <p class="reader-summary" id="reader-summary"></p>
+              <nav class="document-chapter-navigation" id="document-chapter-navigation" aria-label="文档章节翻页" hidden>
+                <button id="document-chapter-previous" type="button">← 上一章</button>
+                <div>
+                  <span id="document-chapter-counter"></span>
+                  <strong id="document-chapter-title"></strong>
+                </div>
+                <button id="document-chapter-next" type="button">下一章 →</button>
+              </nav>
+              <div class="readable-content" id="reader-content"></div>
+              <nav class="document-chapter-footer" id="document-chapter-footer" aria-label="文档章节翻页" hidden>
+                <button id="document-chapter-footer-previous" type="button">← 上一章</button>
+                <span id="document-chapter-footer-counter"></span>
+                <button id="document-chapter-footer-next" type="button">下一章 →</button>
+              </nav>
+            </article>
+            <aside class="reader-aside">
+              <label>
+                <span>文档分类</span>
+                <select id="reader-category"></select>
+              </label>
+              <dl>
+                <div><dt>原始文件</dt><dd id="reader-file-name"></dd></div>
+                <div><dt>文件大小</dt><dd id="reader-file-size"></dd></div>
+                <div><dt>提取状态</dt><dd id="reader-status"></dd></div>
+                <div><dt>OCR 状态</dt><dd id="reader-ocr-status">不需要</dd></div>
+                <div><dt>分类方式</dt><dd id="reader-source"></dd></div>
+              </dl>
+              <button class="secondary-button" id="document-ocr-button" type="button" hidden>
+                执行 OCR
+              </button>
+            </aside>
+          </div>
+        </section>
+
+        <section class="article-reader" id="article-reader" hidden>
+          <header class="reader-header">
+            <button class="back-button" id="article-reader-back-button" type="button">
+              ← 返回文档库
+            </button>
+            <div class="reader-header-actions">
+              <div class="article-translation-tools" id="article-translation-tools" hidden>
+                <span id="article-translation-status"></span>
+                <div class="article-translation-progress" id="article-translation-progress" hidden aria-label="文章翻译进度">
+                  <span id="article-translation-progress-bar"></span>
+                </div>
+                <button class="secondary-button" id="article-translation-request" type="button">
+                  加入 Codex 翻译
+                </button>
+                <div class="article-language-switch" id="article-language-switch" hidden>
+                  <button data-article-language-mode="translation" type="button">中文译文</button>
+                  <button data-article-language-mode="original" type="button">英文原文</button>
+                  <button data-article-language-mode="bilingual" type="button">双语对照</button>
+                </div>
+              </div>
+              <button class="secondary-button" id="article-ai-button" type="button">用 AI 追问</button>
+              <a class="secondary-button" id="article-source-link" href="#" target="_blank" rel="noopener noreferrer">查看原网页</a>
+            </div>
+          </header>
+          <article class="article-reading-page">
+            <header>
+              <p class="eyebrow" id="article-reader-meta"></p>
+              <h1 id="article-reader-title"></h1>
+              <p class="article-reader-original-title" id="article-reader-original-title" hidden></p>
+              <p id="article-reader-summary"></p>
+            </header>
+            <div class="article-prose" id="article-reader-content"></div>
+          </article>
+        </section>
+
+        <section class="paper-reader" id="paper-reader" hidden>
+          <header class="reader-header">
+            <button class="back-button" id="paper-reader-back-button" type="button">
+              ← 返回论文库
+            </button>
+            <div class="paper-reader-links">
+              <button class="secondary-button" id="paper-ai-button" type="button">用 AI 追问</button>
+              <a
+                class="secondary-button"
+                id="paper-source-link"
+                href="#"
+                target="_blank"
+                rel="noopener noreferrer"
+              >arXiv 原文</a>
+              <a
+                class="secondary-button"
+                id="paper-pdf-link"
+                href="#"
+                target="_blank"
+                rel="noopener noreferrer"
+              >英文 PDF</a>
+              <a
+                class="secondary-button"
+                id="paper-video-link"
+                href="#"
+                target="_blank"
+                rel="noopener noreferrer"
+                hidden
+              >中文视频</a>
+            </div>
+          </header>
+          <article class="paper-reading-page">
+            <header>
+              <p class="eyebrow" id="paper-reader-meta"></p>
+              <h1 id="paper-reader-title"></h1>
+              <p class="paper-reader-original-title" id="paper-reader-original-title"></p>
+              <p class="paper-reader-abstract" id="paper-reader-abstract"></p>
+            </header>
+            <div class="paper-reading-status" id="paper-reading-status"></div>
+            <div class="paper-prose" id="paper-reader-content"></div>
+          </article>
+        </section>
+
+        <aside class="reading-toc-sidebar" id="reading-toc-sidebar" hidden>
+          <header class="reading-toc-sidebar-header">
+            <div>
+              <span>CONTENTS</span>
+              <strong id="reading-toc-title">文章目录</strong>
+            </div>
+            <button
+              id="reading-toc-toggle"
+              type="button"
+              aria-expanded="true"
+              aria-label="收起文章目录"
+              title="收起文章目录"
+            >⇤</button>
+          </header>
+          <nav class="reading-toc" id="reading-toc" aria-label="当前内容目录"></nav>
+        </aside>
+
+        <button
+          class="reading-toc-reopen"
+          id="reading-toc-reopen"
+          type="button"
+          hidden
+          aria-controls="reading-toc-sidebar"
+          aria-expanded="false"
+          aria-label="展开文章目录"
+          title="展开文章目录"
+        >⇥</button>
+
+        <button
+          class="reading-workbench-toggle"
+          id="reading-workbench-toggle"
+          type="button"
+          hidden
+          aria-controls="reading-workbench"
+          aria-expanded="true"
+          aria-label="展开阅读工作台"
+          title="展开阅读工作台"
+        >
+          ⇤
+        </button>
+
+        <aside class="reading-workbench" id="reading-workbench" hidden>
+          <div
+            class="reading-workbench-resize-handle"
+            id="reading-workbench-resize-handle"
+            role="separator"
+            tabindex="0"
+            aria-label="拖动或使用左右方向键调整阅读工作台宽度"
+            aria-orientation="vertical"
+            title="拖动调整侧栏宽度"
+          ></div>
+          <header class="reading-workbench-header">
+            <div>
+              <span>READING DESK</span>
+              <strong>阅读工作台</strong>
+            </div>
+            <button id="reading-workbench-close" type="button" aria-label="收起阅读工作台">
+              ⇥
+            </button>
+          </header>
+
+          <div class="reading-workbench-tabs" id="reading-workbench-tabs">
+            <button class="is-active" data-workbench-tab="tools" type="button">阅读工具</button>
+            <button data-workbench-tab="ai" type="button">AI 问答</button>
+          </div>
+
+          <div id="reading-tools-panel">
+
+          <div class="reading-progress-block">
+            <div class="reading-progress-heading">
+              <label for="reading-status-select">阅读状态</label>
+              <span id="reading-progress-label">0%</span>
+            </div>
+            <select id="reading-status-select">
+              <option value="unread">未读</option>
+              <option value="reading">阅读中</option>
+              <option value="completed">已读完</option>
+            </select>
+            <div class="reading-progress-track" aria-hidden="true">
+              <span id="reading-progress-bar"></span>
+            </div>
+            <div class="reading-font-control" aria-label="阅读正文字号">
+              <span>正文字号</span>
+              <button id="reading-font-decrease" type="button" aria-label="减小字号">−</button>
+              <strong id="reading-font-label">18px</strong>
+              <button id="reading-font-increase" type="button" aria-label="增大字号">＋</button>
+              <button id="reading-font-reset" type="button">默认</button>
+            </div>
+            <div class="reading-line-control" aria-label="阅读正文行距">
+              <span>正文行距</span>
+              <button id="reading-line-decrease" type="button" aria-label="减小行距">−</button>
+              <strong id="reading-line-label">1.9</strong>
+              <button id="reading-line-increase" type="button" aria-label="增大行距">＋</button>
+              <button id="reading-line-reset" type="button">默认</button>
+            </div>
+          </div>
+
+          <section class="reading-tool-section">
+            <header><span>01</span><h3>高亮与批注</h3></header>
+            <p class="reading-tool-hint" id="reading-selection-hint">
+              在正文中选中文字，然后选择一种高亮颜色。
+            </p>
+            <div class="highlight-palette" id="highlight-palette">
+              <button data-highlight-color="yellow" type="button" aria-label="黄色高亮"></button>
+              <button data-highlight-color="green" type="button" aria-label="绿色高亮"></button>
+              <button data-highlight-color="blue" type="button" aria-label="蓝色高亮"></button>
+              <button data-highlight-color="red" type="button" aria-label="红色高亮"></button>
+            </div>
+            <button class="reading-card-button" id="reading-card-button" type="button">
+              ＋ 将选区制作成卡片
+            </button>
+            <div class="annotation-list" id="annotation-list"></div>
+          </section>
+
+          <section class="reading-tool-section reading-organization-section">
+            <header><span>02</span><h3>标签与专题</h3></header>
+            <form class="reading-tag-form" id="reading-tag-form">
+              <input id="reading-tag-input" maxlength="40" placeholder="添加标签" />
+              <button type="submit">添加</button>
+            </form>
+            <div class="reading-chip-list" id="reading-tag-list"></div>
+            <div class="reading-topic-picker">
+              <select id="reading-topic-select"><option value="">选择专题</option></select>
+              <button id="reading-topic-add" type="button">加入</button>
+            </div>
+            <div class="reading-chip-list" id="reading-topic-list"></div>
+          </section>
+
+          <section class="reading-tool-section reading-notes-section">
+            <header><span>03</span><h3>我的笔记</h3></header>
+            <textarea
+              id="reading-note-input"
+              rows="9"
+              placeholder="记录理解、疑问、结论或下一步行动……"
+            ></textarea>
+            <small id="reading-note-status">自动保存到本地</small>
+          </section>
+          </div>
+
+          <section class="reading-ai-panel" id="reading-ai-panel" hidden>
+            <div class="reading-ai-source">
+              <span>当前资料</span>
+              <strong id="reading-ai-source-title">—</strong>
+            </div>
+            <div class="reading-ai-selection" id="reading-ai-selection" hidden>
+              <header><span>当前选区</span><button id="reading-ai-clear-selection" type="button">清除</button></header>
+              <blockquote id="reading-ai-selection-text"></blockquote>
+            </div>
+            <div class="reading-ai-messages" id="reading-ai-messages">
+              <p class="reading-ai-empty">你可以询问整篇内容，也可以先在正文中选择术语、句子或段落再提问。</p>
+            </div>
+            <form class="reading-ai-form" id="reading-ai-form">
+              <label for="reading-ai-input">针对当前资料提问</label>
+              <textarea id="reading-ai-input" rows="5" maxlength="4000" required placeholder="例如：这里的状态机应该如何理解？"></textarea>
+              <button class="primary-button" id="reading-ai-submit" type="submit">发送问题</button>
+              <small id="reading-ai-status">回答和引用会保存到本机问答记录。</small>
+            </form>
+          </section>
+        </aside>
+
+        <dialog class="knowledge-card-dialog" id="knowledge-card-dialog">
+          <form method="dialog" id="knowledge-card-form">
+            <header>
+              <div><p class="eyebrow">SOURCE CARD</p><h2>制作知识卡片</h2></div>
+              <button class="dialog-close-button" id="knowledge-card-cancel" type="button" aria-label="取消">×</button>
+            </header>
+            <label>卡片类型
+              <select id="knowledge-card-type">
+                <option value="concept">概念卡</option><option value="principle">原理卡</option>
+                <option value="compare">对比卡</option><option value="engineering">工程卡</option>
+                <option value="qa">问答卡</option><option value="formula">公式卡</option>
+                <option value="fault">故障卡</option>
+              </select>
+            </label>
+            <label>正面问题<input id="knowledge-card-question" maxlength="500" required placeholder="例如：LangChain 造成不必要复杂性的主要原因是什么？" /></label>
+            <label>背面答案<textarea id="knowledge-card-answer" rows="6" maxlength="8000" required></textarea></label>
+            <label>来源原文<textarea id="knowledge-card-source" rows="5" readonly></textarea></label>
+            <footer>
+              <button class="secondary-button" id="knowledge-card-cancel-footer" type="button">取消</button>
+              <button class="primary-button" type="submit">保存并加入今日复习</button>
+            </footer>
+          </form>
+        </dialog>
+
+        <dialog class="move-folder-dialog" id="move-folder-dialog">
+          <form method="dialog" class="move-folder-shell" id="move-folder-form">
+            <header>
+              <div>
+                <p class="eyebrow" id="move-folder-eyebrow">MOVE CONTENT</p>
+                <h2 id="move-folder-title">移动到文件夹</h2>
+                <p id="move-folder-item-title"></p>
+              </div>
+              <button class="dialog-close-button" id="move-folder-close" type="button" aria-label="取消移动">×</button>
+            </header>
+            <div class="move-folder-toolbar">
+              <label class="move-folder-search">
+                <span>查找目录</span>
+                <input id="move-folder-search" type="search" placeholder="输入文件夹名称或路径" autocomplete="off" />
+              </label>
+              <button class="secondary-button" id="move-folder-collapse-all" type="button">全部折叠</button>
+              <button class="secondary-button" id="move-folder-new" type="button">＋ 新建文件夹</button>
+            </div>
+            <div class="move-folder-create-panel" id="move-folder-create-panel" hidden>
+              <p id="move-folder-create-parent">在文档库根目录下创建</p>
+              <div>
+                <input id="move-folder-create-name" type="text" maxlength="100" placeholder="新文件夹名称" autocomplete="off" />
+                <button class="primary-button" id="move-folder-create-confirm" type="button">创建</button>
+                <button class="secondary-button" id="move-folder-create-cancel" type="button">取消</button>
+              </div>
+            </div>
+            <div class="move-folder-options" id="move-folder-options" role="tree" aria-label="选择目标文件夹"></div>
+            <footer>
+              <button class="secondary-button" id="move-folder-cancel" type="button">取消</button>
+              <button class="primary-button" id="move-folder-confirm" type="submit" disabled>确认移动</button>
+            </footer>
+          </form>
+        </dialog>
+
+        <dialog class="paper-reminder-dialog" id="paper-reminder-dialog">
+          <div class="paper-reminder-shell">
+            <header>
+              <div>
+                <p class="eyebrow">TODAY'S CLASSIC PAPER</p>
+                <h2>今天的经典论文</h2>
+                <p>沿着基础技术路线每天认识一篇；确认后才会加入本地论文库。</p>
+              </div>
+              <button
+                class="dialog-close-button"
+                id="paper-reminder-close-button"
+                type="button"
+                aria-label="关闭，稍后再提醒"
+              >
+                ×
+              </button>
+            </header>
+            <div class="paper-candidate-grid" id="paper-candidate-grid"></div>
+            <footer>
+              <button class="secondary-button" id="paper-snooze-button" type="button">
+                明天再提醒
+              </button>
+              <button class="text-button" id="paper-dismiss-button" type="button">
+                今天不选
+              </button>
+            </footer>
+          </div>
+        </dialog>
+
+        <div class="toast" id="toast" hidden role="status"></div>
+      </main>
+    </div>
+    <script type="module" src="/app.js?v=20260819-2"></script>
+  </body>
+</html>
