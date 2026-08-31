@@ -34,6 +34,271 @@
   --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
 }
 
+/* 学习与资料活动仪表盘：以低饱和薄荷、纸张层次和紧凑图表形成清晰的数据总览。 */
+.activity-hero {
+  position: relative;
+  display: flex;
+  overflow: hidden;
+  align-items: end;
+  justify-content: space-between;
+  gap: 32px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  margin-top: 24px;
+  background:
+    radial-gradient(circle at 86% 18%, color-mix(in srgb, var(--cyan) 24%, transparent), transparent 31%),
+    linear-gradient(135deg, color-mix(in srgb, var(--paper-raised) 94%, var(--cyan)), var(--card-bg));
+  box-shadow: 0 20px 55px color-mix(in srgb, var(--ink) 7%, transparent);
+  padding: 34px 36px;
+}
+.activity-hero::after { position: absolute; inset: auto 0 0; height: 4px; background: linear-gradient(90deg, var(--cyan-strong) 0 34%, var(--blue) 34% 72%, var(--amber) 72%); content: ""; opacity: .78; }
+.activity-hero h2 { max-width: 820px; margin: 0; font-family: var(--serif); font-size: clamp(28px, 3.2vw, 44px); font-weight: 560; letter-spacing: -.05em; line-height: 1.16; }
+.activity-hero > div > p:last-child { max-width: 760px; margin: 16px 0 0; color: var(--ink-soft); line-height: 1.75; }
+.activity-range { display: flex; flex: 0 0 auto; overflow: hidden; border: 1px solid var(--line-dark); border-radius: 999px; background: color-mix(in srgb, var(--paper-raised) 80%, transparent); padding: 3px; }
+.activity-range button { min-width: 55px; border: 0; border-radius: 999px; background: transparent; cursor: pointer; padding: 9px 12px; color: var(--ink-soft); font-size: 11px; transition: background .18s ease, color .18s ease; }
+.activity-range button:hover { color: var(--ink); }
+.activity-range button.is-active { background: var(--ink); box-shadow: 0 5px 14px color-mix(in srgb, var(--ink) 18%, transparent); color: var(--paper-raised); }
+.activity-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 20px; }
+.activity-summary-grid article { position: relative; min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: var(--card-bg); box-shadow: 0 9px 28px color-mix(in srgb, var(--ink) 5%, transparent); padding: 22px 22px 20px; }
+.activity-summary-grid article::before { position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--cyan-strong); content: ""; }
+.activity-summary-grid article:nth-child(2)::before { background: var(--blue); }
+.activity-summary-grid article:nth-child(3)::before { background: var(--amber); }
+.activity-summary-grid article:nth-child(4)::before { background: color-mix(in srgb, var(--cyan-strong) 55%, var(--blue)); }
+.activity-summary-grid span, .activity-panel header span { color: var(--ink-soft); font-family: var(--mono); font-size: 9px; letter-spacing: .13em; }
+.activity-summary-grid strong { display: block; overflow: hidden; margin: 10px 0 5px; font-family: var(--serif); font-size: clamp(24px, 2.4vw, 34px); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.activity-summary-grid small { color: var(--ink-soft); font-size: 11px; }
+.activity-chart-grid, .activity-list-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(300px, .75fr); gap: 18px; margin-top: 18px; }
+.activity-list-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 54px; }
+.activity-panel { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: var(--card-bg); box-shadow: 0 12px 34px color-mix(in srgb, var(--ink) 5%, transparent); }
+.activity-panel > header { display: flex; align-items: end; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--paper-raised) 72%, transparent); padding: 19px 22px 17px; }
+.activity-panel h3 { margin: 5px 0 0; font-family: var(--serif); font-size: 22px; font-weight: 600; }
+.activity-panel header small { color: var(--ink-soft); font-size: 10px; text-align: right; }
+.activity-chart { min-height: 250px; padding: 12px 16px 4px; }
+.activity-chart svg { display: block; width: 100%; height: 250px; overflow: visible; }
+.activity-grid-line { stroke: var(--line); stroke-width: 1; }
+.activity-axis-label { fill: var(--ink-soft); font-family: var(--mono); font-size: 10px; }
+.activity-line-area { fill: color-mix(in srgb, var(--cyan) 18%, transparent); }
+.activity-line-path { fill: none; stroke: var(--cyan-strong); stroke-linecap: round; stroke-linejoin: round; stroke-width: 3; }
+.activity-progress-chart { display: grid; grid-template-columns: minmax(130px, .9fr) minmax(120px, 1fr); gap: 22px; align-items: center; min-height: 266px; padding: 30px 24px; }
+.activity-donut { display: grid; width: min(160px, 100%); aspect-ratio: 1; place-items: center; border-radius: 50%; box-shadow: 0 12px 28px color-mix(in srgb, var(--ink) 8%, transparent); }
+.activity-donut > span { display: grid; width: 64%; aspect-ratio: 1; place-content: center; border: 1px solid color-mix(in srgb, var(--line) 78%, transparent); border-radius: 50%; background: var(--paper-raised); text-align: center; }
+.activity-donut strong { font-family: var(--serif); font-size: 28px; }
+.activity-donut small { color: var(--ink-soft); font-size: 9px; }
+.activity-legend { display: grid; gap: 12px; }
+.activity-legend div { display: grid; grid-template-columns: 10px 1fr auto; gap: 9px; align-items: center; color: var(--ink-soft); font-size: 11px; }
+.activity-legend i { width: 8px; height: 8px; border-radius: 50%; }
+.activity-legend strong { color: var(--ink); font-family: var(--mono); }
+.activity-library-panel, .activity-github-panel { margin-top: 18px; }
+.activity-library-chart { padding: 18px 22px 24px; }
+.activity-library-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border-bottom: 1px solid var(--line); margin: -18px -22px 18px; background: var(--line); }
+.activity-library-summary > span { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; background: color-mix(in srgb, var(--paper-raised) 86%, transparent); padding: 15px 22px; }
+.activity-library-summary small { color: var(--ink-soft); font-size: 10px; }
+.activity-library-summary strong { font-family: var(--serif); font-size: 24px; font-weight: 600; }
+.activity-library-legend { display: flex; align-items: center; gap: 18px; padding: 0 0 15px; color: var(--ink-soft); font-size: 10px; }
+.activity-library-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.activity-library-legend i { width: 9px; height: 9px; border-radius: 3px; }
+.activity-library-legend small { margin-left: auto; }
+.activity-library-legend .is-document, .activity-library-track .is-document { background: var(--cyan-strong); }
+.activity-library-legend .is-article, .activity-library-track .is-article { background: var(--blue); }
+.activity-library-legend .is-paper, .activity-library-track .is-paper { background: var(--amber); }
+.activity-library-rows { display: grid; max-height: 520px; overflow-y: auto; border-top: 1px solid var(--line); }
+.activity-library-row { display: grid; grid-template-columns: minmax(150px, 1.1fr) minmax(180px, 3fr) minmax(118px, .8fr); gap: 18px; align-items: center; min-height: 56px; border-bottom: 1px solid var(--line); }
+.activity-library-row:last-child { border-bottom: 0; }
+.activity-library-row.is-level-2 { min-height: 49px; }
+.activity-library-label { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: center; min-width: 0; }
+.activity-library-label small { color: var(--ink-soft); font-family: var(--mono); font-size: 9px; }
+.activity-library-label strong { overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.activity-library-row.is-level-2 .activity-library-label { padding-left: 24px; }
+.activity-library-row.is-level-2 .activity-library-label strong { color: var(--ink-soft); font-weight: 550; }
+.activity-library-track { display: flex; height: 11px; overflow: hidden; border-radius: 999px; background: var(--line); }
+.activity-library-track i { display: block; height: 100%; min-width: 0; }
+.activity-library-value { display: grid; justify-items: end; gap: 3px; }
+.activity-library-value strong { font-family: var(--mono); font-size: 12px; }
+.activity-library-value small { color: var(--ink-soft); font-size: 9px; white-space: nowrap; }
+.activity-list { display: grid; }
+.activity-list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; border: 0; border-bottom: 1px solid var(--line); background: transparent; cursor: pointer; padding: 16px 22px; color: var(--ink); text-align: left; transition: background .16s ease, padding-left .16s ease; }
+.activity-list-item:last-child { border-bottom: 0; }
+.activity-list-item:hover { background: var(--quote-bg); padding-left: 26px; }
+.activity-list-main, .activity-list-detail { display: grid; min-width: 0; gap: 5px; }
+.activity-list-main strong { overflow: hidden; font-family: var(--serif); font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.activity-list-main small, .activity-list-detail small { color: var(--ink-soft); font-size: 10px; }
+.activity-list-detail { justify-items: end; }
+.activity-list-detail strong { font-family: var(--mono); font-size: 11px; }
+.activity-empty { margin: 0; padding: 34px 20px; color: var(--ink-soft); font-size: 12px; text-align: center; }
+
+/* 统计首页的 GitHub 项目概况。 */
+.activity-github-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
+.activity-github-summary > span { display: grid; gap: 4px; border-right: 1px solid var(--line); padding: 18px 22px; }
+.activity-github-summary > span:last-child { border-right: 0; }
+.activity-github-summary small { color: var(--ink-soft); font-family: var(--mono); font-size: 9px; letter-spacing: .1em; }
+.activity-github-summary strong { margin-top: 3px; font-family: var(--serif); font-size: 27px; font-weight: 600; }
+.activity-github-summary em { color: var(--ink-soft); font-size: 10px; font-style: normal; }
+.activity-github-body { display: grid; grid-template-columns: minmax(240px, .8fr) minmax(300px, 1.2fr); }
+.activity-github-body > section { min-width: 0; padding: 22px; }
+.activity-github-body > section + section { border-left: 1px solid var(--line); }
+.activity-github-body h4 { margin: 0 0 17px; font-family: var(--serif); font-size: 16px; font-weight: 600; }
+.activity-language-rows { display: grid; gap: 13px; }
+.activity-language-rows > div { display: grid; grid-template-columns: minmax(72px, .7fr) minmax(90px, 2fr) 26px; gap: 12px; align-items: center; font-size: 11px; }
+.activity-language-rows > div > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-language-rows i { display: block; height: 8px; overflow: hidden; border-radius: 999px; background: var(--line); }
+.activity-language-rows b { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--cyan-strong), var(--blue)); }
+.activity-language-rows strong { font-family: var(--mono); font-size: 10px; text-align: right; }
+.activity-github-recent > div { display: grid; }
+.activity-github-recent button { display: flex; align-items: center; justify-content: space-between; gap: 16px; border: 0; border-top: 1px solid var(--line); background: transparent; cursor: pointer; padding: 13px 2px; color: var(--ink); text-align: left; }
+.activity-github-recent button:last-child { padding-bottom: 0; }
+.activity-github-recent button:hover strong { color: var(--cyan-strong); }
+.activity-github-recent button span { display: grid; min-width: 0; gap: 4px; }
+.activity-github-recent button strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color .16s ease; }
+.activity-github-recent button small { color: var(--ink-soft); font-size: 9px; }
+.activity-github-recent button em { flex: 0 0 auto; color: var(--amber); font-family: var(--mono); font-size: 10px; font-style: normal; }
+.activity-github-empty { display: flex; align-items: center; justify-content: space-between; gap: 28px; padding: 28px 22px; }
+.activity-github-empty strong { font-family: var(--serif); font-size: 18px; }
+.activity-github-empty p { max-width: 720px; margin: 7px 0 0; color: var(--ink-soft); font-size: 12px; line-height: 1.7; }
+
+/* 项目研读：左侧项目索引，右侧是可追溯的长篇技术档案。 */
+.github-study-hero { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(380px, .85fr); gap: 42px; align-items: end; overflow: hidden; border: 1px solid var(--line); border-radius: 22px; margin-top: 24px; background: radial-gradient(circle at 92% 12%, color-mix(in srgb, var(--blue) 22%, transparent), transparent 34%), linear-gradient(135deg, var(--paper-raised), color-mix(in srgb, var(--quote-bg) 72%, var(--paper-raised))); box-shadow: 0 20px 55px color-mix(in srgb, var(--ink) 7%, transparent); padding: 38px; }
+.github-study-intro h2 { max-width: 760px; margin: 0; font-family: var(--serif); font-size: clamp(30px, 3.4vw, 48px); font-weight: 560; letter-spacing: -.05em; line-height: 1.15; }
+.github-study-intro > p:last-child { max-width: 760px; margin: 18px 0 0; color: var(--ink-soft); font-size: 13px; line-height: 1.85; }
+.github-study-form { display: grid; gap: 10px; border: 1px solid color-mix(in srgb, var(--line-dark) 76%, transparent); border-radius: 16px; background: color-mix(in srgb, var(--paper-raised) 87%, transparent); box-shadow: 0 14px 36px color-mix(in srgb, var(--ink) 7%, transparent); padding: 20px; }
+.github-study-form > label { font-size: 11px; font-weight: 700; }
+.github-study-form > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.github-study-form input { min-width: 0; border: 1px solid var(--line-dark); border-radius: 10px; background: var(--paper-raised); padding: 12px 13px; font-family: var(--mono); font-size: 11px; }
+.github-study-form button { border-radius: 10px; white-space: nowrap; }
+.github-study-form small { color: var(--ink-soft); font-size: 10px; line-height: 1.55; }
+.github-study-form small.is-error { color: var(--red); }
+.github-study-layout { display: grid; grid-template-columns: 310px minmax(0, 1fr); gap: 18px; align-items: start; margin-top: 18px; }
+.github-project-index, .github-project-detail { min-width: 0; border: 1px solid var(--line); border-radius: 18px; background: var(--card-bg); box-shadow: 0 12px 34px color-mix(in srgb, var(--ink) 5%, transparent); }
+.github-project-index { position: sticky; top: 18px; overflow: hidden; }
+.github-project-index > header { display: flex; align-items: end; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); padding: 19px 20px 16px; }
+.github-project-index > header span { color: var(--ink-soft); font-family: var(--mono); font-size: 9px; letter-spacing: .12em; }
+.github-project-index > header h3 { margin: 5px 0 0; font-family: var(--serif); font-size: 21px; }
+.github-project-index > header > strong { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 50%; background: var(--ink); color: var(--paper-raised); font-family: var(--mono); font-size: 11px; }
+.github-project-list { display: grid; max-height: calc(100vh - 255px); overflow-y: auto; }
+.github-project-index-item { display: grid; min-width: 0; gap: 9px; border: 0; border-bottom: 1px solid var(--line); background: transparent; cursor: pointer; padding: 17px 19px; color: var(--ink); text-align: left; transition: background .16s ease, box-shadow .16s ease; }
+.github-project-index-item:last-child { border-bottom: 0; }
+.github-project-index-item:hover { background: var(--quote-bg); }
+.github-project-index-item.is-active { background: color-mix(in srgb, var(--cyan) 13%, var(--paper-raised)); box-shadow: inset 4px 0 var(--cyan-strong); }
+.github-project-index-heading, .github-project-index-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+.github-project-index-heading strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.github-project-index-heading small { flex: 0 0 auto; color: var(--ink-soft); font-family: var(--mono); font-size: 8px; }
+.github-project-index-description { display: -webkit-box; overflow: hidden; color: var(--ink-soft); font-size: 10px; line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.github-project-index-footer { color: var(--ink-soft); font-size: 9px; }
+.github-project-index-footer time { font-family: var(--mono); }
+.github-project-list-empty { padding: 32px 20px; text-align: center; }
+.github-project-list-empty strong { font-family: var(--serif); }
+.github-project-list-empty p { margin: 9px 0 0; color: var(--ink-soft); font-size: 10px; line-height: 1.7; }
+.github-project-detail { overflow: hidden; margin-bottom: 54px; }
+.github-project-empty { display: grid; min-height: 420px; place-content: center; justify-items: center; padding: 50px; text-align: center; }
+.github-project-empty > span { display: grid; width: 68px; height: 68px; place-items: center; border: 1px solid var(--line-dark); border-radius: 22px; background: var(--quote-bg); color: var(--cyan-strong); font-family: var(--mono); font-size: 19px; }
+.github-project-empty h3 { margin: 22px 0 9px; font-family: var(--serif); font-size: 24px; }
+.github-project-empty p { max-width: 520px; margin: 0; color: var(--ink-soft); font-size: 12px; line-height: 1.8; }
+.github-project-loading { min-height: 360px; margin: 0; padding: 160px 40px; color: var(--ink-soft); text-align: center; }
+.github-detail-header { display: flex; align-items: start; justify-content: space-between; gap: 28px; padding: 30px 32px 24px; }
+.github-detail-header h2 { overflow-wrap: anywhere; margin: 2px 0 9px; font-family: var(--serif); font-size: clamp(27px, 3vw, 40px); font-weight: 600; letter-spacing: -.035em; }
+.github-detail-header > div > p:last-child { max-width: 800px; margin: 0; color: var(--ink-soft); font-size: 12px; line-height: 1.75; }
+.github-source-link { flex: 0 0 auto; border-radius: 999px; text-decoration: none; }
+.github-topic-list { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 32px 22px; }
+.github-topic-list span { border: 1px solid var(--line); border-radius: 999px; background: var(--quote-bg); padding: 5px 9px; color: var(--ink-soft); font-family: var(--mono); font-size: 8px; }
+.github-topic-list span.is-archived { border-color: color-mix(in srgb, var(--red) 48%, var(--line)); color: var(--red); }
+.github-detail-metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border-block: 1px solid var(--line); background: color-mix(in srgb, var(--paper-raised) 70%, transparent); }
+.github-detail-metrics > span { display: grid; min-width: 0; gap: 6px; border-right: 1px solid var(--line); padding: 16px 15px; }
+.github-detail-metrics > span:last-child { border-right: 0; }
+.github-detail-metrics small { color: var(--ink-soft); font-family: var(--mono); font-size: 8px; letter-spacing: .08em; }
+.github-detail-metrics strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.github-analysis-provenance { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--cyan) 10%, transparent); padding: 13px 32px; font-size: 10px; }
+.github-analysis-provenance span { color: var(--ink-soft); }
+.github-analysis-provenance p { width: 100%; margin: 0; color: var(--amber); }
+.github-report-section { padding: 28px 32px; }
+.github-report-section + .github-report-section { border-top: 1px solid var(--line); }
+.github-report-section > header span { color: var(--cyan-strong); font-family: var(--mono); font-size: 9px; letter-spacing: .12em; }
+.github-report-section > header h3 { margin: 6px 0 18px; font-family: var(--serif); font-size: 22px; font-weight: 600; }
+.github-report-section > p { margin: 0; color: var(--ink-soft); font-size: 12px; line-height: 1.9; }
+.github-report-section > p + p { margin-top: 12px; }
+.github-report-section > p.github-report-lead { color: var(--ink); font-family: var(--serif); font-size: 16px; line-height: 1.85; }
+.github-detail-card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
+.github-detail-card-grid article { border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--paper-raised) 76%, transparent); padding: 16px; }
+.github-detail-card-grid h4 { margin: 0 0 8px; font-size: 12px; }
+.github-detail-card-grid p { margin: 0; color: var(--ink-soft); font-size: 11px; line-height: 1.75; }
+.github-detail-card-grid small { display: block; border-top: 1px dashed var(--line); margin-top: 12px; padding-top: 9px; color: var(--ink-soft); font-size: 9px; line-height: 1.6; }
+.github-report-missing { grid-column: 1 / -1; margin: 0; color: var(--ink-soft); font-size: 11px; }
+.github-report-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; counter-reset: github-report-step; }
+.github-report-list li { position: relative; border-left: 2px solid var(--cyan); padding: 2px 0 2px 16px; color: var(--ink-soft); font-size: 11px; line-height: 1.75; }
+ol.github-report-list li { counter-increment: github-report-step; padding-left: 40px; }
+ol.github-report-list li::before { position: absolute; left: 13px; color: var(--cyan-strong); font-family: var(--mono); font-size: 9px; content: counter(github-report-step, decimal-leading-zero); }
+.github-report-list li.is-muted { color: var(--ink-soft); }
+.github-structure-tags { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 18px; }
+.github-structure-tags code { border: 1px solid var(--line); border-radius: 7px; background: var(--quote-bg); padding: 6px 8px; color: var(--ink); font-size: 9px; }
+.github-judgment-grid, .github-learning-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+.github-judgment-grid > .github-report-section, .github-learning-grid > .github-report-section { border-top: 0; }
+.github-judgment-grid > .github-report-section + .github-report-section, .github-learning-grid > .github-report-section + .github-report-section { border-left: 1px solid var(--line); }
+.github-judgment-grid > .github-report-section:last-child .github-report-list li { border-left-color: var(--red); }
+.github-report-evidence { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 20px; border-top: 1px solid var(--line); background: var(--quote-bg); padding: 18px 32px; color: var(--ink-soft); font-size: 9px; }
+.github-report-evidence strong { color: var(--ink); }
+.nav-item[hidden] { display: none; }
+
+@media (max-width: 1120px) {
+  .github-study-hero { grid-template-columns: 1fr; }
+  .github-study-layout { grid-template-columns: 270px minmax(0, 1fr); }
+  .github-detail-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .github-detail-metrics > span:nth-child(3) { border-right: 0; }
+  .github-detail-metrics > span:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
+}
+
+@media (max-width: 980px) {
+  .activity-chart-grid { grid-template-columns: 1fr; }
+  .activity-progress-chart { grid-template-columns: 160px minmax(120px, 1fr); }
+  .github-study-layout { grid-template-columns: 1fr; }
+  .github-project-index { position: static; }
+  .github-project-list { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 340px; }
+  .github-project-index-item:nth-child(odd) { border-right: 1px solid var(--line); }
+}
+
+@media (max-width: 760px) {
+  .activity-hero { align-items: stretch; flex-direction: column; border-radius: 17px; padding: 26px 24px; }
+  .activity-range { align-self: stretch; }
+  .activity-range button { flex: 1; }
+  .activity-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .activity-list-grid, .activity-github-body { grid-template-columns: 1fr; }
+  .activity-github-body > section + section { border-top: 1px solid var(--line); border-left: 0; }
+  .activity-github-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .activity-github-summary > span:nth-child(2) { border-right: 0; }
+  .activity-github-summary > span:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+  .activity-library-row { grid-template-columns: minmax(130px, 1fr) minmax(120px, 1.6fr) 74px; gap: 10px; }
+  .activity-library-value small { display: none; }
+  .github-study-hero { border-radius: 17px; padding: 27px 24px; }
+  .github-study-form > div { grid-template-columns: 1fr; }
+  .github-study-form button { width: 100%; }
+  .github-detail-header { align-items: stretch; flex-direction: column; padding: 25px 22px 20px; }
+  .github-source-link { align-self: start; }
+  .github-topic-list { padding-inline: 22px; }
+  .github-report-section { padding: 24px 22px; }
+  .github-detail-card-grid, .github-judgment-grid, .github-learning-grid { grid-template-columns: 1fr; }
+  .github-judgment-grid > .github-report-section + .github-report-section, .github-learning-grid > .github-report-section + .github-report-section { border-top: 1px solid var(--line); border-left: 0; }
+  .github-analysis-provenance, .github-report-evidence { padding-inline: 22px; }
+}
+
+@media (max-width: 480px) {
+  .activity-summary-grid, .activity-github-summary { grid-template-columns: 1fr; }
+  .activity-github-summary > span { border-right: 0; border-bottom: 1px solid var(--line); }
+  .activity-progress-chart { grid-template-columns: 1fr; justify-items: center; }
+  .activity-legend { width: 100%; }
+  .activity-list-item { gap: 10px; padding-inline: 14px; }
+  .activity-library-chart { padding-inline: 14px; }
+  .activity-library-summary { margin-inline: -14px; }
+  .activity-library-summary > span { align-items: flex-start; flex-direction: column; padding-inline: 14px; }
+  .activity-library-legend { flex-wrap: wrap; gap: 10px 14px; }
+  .activity-library-legend small { width: 100%; margin-left: 0; }
+  .activity-library-row { grid-template-columns: minmax(120px, 1.25fr) minmax(90px, 1fr) 38px; }
+  .activity-library-row.is-level-2 .activity-library-label { padding-left: 12px; }
+  .activity-github-empty { align-items: stretch; flex-direction: column; }
+  .github-project-list { grid-template-columns: 1fr; }
+  .github-project-index-item:nth-child(odd) { border-right: 0; }
+  .github-detail-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .github-detail-metrics > span:nth-child(3) { border-right: 1px solid var(--line); }
+  .github-detail-metrics > span:nth-child(even) { border-right: 0; }
+  .github-detail-metrics > span:nth-child(-n+4) { border-bottom: 1px solid var(--line); }
+}
+
 /* 深色主题：通过 html[data-theme="dark"] 启用，保持同一套编辑风版式。 */
 :root[data-theme="dark"] {
   --paper: #121817;

@@ -10,7 +10,7 @@
     <title>知序｜本地知识库</title>
     <script src="/theme-init.js?v=20260818-2"></script>
     <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
-    <link rel="stylesheet" href="/styles.css?v=20260819-2" />
+    <link rel="stylesheet" href="/styles.css?v=20260829-1" />
   </head>
   <body>
     <div class="app-shell">
@@ -21,7 +21,10 @@
         </a>
 
         <nav aria-label="主导航">
-          <button class="nav-item is-active" data-view="library" type="button">
+          <button class="nav-item is-active" data-view="activity" type="button">
+            <span>ACTIVITY</span><strong>学习统计</strong>
+          </button>
+          <button class="nav-item" data-view="library" type="button">
             <span>LIBRARY</span><strong>文档库</strong>
           </button>
           <button class="nav-item" data-view="papers" type="button">
@@ -33,8 +36,11 @@
           <button class="nav-item" data-view="cards" type="button" hidden>
             <span>REVIEW</span><strong>卡片复习</strong>
           </button>
-          <button class="nav-item" data-view="ai" type="button">
+          <button class="nav-item" data-view="ai" type="button" hidden>
             <span>ASK</span><strong>资料问答</strong>
+          </button>
+          <button class="nav-item" data-view="github" type="button">
+            <span>PROJECTS</span><strong>项目研读</strong>
           </button>
           <button class="nav-item" data-view="upload" type="button">
             <span>IMPORT</span><strong>导入内容</strong>
@@ -69,8 +75,8 @@
       <main class="main-content">
         <header class="topbar">
           <div>
-            <p class="eyebrow" id="page-eyebrow">DOCUMENT LIBRARY</p>
-            <h1 id="page-title">我的文档库</h1>
+            <p class="eyebrow" id="page-eyebrow">LEARNING ACTIVITY</p>
+            <h1 id="page-title">学习与资料统计</h1>
           </div>
           <div class="topbar-actions">
             <span class="database-state">本地数据库已连接</span>
@@ -80,7 +86,7 @@
           </div>
         </header>
 
-        <section class="view is-active" id="library-view">
+        <section class="view" id="library-view">
           <div class="library-hero">
             <div>
               <h2>文件与网页文章，都汇入同一座知识库。</h2>
@@ -352,6 +358,99 @@
             <button class="primary-button" id="empty-paper-reminder-button" type="button">
               查看今日推荐
             </button>
+          </div>
+        </section>
+
+        <section class="view is-active" id="activity-view">
+          <div class="activity-hero">
+            <div>
+              <p class="eyebrow">LEARNING ACTIVITY</p>
+              <h2>看见阅读节奏，也看见知识库怎样增长。</h2>
+              <p id="activity-tracking-note">阅读时长从启用本页后按活跃阅读时间精确记录。</p>
+            </div>
+            <div class="activity-range" role="group" aria-label="统计时间范围">
+              <button data-activity-days="7" type="button">7 天</button>
+              <button class="is-active" data-activity-days="30" type="button">30 天</button>
+              <button data-activity-days="90" type="button">90 天</button>
+              <button data-activity-days="365" type="button">1 年</button>
+            </div>
+          </div>
+
+          <div class="activity-summary-grid" aria-label="学习活动摘要">
+            <article><span>READING TIME</span><strong id="activity-reading-time">0 分钟</strong><small>活跃阅读时长</small></article>
+            <article><span>READ ITEMS</span><strong id="activity-read-items">0</strong><small>阅读过的内容</small></article>
+            <article><span>ACTIVE DAYS</span><strong id="activity-active-days">0</strong><small>有阅读记录的天数</small></article>
+            <article><span>NEW ITEMS</span><strong id="activity-new-items">0</strong><small>新增文档、文章与论文</small></article>
+          </div>
+
+          <div class="activity-chart-grid">
+            <article class="activity-panel activity-panel-wide">
+              <header><div><span>READING TREND</span><h3>阅读活跃度</h3></div><small>活跃分钟 / 时间节点</small></header>
+              <div class="activity-chart" id="activity-reading-chart" role="img" aria-label="阅读活跃度折线图"></div>
+            </article>
+            <article class="activity-panel">
+              <header><div><span>PROGRESS</span><h3>阅读进度分布</h3></div><small>当前状态</small></header>
+              <div class="activity-progress-chart" id="activity-progress-chart"></div>
+            </article>
+          </div>
+
+          <article class="activity-panel activity-library-panel">
+            <header><div><span>KNOWLEDGE LIBRARY</span><h3>资料库内容统计</h3></div><small>一级目录含全部后代，二级目录缩进显示</small></header>
+            <div class="activity-library-chart" id="activity-library-chart" role="img" aria-label="论文库与文档库一级、二级目录内容统计"></div>
+          </article>
+
+          <article class="activity-panel activity-github-panel">
+            <header>
+              <div><span>GITHUB PROJECTS</span><h3>项目研读统计</h3></div>
+              <small>收藏规模 · 活跃度 · 技术语言</small>
+            </header>
+            <div class="activity-github-statistics" id="activity-github-statistics"></div>
+          </article>
+
+          <div class="activity-list-grid">
+            <article class="activity-panel">
+              <header><div><span>CONTINUE READING</span><h3>最近阅读</h3></div><small>点击继续</small></header>
+              <div class="activity-list" id="activity-recent-reading"></div>
+            </article>
+            <article class="activity-panel">
+              <header><div><span>RECENTLY ADDED</span><h3>最近入库</h3></div><small>按导入时间</small></header>
+              <div class="activity-list" id="activity-recent-imports"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="github-view">
+          <div class="github-study-hero">
+            <div class="github-study-intro">
+              <p class="eyebrow">GITHUB 项目研读</p>
+              <h2>把一个开源项目，读成一份可复用的技术档案。</h2>
+              <p>提交公开 GitHub 仓库链接，知序会读取项目元数据、README、目录树和关键配置，再从定位、架构、核心模块、执行链路与学习价值等角度形成研读报告。</p>
+            </div>
+            <form class="github-study-form" id="github-project-form">
+              <label for="github-project-url">GitHub 项目链接</label>
+              <div>
+                <input id="github-project-url" type="url" inputmode="url" autocomplete="url" required placeholder="https://github.com/owner/repository" />
+                <button class="primary-button" id="github-analyze-button" type="submit">深度研读</button>
+              </div>
+              <small id="github-analysis-status" aria-live="polite">仅支持公开仓库；若已配置 DeepSeek，公开仓库片段会用于分析，结果保存在本机。</small>
+            </form>
+          </div>
+
+          <div class="github-study-layout">
+            <aside class="github-project-index">
+              <header>
+                <div><span>项目研读档案</span><h3>项目档案</h3></div>
+                <strong id="github-project-count">0</strong>
+              </header>
+              <div class="github-project-list" id="github-project-list"></div>
+            </aside>
+            <article class="github-project-detail" id="github-project-detail">
+              <div class="github-project-empty">
+                <span>GH</span>
+                <h3>从一个值得拆解的项目开始</h3>
+                <p>粘贴仓库主页链接。完成后，这里会呈现项目画像、代码结构、关键模块、运行链路、优势风险与建议学习路径。</p>
+              </div>
+            </article>
           </div>
         </section>
 

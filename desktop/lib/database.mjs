@@ -210,6 +210,42 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS paper_candidates_week_idx
     ON paper_candidates(week_key, status, created_at);
 
+  CREATE TABLE IF NOT EXISTS github_projects (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    repository TEXT NOT NULL,
+    full_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    url TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    primary_language TEXT NOT NULL DEFAULT 'Unknown',
+    languages_json TEXT NOT NULL DEFAULT '{}',
+    topics_json TEXT NOT NULL DEFAULT '[]',
+    stars INTEGER NOT NULL DEFAULT 0,
+    forks INTEGER NOT NULL DEFAULT 0,
+    watchers INTEGER NOT NULL DEFAULT 0,
+    open_issues INTEGER NOT NULL DEFAULT 0,
+    size_kb INTEGER NOT NULL DEFAULT 0,
+    license_name TEXT NOT NULL DEFAULT '',
+    archived INTEGER NOT NULL DEFAULT 0,
+    pushed_at TEXT,
+    latest_release_json TEXT,
+    contributors_json TEXT NOT NULL DEFAULT '[]',
+    structure_json TEXT NOT NULL DEFAULT '[]',
+    tree_truncated INTEGER NOT NULL DEFAULT 0,
+    readme_excerpt TEXT NOT NULL DEFAULT '',
+    important_files_json TEXT NOT NULL DEFAULT '[]',
+    analysis_json TEXT NOT NULL DEFAULT '{}',
+    analysis_source TEXT NOT NULL DEFAULT 'local',
+    analysis_warning TEXT NOT NULL DEFAULT '',
+    analyzed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS github_projects_updated_idx
+    ON github_projects(updated_at DESC);
+
   CREATE TABLE IF NOT EXISTS paper_week_status (
     week_key TEXT PRIMARY KEY,
     status TEXT NOT NULL DEFAULT 'pending'
@@ -233,6 +269,25 @@ database.exec(`
 
   CREATE INDEX IF NOT EXISTS reading_states_updated_idx
     ON reading_states(updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS reading_sessions (
+    id TEXT PRIMARY KEY,
+    target_type TEXT NOT NULL
+      CHECK(target_type IN ('document', 'article', 'paper')),
+    target_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    last_active_at TEXT NOT NULL,
+    ended_at TEXT,
+    active_seconds INTEGER NOT NULL DEFAULT 0,
+    progress_start REAL NOT NULL DEFAULT 0,
+    progress_end REAL NOT NULL DEFAULT 0
+  );
+
+  CREATE INDEX IF NOT EXISTS reading_sessions_active_idx
+    ON reading_sessions(last_active_at DESC);
+
+  CREATE INDEX IF NOT EXISTS reading_sessions_target_idx
+    ON reading_sessions(target_type, target_id, last_active_at DESC);
 
   CREATE TABLE IF NOT EXISTS reading_annotations (
     id TEXT PRIMARY KEY,
@@ -3289,6 +3344,571 @@ export function updateReadingState(targetType, targetId, changes) {
     note_text: requestedNoteText,
     updated_at: updatedAt,
   });
+}
+
+/**
+ * 创建一次阅读会话。会话时长由浏览器按活跃阅读时间累计提交。
+ *
+ * @param {string} targetType 阅读目标类型。
+ * @param {string} targetId 阅读目标 ID。
+ * @param {number} progressPercent 打开内容时的进度。
+ * @returns {Record<string, unknown> | null} 新会话；目标不存在时为空。
+ */
+export function startReadingSession(targetType, targetId, progressPercent = 0) {
+  if (!readingTargetExists(targetType, targetId)) return null;
+  const now = new Date().toISOString();
+  const normalizedProgress = Math.min(100, Math.max(0, Number(progressPercent) || 0));
+  const session = {
+    id: `reading_session_${crypto.randomUUID()}`,
+    targetType,
+    targetId,
+    startedAt: now,
+    lastActiveAt: now,
+    endedAt: null,
+    activeSeconds: 0,
+    progressStart: normalizedProgress,
+    progressEnd: normalizedProgress,
+  };
+  database.prepare(`
+    INSERT INTO reading_sessions(
+      id, target_type, target_id, started_at, last_active_at, ended_at,
+      active_seconds, progress_start, progress_end
+    ) VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?)
+  `).run(
+    session.id,
+    targetType,
+    targetId,
+    now,
+    now,
+    normalizedProgress,
+    normalizedProgress,
+  );
+  return session;
+}
+
+/**
+ * 幂等更新阅读会话。浏览器提交累计秒数，重复请求不会重复计时。
+ *
+ * @param {string} sessionId 阅读会话 ID。
+ * @param {Record<string, unknown>} changes 会话累计值。
+ * @returns {Record<string, unknown> | null} 最新会话；不存在时为空。
+ */
+export function updateReadingSession(sessionId, changes = {}) {
+  const existing = database.prepare("SELECT * FROM reading_sessions WHERE id = ? LIMIT 1").get(sessionId);
+  if (!existing) return null;
+  const activeSeconds = Math.min(
+    24 * 60 * 60,
+    Math.max(Number(existing.active_seconds) || 0, Math.floor(Number(changes.activeSeconds) || 0)),
+  );
+  const progressEnd = Math.min(
+    100,
+    Math.max(0, Number(changes.progressPercent ?? existing.progress_end) || 0),
+  );
+  const now = new Date().toISOString();
+  const endedAt = changes.ended ? (existing.ended_at || now) : existing.ended_at;
+  database.prepare(`
+    UPDATE reading_sessions
+    SET last_active_at = ?, ended_at = ?, active_seconds = ?, progress_end = ?
+    WHERE id = ?
+  `).run(now, endedAt, activeSeconds, progressEnd, sessionId);
+  return {
+    id: existing.id,
+    targetType: existing.target_type,
+    targetId: existing.target_id,
+    startedAt: existing.started_at,
+    lastActiveAt: now,
+    endedAt,
+    activeSeconds,
+    progressStart: Number(existing.progress_start) || 0,
+    progressEnd,
+  };
+}
+
+/**
+ * 将 ISO 时间归入本机日期。统计页面按用户所在电脑的自然日展示。
+ *
+ * @param {string} value ISO 时间。
+ * @returns {string} YYYY-MM-DD 日期键。
+ */
+function toLocalDateKey(value) {
+  const date = new Date(value);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * 生成连续的本机日期桶，确保没有活动的日期也会在图表中显示为零。
+ *
+ * @param {Date} startDate 起始日期。
+ * @param {number} days 天数。
+ * @returns {Array<Record<string, unknown>>} 连续日期桶。
+ */
+function createActivityDateBuckets(startDate, days) {
+  return Array.from({ length: days }, (_, index) => {
+    const date = new Date(startDate);
+    date.setDate(startDate.getDate() + index);
+    return {
+      date: toLocalDateKey(date.toISOString()),
+      activeSeconds: 0,
+      itemIds: new Set(),
+      documentCount: 0,
+      articleCount: 0,
+      paperCount: 0,
+    };
+  });
+}
+
+/** 安全读取 SQLite 中保存的 JSON 字段。 */
+function parseStoredJson(value, fallback) {
+  try {
+    return JSON.parse(String(value || ""));
+  } catch {
+    return fallback;
+  }
+}
+
+/** 将 GitHub 项目数据库行转换为浏览器字段。 */
+function mapGitHubProjectRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    owner: row.owner,
+    repository: row.repository,
+    fullName: row.full_name,
+    url: row.url,
+    description: row.description,
+    defaultBranch: row.default_branch,
+    primaryLanguage: row.primary_language,
+    languages: parseStoredJson(row.languages_json, {}),
+    topics: parseStoredJson(row.topics_json, []),
+    stars: Number(row.stars) || 0,
+    forks: Number(row.forks) || 0,
+    watchers: Number(row.watchers) || 0,
+    openIssues: Number(row.open_issues) || 0,
+    sizeKb: Number(row.size_kb) || 0,
+    licenseName: row.license_name,
+    archived: Boolean(row.archived),
+    pushedAt: row.pushed_at,
+    latestRelease: parseStoredJson(row.latest_release_json, null),
+    contributors: parseStoredJson(row.contributors_json, []),
+    structure: parseStoredJson(row.structure_json, []),
+    treeTruncated: Boolean(row.tree_truncated),
+    readmeExcerpt: row.readme_excerpt,
+    importantFiles: parseStoredJson(row.important_files_json, []),
+    analysis: parseStoredJson(row.analysis_json, {}),
+    analysisSource: row.analysis_source,
+    analysisWarning: row.analysis_warning,
+    analyzedAt: row.analyzed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** 将 GitHub 项目数据库行转换为左侧索引需要的轻量摘要。 */
+function mapGitHubProjectSummaryRow(row) {
+  if (!row) return null;
+  const analysis = parseStoredJson(row.analysis_json, {});
+  return {
+    id: row.id,
+    fullName: row.full_name,
+    url: row.url,
+    description: row.description,
+    analysisSummary: String(analysis.overview || ""),
+    primaryLanguage: row.primary_language,
+    stars: Number(row.stars) || 0,
+    forks: Number(row.forks) || 0,
+    archived: Boolean(row.archived),
+    pushedAt: row.pushed_at,
+    analysisSource: row.analysis_source,
+    analyzedAt: row.analyzed_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** 保存或刷新一个 GitHub 项目分析档案。 */
+export function upsertGitHubProject(project) {
+  const fullName = String(project.fullName || "").trim();
+  if (!fullName) throw new Error("GitHub 项目名称不能为空。");
+  const existing = database.prepare("SELECT id, created_at FROM github_projects WHERE full_name = ? COLLATE NOCASE").get(fullName);
+  const now = new Date().toISOString();
+  const projectId = existing?.id || `github_project_${crypto.randomUUID()}`;
+  database.prepare(`
+    INSERT INTO github_projects(
+      id, owner, repository, full_name, url, description, default_branch,
+      primary_language, languages_json, topics_json, stars, forks, watchers,
+      open_issues, size_kb, license_name, archived, pushed_at,
+      latest_release_json, contributors_json, structure_json, tree_truncated,
+      readme_excerpt, important_files_json, analysis_json, analysis_source,
+      analysis_warning, analyzed_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(full_name) DO UPDATE SET
+      owner = excluded.owner,
+      repository = excluded.repository,
+      url = excluded.url,
+      description = excluded.description,
+      default_branch = excluded.default_branch,
+      primary_language = excluded.primary_language,
+      languages_json = excluded.languages_json,
+      topics_json = excluded.topics_json,
+      stars = excluded.stars,
+      forks = excluded.forks,
+      watchers = excluded.watchers,
+      open_issues = excluded.open_issues,
+      size_kb = excluded.size_kb,
+      license_name = excluded.license_name,
+      archived = excluded.archived,
+      pushed_at = excluded.pushed_at,
+      latest_release_json = excluded.latest_release_json,
+      contributors_json = excluded.contributors_json,
+      structure_json = excluded.structure_json,
+      tree_truncated = excluded.tree_truncated,
+      readme_excerpt = excluded.readme_excerpt,
+      important_files_json = excluded.important_files_json,
+      analysis_json = excluded.analysis_json,
+      analysis_source = excluded.analysis_source,
+      analysis_warning = excluded.analysis_warning,
+      analyzed_at = excluded.analyzed_at,
+      updated_at = excluded.updated_at
+  `).run(
+    projectId,
+    String(project.owner || ""),
+    String(project.repository || ""),
+    fullName,
+    String(project.url || ""),
+    String(project.description || "").slice(0, 4000),
+    String(project.defaultBranch || "main"),
+    String(project.primaryLanguage || "Unknown"),
+    JSON.stringify(project.languages || {}),
+    JSON.stringify(project.topics || []),
+    Number(project.stars) || 0,
+    Number(project.forks) || 0,
+    Number(project.watchers) || 0,
+    Number(project.openIssues) || 0,
+    Number(project.sizeKb) || 0,
+    String(project.licenseName || ""),
+    project.archived ? 1 : 0,
+    project.pushedAt || null,
+    project.latestRelease ? JSON.stringify(project.latestRelease) : null,
+    JSON.stringify(project.contributors || []),
+    JSON.stringify(project.structure || []),
+    project.treeTruncated ? 1 : 0,
+    String(project.readmeExcerpt || "").slice(0, 100_000),
+    JSON.stringify(project.importantFiles || []),
+    JSON.stringify(project.analysis || {}),
+    String(project.analysisSource || "local"),
+    String(project.analysisWarning || "").slice(0, 2000),
+    now,
+    existing?.created_at || now,
+    now,
+  );
+  return getGitHubProject(projectId);
+}
+
+/** 读取一个 GitHub 项目分析档案。 */
+export function getGitHubProject(projectId) {
+  return mapGitHubProjectRow(
+    database.prepare("SELECT * FROM github_projects WHERE id = ? LIMIT 1").get(projectId),
+  );
+}
+
+/** 按最近分析时间返回 GitHub 项目档案。 */
+export function listGitHubProjects(limit = 100) {
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 100));
+  return database.prepare(`
+    SELECT id, full_name, url, description, primary_language, stars, forks,
+      archived, pushed_at, analysis_json, analysis_source, analyzed_at, updated_at
+    FROM github_projects
+    ORDER BY analyzed_at DESC
+    LIMIT ?
+  `).all(safeLimit).map(mapGitHubProjectSummaryRow);
+}
+
+/** 返回统计首页使用的 GitHub 项目数量、活跃度与主要语言。 */
+export function getGitHubProjectStatistics() {
+  const rows = database.prepare(`
+    SELECT id, full_name, primary_language, languages_json, stars, forks,
+      pushed_at, analyzed_at, analysis_source
+    FROM github_projects ORDER BY analyzed_at DESC
+  `).all();
+  const languageCounts = new Map();
+  let totalStars = 0;
+  let totalForks = 0;
+  const activeThreshold = new Date();
+  activeThreshold.setDate(activeThreshold.getDate() - 90);
+  let activeProjectCount = 0;
+  for (const row of rows) {
+    totalStars += Number(row.stars) || 0;
+    totalForks += Number(row.forks) || 0;
+    if (row.pushed_at && new Date(row.pushed_at) >= activeThreshold) activeProjectCount += 1;
+    const languages = parseStoredJson(row.languages_json, {});
+    const names = Object.keys(languages);
+    const primaryLanguage = row.primary_language && row.primary_language !== "Unknown"
+      ? row.primary_language
+      : names[0] || "未知";
+    languageCounts.set(primaryLanguage, (languageCounts.get(primaryLanguage) || 0) + 1);
+  }
+  return {
+    projectCount: rows.length,
+    activeProjectCount,
+    totalStars,
+    totalForks,
+    languageDistribution: [...languageCounts.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name))
+      .slice(0, 8),
+    recentProjects: rows.slice(0, 5).map((row) => ({
+      id: row.id,
+      fullName: row.full_name,
+      primaryLanguage: row.primary_language,
+      stars: Number(row.stars) || 0,
+      pushedAt: row.pushed_at,
+      analyzedAt: row.analyzed_at,
+      analysisSource: row.analysis_source,
+    })),
+  };
+}
+
+/**
+ * 返回学习统计页所需的阅读活动、进度分布和最近入库内容。
+ *
+ * @param {number} requestedDays 统计区间，仅允许 7、30、90、365 天。
+ * @returns {Record<string, unknown>} 活动仪表盘数据。
+ */
+export function getActivityDashboard(requestedDays = 30) {
+  const allowedDays = new Set([7, 30, 90, 365]);
+  const days = allowedDays.has(Number(requestedDays)) ? Number(requestedDays) : 30;
+  const startDate = new Date();
+  startDate.setHours(0, 0, 0, 0);
+  startDate.setDate(startDate.getDate() - days + 1);
+  const since = startDate.toISOString();
+  const until = new Date().toISOString();
+  const buckets = createActivityDateBuckets(startDate, days);
+  const bucketMap = new Map(buckets.map((bucket) => [bucket.date, bucket]));
+
+  const sessions = database.prepare(`
+    SELECT * FROM reading_sessions
+    WHERE last_active_at >= ?
+    ORDER BY last_active_at DESC
+  `).all(since);
+  for (const session of sessions) {
+    const bucket = bucketMap.get(toLocalDateKey(session.last_active_at));
+    if (!bucket) continue;
+    bucket.activeSeconds += Number(session.active_seconds) || 0;
+    bucket.itemIds.add(`${session.target_type}:${session.target_id}`);
+  }
+
+  const importRows = database.prepare(`
+    SELECT 'document' AS target_type, id AS target_id,
+      COALESCE(NULLIF(display_title, ''), title) AS title,
+      category, created_at, original_name AS source_label
+    FROM documents WHERE created_at >= ?
+    UNION ALL
+    SELECT 'article', id, COALESCE(NULLIF(display_title, ''), title),
+      category, created_at, source_type
+    FROM articles WHERE created_at >= ?
+    UNION ALL
+    SELECT 'paper', id, COALESCE(NULLIF(title_zh, ''), title),
+      category, created_at, source_label
+    FROM papers WHERE created_at >= ?
+    ORDER BY created_at DESC
+  `).all(since, since, since);
+  const stateRows = database.prepare(`
+    SELECT rs.target_type, rs.target_id, rs.reading_status, rs.progress_percent, rs.updated_at,
+      CASE rs.target_type
+        WHEN 'document' THEN COALESCE(NULLIF(d.display_title, ''), d.title)
+        WHEN 'article' THEN COALESCE(NULLIF(a.display_title, ''), a.title)
+        WHEN 'paper' THEN COALESCE(NULLIF(p.title_zh, ''), p.title)
+      END AS title,
+      CASE rs.target_type
+        WHEN 'document' THEN d.category
+        WHEN 'article' THEN a.category
+        WHEN 'paper' THEN p.category
+      END AS category
+    FROM reading_states rs
+    LEFT JOIN documents d ON rs.target_type = 'document' AND rs.target_id = d.id
+    LEFT JOIN articles a ON rs.target_type = 'article' AND rs.target_id = a.id
+    LEFT JOIN papers p ON rs.target_type = 'paper' AND rs.target_id = p.id
+    WHERE d.id IS NOT NULL OR a.id IS NOT NULL OR p.id IS NOT NULL
+    ORDER BY rs.updated_at DESC
+  `).all();
+  for (const row of stateRows) {
+    if (row.updated_at < since) continue;
+    const bucket = bucketMap.get(toLocalDateKey(row.updated_at));
+    bucket?.itemIds.add(`${row.target_type}:${row.target_id}`);
+  }
+  const sessionTotals = new Map();
+  for (const session of sessions) {
+    const key = `${session.target_type}:${session.target_id}`;
+    const current = sessionTotals.get(key) || { activeSeconds: 0, lastReadAt: session.last_active_at };
+    current.activeSeconds += Number(session.active_seconds) || 0;
+    if (session.last_active_at > current.lastReadAt) current.lastReadAt = session.last_active_at;
+    sessionTotals.set(key, current);
+  }
+  const recentReading = stateRows
+    .filter((row) => row.updated_at >= since || sessionTotals.has(`${row.target_type}:${row.target_id}`))
+    .map((row) => {
+      const session = sessionTotals.get(`${row.target_type}:${row.target_id}`);
+      return {
+        targetType: row.target_type,
+        targetId: row.target_id,
+        title: row.title,
+        category: row.category,
+        status: row.reading_status,
+        progressPercent: Number(row.progress_percent) || 0,
+        lastReadAt: session?.lastReadAt > row.updated_at ? session.lastReadAt : row.updated_at,
+        activeSeconds: session?.activeSeconds || 0,
+      };
+    })
+    .sort((left, right) => String(right.lastReadAt).localeCompare(String(left.lastReadAt)))
+    .slice(0, 12);
+
+  const progressDistribution = { unread: 0, reading: 0, almost: 0, completed: 0 };
+  for (const row of stateRows) {
+    const progress = Number(row.progress_percent) || 0;
+    if (row.reading_status === "completed" || progress >= 95) progressDistribution.completed += 1;
+    else if (progress >= 75) progressDistribution.almost += 1;
+    else if (progress > 0 || row.reading_status === "reading") progressDistribution.reading += 1;
+    else progressDistribution.unread += 1;
+  }
+  const activeStateItems = new Set(
+    stateRows.filter((row) => row.updated_at >= since).map((row) => `${row.target_type}:${row.target_id}`),
+  );
+  for (const session of sessions) activeStateItems.add(`${session.target_type}:${session.target_id}`);
+
+  /** folderRows 是文档库目录及其直接包含的文档、网页文章数量。 */
+  const folderRows = database.prepare(`
+    SELECT f.id, f.parent_id, f.name, f.sort_order,
+      SUM(CASE WHEN cf.target_type = 'document' THEN 1 ELSE 0 END) AS direct_document_count,
+      SUM(CASE WHEN cf.target_type = 'article' THEN 1 ELSE 0 END) AS direct_article_count
+    FROM folders f
+    LEFT JOIN content_folders cf
+      ON cf.folder_id = f.id AND cf.target_type IN ('document', 'article')
+    GROUP BY f.id
+    ORDER BY f.sort_order ASC, f.name COLLATE NOCASE ASC
+  `).all();
+  const folderById = new Map(folderRows.map((row) => [row.id, row]));
+  const childrenByParent = new Map();
+  for (const row of folderRows) {
+    const parentKey = row.parent_id || "";
+    if (!childrenByParent.has(parentKey)) childrenByParent.set(parentKey, []);
+    childrenByParent.get(parentKey).push(row);
+  }
+  const folderTotals = new Map();
+  /**
+   * 递归累计目录及全部后代的文档和网页文章数量。
+   *
+   * @param {string} folderId 文件夹 ID。
+   * @returns {{ documentCount: number, articleCount: number }} 目录子树合计。
+   */
+  function getFolderTotals(folderId) {
+    if (folderTotals.has(folderId)) return folderTotals.get(folderId);
+    const row = folderById.get(folderId);
+    const total = {
+      documentCount: Number(row?.direct_document_count) || 0,
+      articleCount: Number(row?.direct_article_count) || 0,
+    };
+    for (const child of childrenByParent.get(folderId) || []) {
+      const childTotal = getFolderTotals(child.id);
+      total.documentCount += childTotal.documentCount;
+      total.articleCount += childTotal.articleCount;
+    }
+    folderTotals.set(folderId, total);
+    return total;
+  }
+  /** visibleFolderRows 按一级、二级目录顺序展开；更深层内容计入二级祖先。 */
+  const visibleFolderRows = [];
+  for (const rootFolder of childrenByParent.get("") || []) {
+    const rootTotal = getFolderTotals(rootFolder.id);
+    visibleFolderRows.push({
+      id: rootFolder.id,
+      parentId: null,
+      name: rootFolder.name,
+      level: 1,
+      ...rootTotal,
+      itemCount: rootTotal.documentCount + rootTotal.articleCount,
+    });
+    for (const childFolder of childrenByParent.get(rootFolder.id) || []) {
+      const childTotal = getFolderTotals(childFolder.id);
+      visibleFolderRows.push({
+        id: childFolder.id,
+        parentId: rootFolder.id,
+        name: childFolder.name,
+        level: 2,
+        ...childTotal,
+        itemCount: childTotal.documentCount + childTotal.articleCount,
+      });
+    }
+  }
+  const libraryTotals = database.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM documents) AS document_count,
+      (SELECT COUNT(*) FROM articles) AS article_count,
+      (SELECT COUNT(*) FROM papers) AS paper_count,
+      (SELECT COUNT(*) FROM documents d
+        WHERE NOT EXISTS (
+          SELECT 1 FROM content_folders cf
+          WHERE cf.target_type = 'document' AND cf.target_id = d.id
+        )) AS unfiled_document_count,
+      (SELECT COUNT(*) FROM articles a
+        WHERE NOT EXISTS (
+          SELECT 1 FROM content_folders cf
+          WHERE cf.target_type = 'article' AND cf.target_id = a.id
+        )) AS unfiled_article_count
+  `).get();
+  const unfiledDocumentCount = Number(libraryTotals.unfiled_document_count) || 0;
+  const unfiledArticleCount = Number(libraryTotals.unfiled_article_count) || 0;
+  if (unfiledDocumentCount + unfiledArticleCount > 0) {
+    visibleFolderRows.push({
+      id: "unfiled",
+      parentId: null,
+      name: "未归档",
+      level: 1,
+      documentCount: unfiledDocumentCount,
+      articleCount: unfiledArticleCount,
+      itemCount: unfiledDocumentCount + unfiledArticleCount,
+    });
+  }
+
+  const trackingRow = database.prepare("SELECT MIN(started_at) AS started_at FROM reading_sessions").get();
+  return {
+    range: { days, since, until },
+    trackingStartedAt: trackingRow?.started_at || null,
+    summary: {
+      totalReadingSeconds: sessions.reduce((sum, session) => sum + (Number(session.active_seconds) || 0), 0),
+      readItemCount: activeStateItems.size,
+      activeDays: buckets.filter((bucket) => bucket.itemIds.size > 0).length,
+      newItemCount: importRows.length,
+    },
+    readingTrend: buckets.map((bucket) => ({
+      date: bucket.date,
+      activeSeconds: bucket.activeSeconds,
+      itemCount: bucket.itemIds.size,
+    })),
+    libraryComposition: {
+      documentCount: Number(libraryTotals.document_count) || 0,
+      articleCount: Number(libraryTotals.article_count) || 0,
+      paperCount: Number(libraryTotals.paper_count) || 0,
+      folders: visibleFolderRows,
+    },
+    githubStatistics: getGitHubProjectStatistics(),
+    progressDistribution: [
+      { key: "unread", label: "未开始", count: progressDistribution.unread },
+      { key: "reading", label: "阅读中", count: progressDistribution.reading },
+      { key: "almost", label: "接近完成", count: progressDistribution.almost },
+      { key: "completed", label: "已完成", count: progressDistribution.completed },
+    ],
+    recentReading,
+    recentImports: importRows.slice(0, 12).map((item) => ({
+      targetType: item.target_type,
+      targetId: item.target_id,
+      title: item.title,
+      category: item.category,
+      createdAt: item.created_at,
+      sourceLabel: item.source_label,
+    })),
+  };
 }
 
 /**

@@ -6,4 +6,5 @@ node_modules/
 .test-data/
 work/
 output/
+release/
 npm-debug.log*

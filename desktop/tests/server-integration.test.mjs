@@ -13,6 +13,33 @@ const integrationPort = 47829;
 const integrationBaseUrl = `http://127.0.0.1:${integrationPort}`;
 
 /**
+ * 学习统计是默认首页，资料库统计使用目录层级而非导入时间柱图。
+ */
+test("学习统计默认首页并展示资料库目录层级", () => {
+  const projectDirectory = path.resolve(import.meta.dirname, "..");
+  const pageSource = fs.readFileSync(path.join(projectDirectory, "public", "index.html"), "utf8");
+  const applicationSource = fs.readFileSync(path.join(projectDirectory, "public", "app.js"), "utf8");
+  const activityNavigationIndex = pageSource.indexOf('data-view="activity"');
+  const libraryNavigationIndex = pageSource.indexOf('data-view="library"');
+  assert.ok(activityNavigationIndex >= 0 && activityNavigationIndex < libraryNavigationIndex);
+  assert.match(pageSource, /class="nav-item is-active" data-view="activity"/);
+  assert.match(pageSource, /class="view is-active" id="activity-view"/);
+  assert.match(pageSource, /id="page-title">学习与资料统计/);
+  assert.match(pageSource, /id="activity-library-chart"/);
+  assert.match(pageSource, /data-view="ai" type="button" hidden/);
+  assert.match(pageSource, /data-view="github"/);
+  assert.match(pageSource, /id="github-view"/);
+  assert.match(pageSource, /id="github-project-form"/);
+  assert.match(pageSource, /id="activity-github-statistics"/);
+  assert.doesNotMatch(pageSource, /资料入库节奏/);
+  assert.match(applicationSource, /activeView: "activity"/);
+  assert.match(applicationSource, /function renderLibraryCompositionChart\(composition\)/);
+  assert.match(applicationSource, /function renderGitHubStatistics\(statistics\)/);
+  assert.match(applicationSource, /function analyzeGitHubProject\(\)/);
+  assert.doesNotMatch(applicationSource, /renderImportActivityChart/);
+});
+
+/**
  * 成功上传只保留短暂通知，失败状态仍由队列项承载。
  */
 test("上传成功后自动收起状态行且空队列不占版面", () => {
@@ -554,6 +581,61 @@ test("上传、分类、搜索、修改分类与下载原件", async () => {
     const statePayload = await stateResponse.json();
     assert.equal(statePayload.state.status, "reading");
     assert.equal(statePayload.state.progressPercent, 37.5);
+
+    /** readingSessionResponse 创建一次可幂等累计的活跃阅读会话。 */
+    const readingSessionResponse = await fetch(`${integrationBaseUrl}/api/reading-sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        targetType: "document",
+        targetId: documentId,
+        progressPercent: 37.5,
+      }),
+    });
+    assert.equal(readingSessionResponse.status, 201);
+    const readingSessionPayload = await readingSessionResponse.json();
+    const readingSessionId = readingSessionPayload.session.id;
+    /** heartbeatResponse 保存累计时长与最新进度，重复提交不会重复累加。 */
+    const heartbeatResponse = await fetch(
+      `${integrationBaseUrl}/api/reading-sessions/${encodeURIComponent(readingSessionId)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ activeSeconds: 95, progressPercent: 42, ended: true }),
+      },
+    );
+    assert.equal(heartbeatResponse.status, 200);
+    const repeatedHeartbeatResponse = await fetch(
+      `${integrationBaseUrl}/api/reading-sessions/${encodeURIComponent(readingSessionId)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ activeSeconds: 95, progressPercent: 42, ended: true }),
+      },
+    );
+    assert.equal(repeatedHeartbeatResponse.status, 200);
+
+    /** dashboardResponse 汇总阅读时长、进度与最近入库内容。 */
+    const dashboardResponse = await fetch(`${integrationBaseUrl}/api/activity-dashboard?days=30`);
+    assert.equal(dashboardResponse.status, 200);
+    const dashboardPayload = await dashboardResponse.json();
+    assert.equal(dashboardPayload.dashboard.summary.totalReadingSeconds, 95);
+    assert.equal(dashboardPayload.dashboard.summary.readItemCount, 1);
+    assert.ok(dashboardPayload.dashboard.summary.newItemCount >= 1);
+    assert.equal(dashboardPayload.dashboard.libraryComposition.documentCount, 1);
+    assert.equal(dashboardPayload.dashboard.libraryComposition.articleCount, 0);
+    assert.equal(dashboardPayload.dashboard.libraryComposition.paperCount, 0);
+    assert.equal(dashboardPayload.dashboard.githubStatistics.projectCount, 0);
+    assert.ok(
+      dashboardPayload.dashboard.libraryComposition.folders.some(
+        (folder) => folder.name === "程序" && folder.level === 1 && folder.documentCount === 1,
+      ),
+    );
+    assert.equal(dashboardPayload.dashboard.recentReading[0].targetId, documentId);
+    assert.ok(
+      dashboardPayload.dashboard.recentImports.some((item) => item.targetId === documentId),
+    );
+    assert.equal(dashboardPayload.dashboard.readingTrend.length, 30);
 
     /** annotationResponse 是保存一段原文高亮的响应。 */
     const annotationResponse = await fetch(

@@ -13,8 +13,10 @@ const moduleFilePath = fileURLToPath(import.meta.url);
 const moduleDirectory = path.dirname(moduleFilePath);
 /** 桌面版项目根目录。 */
 export const projectDirectory = path.resolve(moduleDirectory, "..");
-/** 本地私密环境变量文件路径。 */
-const localEnvironmentPath = path.join(projectDirectory, ".env.local");
+/** 本地私密环境变量文件路径；安装版可指向当前 Windows 用户的应用数据目录。 */
+const localEnvironmentPath = process.env.ZHIXU_ENV_FILE?.trim()
+  ? path.resolve(process.env.ZHIXU_ENV_FILE)
+  : path.join(projectDirectory, ".env.local");
 /** externallyConfiguredDataDirectory 用于让测试或系统级数据目录保持完整隔离。 */
 const externallyConfiguredDataDirectory = process.env.ZHIXU_DATA_DIR?.trim() || "";
 
@@ -147,6 +149,8 @@ export const serverConfig = Object.freeze({
   deepSeekApiKey: process.env.DEEPSEEK_API_KEY?.trim() || "",
   /** deepSeekModel 是有出处问答使用的模型名称，可在本机环境文件中覆盖。 */
   deepSeekModel: process.env.DEEPSEEK_MODEL?.trim() || "deepseek-chat",
+  /** githubToken 是可选的 GitHub 只读令牌，仅用于提高公开仓库 API 限额。 */
+  githubToken: process.env.GITHUB_TOKEN?.trim() || "",
   /** tesseractPath 是可由用户覆盖的本机 OCR 命令。 */
   tesseractPath: process.env.ZHIXU_TESSERACT_PATH?.trim() || "tesseract",
   /** pdfToPpmPath 是扫描 PDF 转换为逐页图片的本机命令。 */

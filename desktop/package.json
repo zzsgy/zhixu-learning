@@ -3,12 +3,19 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "main": "desktop/main.mjs",
+  "productName": "知序",
+  "author": "知序",
   "description": "知序电脑本地知识库：SQLite、文档解析、自动分类与本地备份。",
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.mjs",
+    "desktop": "electron desktop/main.mjs",
+    "pack:win": "electron-builder --win dir --x64",
+    "dist:win": "electron-builder --win nsis --x64",
+    "test:desktop": "node --disable-warning=ExperimentalWarning --test tests/desktop-shell.test.mjs",
     "test:ui": "node --disable-warning=ExperimentalWarning --test tests/server-integration.test.mjs tests/article-translation.test.mjs",
     "test:import": "node --disable-warning=ExperimentalWarning --test tests/article-parser.test.mjs tests/docsify-importer.test.mjs tests/mli-paper-service.test.mjs tests/paper-library.test.mjs tests/pdf-layout.test.mjs",
     "test:database": "node --disable-warning=ExperimentalWarning --test tests/ai-history.test.mjs tests/paper-library.test.mjs tests/server-integration.test.mjs",
@@ -26,5 +33,52 @@
     "marked": "^16.4.2",
     "pdf-parse": "1.1.1",
     "undici": "8.10.0"
+  },
+  "devDependencies": {
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.zhixu.desktop",
+    "productName": "知序",
+    "asar": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "desktop/**/*",
+      "certificates/**/*",
+      "lib/**/*",
+      "public/**/*",
+      "scripts/**/*",
+      "server.mjs",
+      "package.json",
+      "!**/*.test.mjs",
+      "!data/**/*",
+      "!work/**/*",
+      "!.test-data/**/*",
+      "!.env.local",
+      "!release/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "desktop/assets/zhixu-icon.png",
+      "artifactName": "Zhixu-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "知序",
+      "uninstallDisplayName": "知序"
+    }
   }
 }

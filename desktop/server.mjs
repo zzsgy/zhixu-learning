@@ -45,10 +45,12 @@ import {
   getArticleById,
   getArticleTranslationStatus,
   getAiConversation,
+  getActivityDashboard,
   getDocumentById,
   getDocumentStatistics,
   getPaperById,
   getImportJob,
+  getGitHubProject,
   getReadingWorkspace,
   getContentOrganization,
   insertDocument,
@@ -58,6 +60,7 @@ import {
   listDocuments,
   listDocumentPages,
   listFolders,
+  listGitHubProjects,
   listImportJobs,
   listKnowledgeCards,
   listPaperCandidates,
@@ -81,6 +84,7 @@ import {
   selectPaperCandidate,
   setFavorite,
   snoozePaperReminder,
+  startReadingSession,
   startDocumentOcr,
   updatePaperCandidateTranslation,
   updatePaperCategory,
@@ -92,7 +96,9 @@ import {
   updateArticleTranslation,
   updateDocumentCategory,
   updateReadingAnnotation,
+  updateReadingSession,
   updateReadingState,
+  upsertGitHubProject,
   removeContentTag,
   removeTopicItem,
   renameArticleTitle,
@@ -132,6 +138,7 @@ import {
 } from "./lib/paper-fulltext.mjs";
 import { refreshMliPaperLibrary } from "./lib/mli-paper-service.mjs";
 import { answerFromSources } from "./lib/ai-service.mjs";
+import { analyzeGitHubRepository } from "./lib/github-project-service.mjs";
 import {
   getCodexPaperTranslationWorkerStatus,
   initializeCodexPaperTranslationWorker,
@@ -1007,7 +1014,38 @@ async function handleApiRequest(request, response, url) {
       status: "ok",
       storage: "SQLite 本地数据库",
       deepSeekConfigured: Boolean(serverConfig.deepSeekApiKey),
+      githubTokenConfigured: Boolean(serverConfig.githubToken),
     });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/github-projects") {
+    sendJson(response, 200, { projects: listGitHubProjects(200) });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/github-projects/analyze") {
+    const requestBuffer = await readRequestBuffer(request, 64 * 1024);
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    const projectSnapshot = await analyzeGitHubRepository(String(payload.url || ""), {
+      githubToken: serverConfig.githubToken,
+      deepSeekApiKey: serverConfig.deepSeekApiKey,
+      deepSeekModel: serverConfig.deepSeekModel,
+    });
+    createDailyBackup();
+    const project = upsertGitHubProject(projectSnapshot);
+    sendJson(response, 201, { project });
+    return true;
+  }
+
+  const githubProjectMatch = url.pathname.match(/^\/api\/github-projects\/([^/]+)$/);
+  if (request.method === "GET" && githubProjectMatch) {
+    const project = getGitHubProject(decodeURIComponent(githubProjectMatch[1]));
+    if (!project) {
+      sendJson(response, 404, { message: "找不到这份 GitHub 项目分析。" });
+      return true;
+    }
+    sendJson(response, 200, { project });
     return true;
   }
 
@@ -1905,6 +1943,41 @@ async function handleApiRequest(request, response, url) {
       return true;
     }
     sendJson(response, 200, { state });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/activity-dashboard") {
+    const days = Number(url.searchParams.get("days") || 30);
+    sendJson(response, 200, { dashboard: getActivityDashboard(days) });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/reading-sessions") {
+    const requestBuffer = await readRequestBuffer(request, 64 * 1024);
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    const session = startReadingSession(
+      String(payload.targetType ?? ""),
+      String(payload.targetId ?? ""),
+      Number(payload.progressPercent) || 0,
+    );
+    if (!session) {
+      sendJson(response, 404, { message: "找不到对应的阅读内容。" });
+      return true;
+    }
+    sendJson(response, 201, { session });
+    return true;
+  }
+
+  const readingSessionMatch = url.pathname.match(/^\/api\/reading-sessions\/([^/]+)$/);
+  if (request.method === "POST" && readingSessionMatch) {
+    const requestBuffer = await readRequestBuffer(request, 64 * 1024);
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    const session = updateReadingSession(decodeURIComponent(readingSessionMatch[1]), payload);
+    if (!session) {
+      sendJson(response, 404, { message: "找不到对应的阅读会话。" });
+      return true;
+    }
+    sendJson(response, 200, { session });
     return true;
   }
 
