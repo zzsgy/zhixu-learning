@@ -13,11 +13,37 @@ import {
   detectArticleLanguage,
   lookupPublicAddresses,
   normalizeLegacyHtmlImages,
+  normalizeArticleMath,
   parseAndClassifyCapturedArticle,
   persistEmbeddedArticleImages,
   readNetworkErrorCode,
+  restoreReadableFigureImages,
   sanitizeArticleHtml,
 } from "../lib/article-parser.mjs";
+
+test("补回 Readability 丢失的出版商正文主图并保留图注位置", () => {
+  const { document: originalDocument } = parseHTML(`
+    <article><figure><figcaption>Fig. 1: Model architecture.</figcaption>
+      <picture><img src="//media.example.test/figure-1.png" alt="Fig. 1"></picture>
+    </figure></article>
+  `);
+  const restored = restoreReadableFigureImages(
+    "<figure><figcaption>Fig. 1: Model architecture.</figcaption><p>Caption details.</p></figure>",
+    originalDocument,
+  );
+  assert.match(restored, /<img[^>]+figure-1\.png/);
+  assert.match(restored, /figcaption>Fig\. 1: Model architecture/);
+});
+
+test("把带 TeX 注释的 MathML 转成阅读页可渲染公式", () => {
+  const { document } = parseHTML(`
+    <main><math display="block"><semantics><mi>x</mi>
+      <annotation encoding="application/x-tex">x_{95}^2</annotation>
+    </semantics></math></main>
+  `);
+  assert.equal(normalizeArticleMath(document), 1);
+  assert.match(document.querySelector("main")?.textContent || "", /\\\[x_\{95\}\^2\\\]/);
+});
 
 test("解析浏览器已加载网页并执行同一安全清洗", async () => {
   const article = await parseAndClassifyCapturedArticle(

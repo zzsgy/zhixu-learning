@@ -4,6 +4,7 @@
  * 页面只请求当前电脑上的本地服务，不连接任何第三方前端接口。
  */
 import renderMathInElement from "/vendor/katex/contrib/auto-render.mjs";
+import { getProjectPage } from "./project-index.js";
 
 /** applicationState 保存当前筛选、文档列表和已打开文档。 */
 const applicationState = {
@@ -95,6 +96,9 @@ const applicationState = {
   uploadFolderMode: "auto",
   /** selectedUploadFolderId 是上传前由用户选中的知识库目录。 */
   selectedUploadFolderId: "",
+  articleFolderMode: "auto",
+  selectedArticleFolderId: "",
+  articleImportBusy: false,
   /** readingTocExpanded 表示正文左侧目录当前是否展开。 */
   readingTocExpanded: true,
   /** activeTopicId 是专题页当前展开的专题 ID。 */
@@ -145,8 +149,13 @@ const applicationState = {
   activityDashboard: null,
   /** activityRangeDays 是学习统计页当前时间范围。 */
   activityRangeDays: 30,
+  /** activityShowSecondaryFolders 控制资料库柱状图是否展示二级目录。 */
+  activityShowSecondaryFolders: false,
   /** githubProjects 是“项目研读”左侧档案索引的轻量项目列表。 */
   githubProjects: [],
+  githubProjectQuery: "",
+  githubProjectSort: "recent",
+  githubProjectPage: 1,
   /** githubProjectDetails 缓存本次页面会话已经读取的完整研读报告。 */
   githubProjectDetails: new Map(),
   /** activeGithubProjectId 是当前打开的项目档案。 */
@@ -227,6 +236,9 @@ const dom = {
   importJobSummary: document.querySelector("#import-job-summary"),
   importJobList: document.querySelector("#import-job-list"),
   articleImportForm: document.querySelector("#article-import-form"),
+  articleDestinationControls: document.querySelector("#article-destination-controls"),
+  articleDestinationModes: document.querySelectorAll('input[name="article-destination-mode"]'),
+  articleFolderSelect: document.querySelector("#article-folder-select"),
   articleUrlInput: document.querySelector("#article-url-input"),
   parseArticleButton: document.querySelector("#parse-article-button"),
   docsifyPreview: document.querySelector("#docsify-preview"),
@@ -234,7 +246,9 @@ const dom = {
   videoUrlInput: document.querySelector("#video-url-input"),
   importVideoButton: document.querySelector("#import-video-button"),
   activityTrackingNote: document.querySelector("#activity-tracking-note"),
-  activityRangeButtons: document.querySelectorAll("[data-activity-days]"),
+  activityRangeForm: document.querySelector("#activity-range-form"),
+  activityRangeDaysInput: document.querySelector("#activity-range-days"),
+  activitySecondaryToggle: document.querySelector("#activity-secondary-toggle"),
   activityReadingTime: document.querySelector("#activity-reading-time"),
   activityReadItems: document.querySelector("#activity-read-items"),
   activityActiveDays: document.querySelector("#activity-active-days"),
@@ -251,6 +265,12 @@ const dom = {
   githubAnalysisStatus: document.querySelector("#github-analysis-status"),
   githubProjectCount: document.querySelector("#github-project-count"),
   githubProjectList: document.querySelector("#github-project-list"),
+  githubProjectSearch: document.querySelector("#github-project-search"),
+  githubProjectSort: document.querySelector("#github-project-sort"),
+  githubProjectPageLabel: document.querySelector("#github-project-page-label"),
+  githubProjectPrevious: document.querySelector("#github-project-previous"),
+  githubProjectNext: document.querySelector("#github-project-next"),
+  githubProjectResults: document.querySelector("#github-project-results"),
   githubProjectDetail: document.querySelector("#github-project-detail"),
   reader: document.querySelector("#reader"),
   readerBackButton: document.querySelector("#reader-back-button"),
@@ -515,8 +535,8 @@ function createSvgElement(name, attributes = {}) {
 function renderReadingActivityChart(points) {
   dom.activityReadingChart.replaceChildren();
   const width = 760;
-  const height = 250;
-  const padding = { top: 24, right: 24, bottom: 42, left: 48 };
+  const height = 272;
+  const padding = { top: 24, right: 24, bottom: 64, left: 48 };
   const values = points.map((point) => (Number(point.activeSeconds) || 0) / 60);
   const observedMaximum = Math.max(0, ...values);
   const maximum = Math.max(5, observedMaximum);
@@ -543,10 +563,31 @@ function renderReadingActivityChart(points) {
     class: "activity-line-path",
   });
   svg.append(area, line);
-  const labelIndexes = new Set([0, Math.floor((points.length - 1) / 2), points.length - 1]);
+  /** 30 天以内逐日标注；更长区间仍按天计算，但抽样标签以避免完全重叠。 */
+  const labelStep = points.length <= 31 ? 1 : Math.ceil(points.length / 31);
+  const labelIndexes = new Set(
+    points.map((_, index) => index).filter((index) => index % labelStep === 0),
+  );
+  if (points.length) labelIndexes.add(points.length - 1);
+  const chartBottom = padding.top + chartHeight;
   for (const index of labelIndexes) {
     if (!points[index]) continue;
-    const label = createSvgElement("text", { x: coordinates[index].x, y: height - 14, class: "activity-axis-label", "text-anchor": index === 0 ? "start" : index === points.length - 1 ? "end" : "middle" });
+    const x = coordinates[index].x;
+    svg.append(createSvgElement("line", {
+      x1: x,
+      x2: x,
+      y1: chartBottom,
+      y2: chartBottom + 4,
+      class: "activity-axis-tick",
+    }));
+    const y = chartBottom + 11;
+    const label = createSvgElement("text", {
+      x,
+      y,
+      class: "activity-axis-label activity-axis-day-label",
+      "text-anchor": points.length > 14 ? "end" : index === 0 ? "start" : index === points.length - 1 ? "end" : "middle",
+      transform: points.length > 14 ? `rotate(-55 ${x} ${y})` : "",
+    });
     label.textContent = points[index].date.slice(5).replace("-", "/");
     svg.append(label);
   }
@@ -583,11 +624,14 @@ function renderProgressDistribution(items) {
   dom.activityProgressChart.append(chart, legend);
 }
 
-/** 渲染论文数量与文档库一级、二级目录的分层横向条形图。 */
+/** 渲染以文件夹为横轴、内容数量为纵轴的堆叠柱状图。 */
 function renderLibraryCompositionChart(composition) {
   dom.activityLibraryChart.replaceChildren();
   const folders = Array.isArray(composition?.folders) ? composition.folders : [];
-  const maximum = Math.max(1, Number(composition?.paperCount) || 0, ...folders.map((folder) => Number(folder.itemCount) || 0));
+  const visibleFolders = folders.filter(
+    (folder) => Number(folder.level) === 1 || applicationState.activityShowSecondaryFolders,
+  );
+  const maximum = Math.max(1, Number(composition?.paperCount) || 0, ...visibleFolders.map((folder) => Number(folder.itemCount) || 0));
   const firstLevelCount = folders.filter((folder) => Number(folder.level) === 1).length;
   const secondLevelCount = folders.filter((folder) => Number(folder.level) === 2).length;
 
@@ -605,10 +649,20 @@ function renderLibraryCompositionChart(composition) {
 
   const legend = document.createElement("div");
   legend.className = "activity-library-legend";
-  legend.innerHTML = `<span><i class="is-document"></i>文档</span><span><i class="is-article"></i>网页文章</span><span><i class="is-paper"></i>论文</span><small>${firstLevelCount} 个一级目录 · ${secondLevelCount} 个二级目录</small>`;
+  legend.innerHTML = `<span><i class="is-document"></i>文档</span><span><i class="is-article"></i>网页文章</span><span><i class="is-paper"></i>论文</span><small>${firstLevelCount} 个一级目录${applicationState.activityShowSecondaryFolders ? ` · 已展开 ${secondLevelCount} 个二级目录` : " · 二级目录已收起"}</small>`;
 
-  const rows = document.createElement("div");
-  rows.className = "activity-library-rows";
+  const plot = document.createElement("div");
+  plot.className = "activity-library-plot";
+  const scale = document.createElement("div");
+  scale.className = "activity-library-scale";
+  for (const ratio of [1, 0.75, 0.5, 0.25, 0]) {
+    const tick = document.createElement("span");
+    tick.style.bottom = `${ratio * 100}%`;
+    tick.textContent = String(Math.round(maximum * ratio));
+    scale.append(tick);
+  }
+  const columns = document.createElement("div");
+  columns.className = "activity-library-columns";
   const chartItems = [{
     id: "paper-library",
     name: "论文库",
@@ -617,14 +671,14 @@ function renderLibraryCompositionChart(composition) {
     articleCount: 0,
     paperCount: Number(composition?.paperCount) || 0,
     itemCount: Number(composition?.paperCount) || 0,
-  }, ...folders];
+  }, ...visibleFolders];
+  columns.classList.toggle("is-expanded", applicationState.activityShowSecondaryFolders);
+  columns.style.setProperty("--activity-library-column-count", String(chartItems.length));
   for (const item of chartItems) {
-    const row = document.createElement("div");
-    row.className = `activity-library-row is-level-${Number(item.level) || 0}`;
-    const label = document.createElement("span");
-    label.className = "activity-library-label";
-    label.append(createTextElement("small", "", item.level === 2 ? "二级" : item.level === 1 ? "一级" : "论文"));
-    label.append(createTextElement("strong", "", item.name));
+    const column = document.createElement("div");
+    column.className = `activity-library-column is-level-${Number(item.level) || 0}`;
+    column.title = `${item.name}：${Number(item.itemCount) || 0}`;
+    const value = createTextElement("strong", "activity-library-value", String(Number(item.itemCount) || 0));
     const track = document.createElement("span");
     track.className = "activity-library-track";
     for (const [key, className] of [["documentCount", "is-document"], ["articleCount", "is-article"], ["paperCount", "is-paper"]]) {
@@ -632,26 +686,28 @@ function renderLibraryCompositionChart(composition) {
       if (!count) continue;
       const segment = document.createElement("i");
       segment.className = className;
-      segment.style.width = `${(count / maximum) * 100}%`;
+      segment.style.height = `${(count / maximum) * 100}%`;
       track.append(segment);
     }
-    const detail = document.createElement("span");
-    detail.className = "activity-library-value";
-    detail.append(createTextElement("strong", "", String(Number(item.itemCount) || 0)));
-    detail.append(createTextElement(
-      "small",
-      "",
-      item.level === 0
-        ? "篇论文"
-        : `文档 ${Number(item.documentCount) || 0} · 文章 ${Number(item.articleCount) || 0}`,
-    ));
-    row.append(label, track, detail);
-    rows.append(row);
+    const label = document.createElement("span");
+    label.className = "activity-library-label";
+    label.append(createTextElement("small", "", item.level === 2 ? "二级" : item.level === 1 ? "一级" : "论文"));
+    label.append(createTextElement("strong", "", item.name));
+    column.append(value, track, label);
+    columns.append(column);
   }
-  dom.activityLibraryChart.append(summary, legend, rows);
+  plot.append(scale, columns);
+  dom.activityLibraryChart.append(summary, legend, plot);
   dom.activityLibraryChart.setAttribute(
     "aria-label",
     `资料库内容统计：${composition?.documentCount || 0} 份文档，${composition?.articleCount || 0} 篇网页文章，${composition?.paperCount || 0} 篇论文，${firstLevelCount} 个一级目录，${secondLevelCount} 个二级目录。`,
+  );
+  dom.activitySecondaryToggle.textContent = applicationState.activityShowSecondaryFolders
+    ? "收起二级"
+    : "展开二级";
+  dom.activitySecondaryToggle.setAttribute(
+    "aria-pressed",
+    String(applicationState.activityShowSecondaryFolders),
   );
 }
 
@@ -664,22 +720,36 @@ function setGitHubAnalysisStatus(message, isError = false) {
 /** 渲染“项目研读”左侧轻量档案索引。 */
 function renderGitHubProjectList() {
   dom.githubProjectList.replaceChildren();
+  const result = getProjectPage(applicationState.githubProjects, {
+    query: applicationState.githubProjectQuery,
+    sort: applicationState.githubProjectSort,
+    page: applicationState.githubProjectPage,
+  });
+  applicationState.githubProjectPage = result.page;
+  dom.githubProjectPageLabel.textContent = `${result.page} / ${result.pages}`;
+  dom.githubProjectPrevious.disabled = result.page === 1;
+  dom.githubProjectNext.disabled = result.page === result.pages;
+  dom.githubProjectResults.textContent = applicationState.githubProjectQuery.trim()
+    ? `找到 ${result.total} 个项目 · 每页 10 项`
+    : `共 ${result.total} 个项目 · 每页 10 项`;
   dom.githubProjectCount.textContent = String(applicationState.githubProjects.length);
-  if (!applicationState.githubProjects.length) {
+  if (!result.total) {
     const empty = document.createElement("div");
     empty.className = "github-project-list-empty";
     empty.append(
-      createTextElement("strong", "", "尚无项目档案"),
-      createTextElement("p", "", "提交第一个公开仓库后，研读记录会按最近分析时间排列。"),
+      createTextElement("strong", "", applicationState.githubProjects.length ? "没有匹配的项目" : "尚无项目档案"),
+      createTextElement("p", "", applicationState.githubProjects.length ? "试试项目名、组织名或简介关键词；清空搜索可查看全部。" : "提交第一个公开仓库，开始建立项目档案。"),
     );
     dom.githubProjectList.append(empty);
     return;
   }
-  for (const project of applicationState.githubProjects) {
+  for (const project of result.items) {
     const button = document.createElement("button");
     button.className = "github-project-index-item";
     button.classList.toggle("is-active", project.id === applicationState.activeGithubProjectId);
     button.type = "button";
+    button.setAttribute("aria-current", project.id === applicationState.activeGithubProjectId ? "true" : "false");
+    button.title = `${project.fullName}\n${project.analysisSummary || project.description || ""}`;
     button.addEventListener("click", () => void openGitHubProject(project.id));
     const heading = document.createElement("span");
     heading.className = "github-project-index-heading";
@@ -876,6 +946,13 @@ async function openGitHubProject(projectId) {
 async function loadGitHubProjects(options = {}) {
   const payload = await requestJson("/api/github-projects");
   applicationState.githubProjects = Array.isArray(payload.projects) ? payload.projects : [];
+  if (options.selectId) {
+    applicationState.githubProjectQuery = "";
+    applicationState.githubProjectSort = "recent";
+    applicationState.githubProjectPage = 1;
+    dom.githubProjectSearch.value = "";
+    dom.githubProjectSort.value = "recent";
+  }
   const requestedId = options.selectId || applicationState.activeGithubProjectId;
   const selectedId = applicationState.githubProjects.some((project) => project.id === requestedId)
     ? requestedId
@@ -1053,9 +1130,7 @@ async function loadActivityDashboard() {
   dom.activityTrackingNote.textContent = dashboard.trackingStartedAt
     ? `阅读时长从 ${formatDate(dashboard.trackingStartedAt)} 起按可见页面与活跃交互精确记录；此前仅展示阅读进度。`
     : "阅读时长将从下一次打开正文开始，按可见页面与活跃交互精确记录；既有进度仍会正常展示。";
-  for (const button of dom.activityRangeButtons) {
-    button.classList.toggle("is-active", Number(button.dataset.activityDays) === applicationState.activityRangeDays);
-  }
+  dom.activityRangeDaysInput.value = String(dashboard.range.days);
   renderReadingActivityChart(dashboard.readingTrend);
   renderProgressDistribution(dashboard.progressDistribution);
   renderLibraryCompositionChart(dashboard.libraryComposition);
@@ -4808,7 +4883,7 @@ function renderDocsifyPreview(inspection) {
   const pathText = createTextElement(
     "p",
     "docsify-folder-path",
-    `保存到：${inspection.recommendedFolderPath.join(" / ")}`,
+    `保存到：${getArticleDestinationLabel(inspection)}`,
   );
   /** chapterList 是带选择框的章节预览。 */
   const chapterList = document.createElement("div");
@@ -4861,6 +4936,8 @@ function renderDocsifyPreview(inspection) {
  * @returns {Promise<void>}
  */
 async function importDocsifyInspection(importButton) {
+  if (applicationState.articleImportBusy || !validateArticleDestination()) return;
+  const targetFolderId = getArticleTargetFolderId();
   /** inspection 是刚由服务端验证过的目录预览。 */
   const inspection = applicationState.docsifyInspection;
   if (!inspection) return;
@@ -4874,13 +4951,14 @@ async function importDocsifyInspection(importButton) {
     return;
   }
   importButton.disabled = true;
+  setArticleImportBusy(true);
   importButton.textContent = `正在导入 ${routes.length} 个章节…`;
   try {
     /** payload 是整站写入结果和最终文件夹路径。 */
     const payload = await requestJson("/api/docsify/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: dom.articleUrlInput.value.trim(), routes }),
+      body: JSON.stringify({ url: dom.articleUrlInput.value.trim(), routes, targetFolderId }),
     });
     dom.articleUrlInput.value = "";
     dom.docsifyPreview.hidden = true;
@@ -4898,6 +4976,8 @@ async function importDocsifyInspection(importButton) {
     showToast(error.message);
     importButton.disabled = false;
     importButton.textContent = "重新导入所选章节";
+  } finally {
+    setArticleImportBusy(false);
   }
 }
 
@@ -4907,13 +4987,15 @@ async function importDocsifyInspection(importButton) {
  * @returns {Promise<void>}
  */
 async function parseArticleUrl() {
+  if (applicationState.articleImportBusy || !validateArticleDestination()) return;
+  const targetFolderId = getArticleTargetFolderId();
   /** inputUrl 是清理首尾空白后的文章链接。 */
   const inputUrl = dom.articleUrlInput.value.trim();
   if (!inputUrl) {
     showToast("请先输入文章链接。");
     return;
   }
-  dom.parseArticleButton.disabled = true;
+  setArticleImportBusy(true);
   /** looksLikeDocumentationSeries 识别 Docsify Hash 路由或 GitHub docs 目录。 */
   const looksLikeDocumentationSeries = /#\//.test(inputUrl)
     || /^https?:\/\/github\.com\/[^/]+\/[^/]+\/tree\/[^/]+\/.+/i.test(inputUrl);
@@ -4934,16 +5016,17 @@ async function parseArticleUrl() {
     const payload = await requestJson("/api/articles/parse", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: inputUrl }),
+      body: JSON.stringify({ url: inputUrl, targetFolderId }),
     });
     dom.articleUrlInput.value = "";
     await loadLibrary();
-    showToast(`《${payload.article.title}》已保存到“${payload.article.category}”。`);
+    const savedFolderLabel = getUploadFolderPathLabel(payload.article.folderId) || payload.article.category;
+    showToast(`《${payload.article.title}》已保存到“${savedFolderLabel}”。`);
     await openArticle(payload.article.id);
   } catch (error) {
     showToast(error.message);
   } finally {
-    dom.parseArticleButton.disabled = false;
+    setArticleImportBusy(false);
     dom.parseArticleButton.textContent = "解析并保存";
   }
 }
@@ -5617,6 +5700,57 @@ function renderUploadFolderOptions() {
   applicationState.selectedUploadFolderId = selectionStillExists ? previousValue : "";
   dom.uploadFolderSelect.value = applicationState.selectedUploadFolderId;
   dom.uploadFolderSelect.disabled = applicationState.uploadFolderMode !== "selected";
+  renderArticleFolderOptions();
+}
+
+/** 网页导入位置独立于本地文档上传；目录刷新后清除失效选择。 */
+function renderArticleFolderOptions() {
+  dom.articleFolderSelect.replaceChildren(new Option("请选择目录", ""));
+  for (const folder of getSortedFolderOptions()) {
+    dom.articleFolderSelect.append(new Option(folder.path.map((part) => part.name).join(" / "), folder.id));
+  }
+  if (!applicationState.folders.some((folder) => folder.id === applicationState.selectedArticleFolderId)) {
+    applicationState.selectedArticleFolderId = "";
+  }
+  dom.articleFolderSelect.value = applicationState.selectedArticleFolderId;
+  dom.articleFolderSelect.disabled = applicationState.articleFolderMode !== "selected";
+  updateArticleDestinationPreview();
+}
+
+function getArticleTargetFolderId() {
+  return applicationState.articleFolderMode === "selected" ? applicationState.selectedArticleFolderId : "";
+}
+
+function validateArticleDestination() {
+  if (applicationState.articleFolderMode !== "selected") return true;
+  const valid = applicationState.folders.some((folder) => folder.id === getArticleTargetFolderId());
+  if (!valid) {
+    showToast("请先选择网页文章要保存到的知识库目录。");
+    dom.articleFolderSelect.focus();
+  }
+  return valid;
+}
+
+function getArticleDestinationLabel(inspection) {
+  return applicationState.articleFolderMode === "selected"
+    ? getUploadFolderPathLabel(getArticleTargetFolderId()) || "请先选择目录"
+    : inspection.recommendedFolderPath.join(" / ");
+}
+
+/** 更新路径说明，不重建预览，保留用户已勾选的章节。 */
+function updateArticleDestinationPreview() {
+  const pathText = dom.docsifyPreview.querySelector(".docsify-folder-path");
+  if (pathText && applicationState.docsifyInspection) {
+    pathText.textContent = `保存到：${getArticleDestinationLabel(applicationState.docsifyInspection)}`;
+  }
+}
+
+/** 保存期间冻结位置和链接，避免请求发出后位置显示又发生变化。 */
+function setArticleImportBusy(busy) {
+  applicationState.articleImportBusy = busy;
+  dom.articleDestinationControls.disabled = busy;
+  dom.articleUrlInput.disabled = busy;
+  dom.parseArticleButton.disabled = busy;
 }
 
 /** 检查上传目标设置，指定目录模式下必须先选择有效目录。 */
@@ -6600,6 +6734,10 @@ function renderPapers() {
     const hasExtractedPaperText = Number(paper.sourceTextWordCount) > 0;
     /** hasFullPaperTranslation 表示 Codex 中文全文已经写回数据库。 */
     const hasFullPaperTranslation = paper.fullTranslationStatus === "ready";
+    /** isPaperSourceMissing 避免无 PDF、无正文的论文被误报为等待翻译。 */
+    const isPaperSourceMissing = !paper.pdfUrl
+      && !hasExtractedPaperText
+      && !hasFullPaperTranslation;
     /** hasReadablePaperContent 汇总卡片能够安全依赖的轻量状态字段。 */
     const hasReadablePaperContent = paper.sourceType === "mli"
       || hasExtractedPaperText
@@ -6659,11 +6797,15 @@ function renderPapers() {
     const processingLabel = paper.extractionError
       ? `PDF 解析失败：${paper.extractionError}`
       : hasFullPaperTranslation
-        ? "Codex 中文全文已完成"
+        ? paper.fullTranslationFidelity === "degraded"
+          ? "Codex 中文全文已完成 · 图文结构降级"
+          : "Codex 中文全文已完成 · 完整性已校验"
         : paper.fullTranslationStatus === "failed"
           ? `Codex 中文全文失败：${paper.fullTranslationError || "可进入阅读页重试"}`
           : paper.pdfUrl && !hasExtractedPaperText
             ? "正在后台下载并解析 PDF"
+            : isPaperSourceMissing
+              ? "缺少可翻译全文，请重新导入 PDF"
             : paper.fullTranslationStatus === "processing"
               ? "正在生成中文全文"
               : paper.fullTranslationStatus === "not_required"
@@ -6671,7 +6813,9 @@ function renderPapers() {
                 : "等待 Codex 翻译";
     /** paperStateIsFailed 统一控制提取或全文翻译失败样式。 */
     const paperStateIsFailed = Boolean(
-      paper.extractionError || paper.fullTranslationStatus === "failed",
+      paper.extractionError
+        || paper.fullTranslationStatus === "failed"
+        || isPaperSourceMissing,
     );
     contentElements.push(
       createTextElement(
@@ -6821,9 +6965,16 @@ async function renderPaperTranslationStatus(paper) {
   dom.paperReadingStatus.replaceChildren();
   /** statusText 是当前阶段面向用户的核心说明。 */
   let statusText = "";
-  if (paper.fullTranslationStatus === "ready") {
-    statusText =
-      "以下全文中文阅读版由 Codex 根据英文论文生成；公式符号保留原文，重要结论可通过右上角英文 PDF 交叉核对。";
+  if (
+    !paper.pdfUrl
+    && !paper.sourceText?.trim()
+    && paper.fullTranslationStatus !== "ready"
+  ) {
+    statusText = "这篇论文尚未取得可翻译全文，请返回论文库重新导入 PDF。";
+  } else if (paper.fullTranslationStatus === "ready") {
+    statusText = paper.fullTranslationFidelity === "degraded"
+      ? `以下中文阅读版已完成，但原始来源无法完整提供图文结构：${paper.fullTranslationFidelityMessage || "部分图片、公式或表格只能在英文 PDF 中核对。"}`
+      : "以下全文中文阅读版由 Codex 根据英文论文生成；图片、公式、表格和章节结构已通过完整性校验，重要结论仍可通过右上角英文 PDF 交叉核对。";
   } else if (paper.fullTranslationStatus === "processing") {
     statusText = "Codex 正在后台翻译这篇论文。你可以离开本页，完成后再次打开即可阅读中文全文。";
   } else if (paper.fullTranslationStatus === "not_required") {
@@ -7893,6 +8044,25 @@ async function initializeApplication() {
   for (const button of document.querySelectorAll(".nav-item")) {
     button.addEventListener("click", () => showView(button.dataset.view));
   }
+  dom.githubProjectSearch.addEventListener("input", () => {
+    applicationState.githubProjectQuery = dom.githubProjectSearch.value;
+    applicationState.githubProjectPage = 1;
+    renderGitHubProjectList();
+    dom.githubProjectList.scrollTop = 0;
+  });
+  dom.githubProjectSort.addEventListener("change", () => {
+    applicationState.githubProjectSort = dom.githubProjectSort.value;
+    applicationState.githubProjectPage = 1;
+    renderGitHubProjectList();
+    dom.githubProjectList.scrollTop = 0;
+  });
+  for (const [button, delta] of [[dom.githubProjectPrevious, -1], [dom.githubProjectNext, 1]]) {
+    button.addEventListener("click", () => {
+      applicationState.githubProjectPage += delta;
+      renderGitHubProjectList();
+      dom.githubProjectList.scrollTop = 0;
+    });
+  }
   dom.githubProjectForm.addEventListener("submit", (event) => {
     event.preventDefault();
     void analyzeGitHubProject();
@@ -7969,6 +8139,18 @@ async function initializeApplication() {
   }
   dom.uploadFolderSelect.addEventListener("change", () => {
     applicationState.selectedUploadFolderId = dom.uploadFolderSelect.value;
+  });
+  for (const modeControl of dom.articleDestinationModes) {
+    modeControl.addEventListener("change", () => {
+      applicationState.articleFolderMode = modeControl.value === "selected" ? "selected" : "auto";
+      dom.articleFolderSelect.disabled = applicationState.articleFolderMode !== "selected";
+      updateArticleDestinationPreview();
+      if (applicationState.articleFolderMode === "selected") dom.articleFolderSelect.focus();
+    });
+  }
+  dom.articleFolderSelect.addEventListener("change", () => {
+    applicationState.selectedArticleFolderId = dom.articleFolderSelect.value;
+    updateArticleDestinationPreview();
   });
   dom.chooseFilesButton.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -8251,12 +8433,19 @@ async function initializeApplication() {
       void createReadingHighlight(colorButton.dataset.highlightColor);
     });
   }
-  for (const rangeButton of dom.activityRangeButtons) {
-    rangeButton.addEventListener("click", () => {
-      applicationState.activityRangeDays = Number(rangeButton.dataset.activityDays) || 30;
-      void loadActivityDashboard().catch((error) => showToast(error.message));
-    });
-  }
+  dom.activityRangeForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const requestedDays = Math.round(Number(dom.activityRangeDaysInput.value));
+    applicationState.activityRangeDays = Number.isFinite(requestedDays)
+      ? Math.min(365, Math.max(1, requestedDays))
+      : 30;
+    dom.activityRangeDaysInput.value = String(applicationState.activityRangeDays);
+    void loadActivityDashboard().catch((error) => showToast(error.message));
+  });
+  dom.activitySecondaryToggle.addEventListener("click", () => {
+    applicationState.activityShowSecondaryFolders = !applicationState.activityShowSecondaryFolders;
+    renderLibraryCompositionChart(applicationState.activityDashboard?.libraryComposition);
+  });
   document.addEventListener("mouseup", captureReadingSelection);
   document.addEventListener("keyup", captureReadingSelection);
   document.addEventListener("pointerdown", markReadingActivity, { passive: true });

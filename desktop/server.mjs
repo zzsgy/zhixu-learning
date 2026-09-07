@@ -192,12 +192,15 @@ if (backfilledArticleCount > 0) {
  * 在 HTTP 响应之外下载、提取并分类论文 PDF，避免用户等待远程站点。
  *
  * @param {Record<string, unknown>} paper 已保存且包含 PDF 地址的论文记录。
+ * @param {{ force?: boolean }} options 是否重新生成已有正文与译文。
  * @returns {void}
  */
-function queuePaperPdfProcessing(paper) {
-  if (!paper?.id || !paper?.pdfUrl) return;
+function queuePaperPdfProcessing(paper, options = {}) {
+  if (!paper?.id) return;
   /** processingTask 是单篇论文的后台提取、分类和翻译唤醒流程。 */
-  const processingTask = preparePaperFullText(paper.id)
+  const processingTask = preparePaperFullText(paper.id, {
+    force: Boolean(options.force),
+  })
     .then(async (extractedPaper) => {
       if (!extractedPaper?.sourceText) return extractedPaper;
       /** classification 是依据完整英文正文生成的技术分类。 */
@@ -945,6 +948,7 @@ function toPaperListItem(paper) {
     || createTranslatedHtmlPreview(paper.fullTranslationHtml);
   const {
     sourceText: _sourceText,
+    sourceHtml: _sourceHtml,
     fullTranslationHtml: _fullTranslationHtml,
     ...listItem
   } = paper;
@@ -1020,7 +1024,7 @@ async function handleApiRequest(request, response, url) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/github-projects") {
-    sendJson(response, 200, { projects: listGitHubProjects(200) });
+    sendJson(response, 200, { projects: listGitHubProjects(null) });
     return true;
   }
 
@@ -1531,6 +1535,11 @@ async function handleApiRequest(request, response, url) {
     const requestBuffer = await readRequestBuffer(request, 512 * 1024);
     /** payload 是浏览器确认后的导入参数。 */
     const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    const targetFolderId = String(payload.targetFolderId || "").trim();
+    if (targetFolderId && !listFolders().some((folder) => folder.id === targetFolderId)) {
+      sendJson(response, 400, { message: "所选知识库目录已不存在，请刷新后重新选择。" });
+      return true;
+    }
     /** inputUrl 是重新检查的公开 Docsify 地址。 */
     const inputUrl = String(payload.url || "").trim();
     if (!inputUrl) throw new Error("请输入文档站链接。");
@@ -1546,9 +1555,11 @@ async function handleApiRequest(request, response, url) {
     );
     if (chapters.length === 0) throw new Error("没有选择可导入章节。");
     /** folderPathNames 是服务端检查结果给出的可信推荐路径。 */
-    const folderPathNames = inspection.recommendedFolderPath;
+    const selectedFolder = targetFolderId ? listFolders().find((folder) => folder.id === targetFolderId) : null;
+    if (targetFolderId && !selectedFolder) throw new Error("所选知识库目录已不存在，请刷新后重新选择。");
+    const folderPathNames = selectedFolder ? selectedFolder.path.map((part) => part.name) : inspection.recommendedFolderPath;
     /** folderPath 是已经创建或复用的完整文件夹路径。 */
-    const folderPath = ensureFolderPath(folderPathNames);
+    const folderPath = selectedFolder ? selectedFolder.path : ensureFolderPath(folderPathNames);
     /** importedArticles 保存成功写入的章节摘要。 */
     const importedArticles = [];
     /** failures 保存单章失败原因，避免一章故障使整站全部回滚。 */
@@ -1559,6 +1570,11 @@ async function handleApiRequest(request, response, url) {
         const parsedArticle = await parseDocsifyChapter(chapter, {
           categoryHint: folderPathNames[0],
         });
+        // 通过父目录 ID 创建分组，避免目录重名或改名时写入错误位置。
+        const chapterFolderPath = chapter.groupTitle
+          ? ensureFolderPath([chapter.groupTitle], [chapter.groupOrder], folderPath.at(-1).id)
+          : folderPath;
+        const chapterFolder = chapterFolderPath.at(-1);
         /** now 是当前章节保存时间。 */
         const now = new Date().toISOString();
         /** article 是新增或按 URL 更新后的本地文章。 */
@@ -1567,22 +1583,7 @@ async function handleApiRequest(request, response, url) {
           ...parsedArticle,
           createdAt: now,
           updatedAt: now,
-        });
-        /** chapterFolderPath 是站点目录、章级分组组成的最终文件夹路径。 */
-        const chapterFolderPath = chapter.groupTitle
-          ? ensureFolderPath(
-            [...folderPathNames, chapter.groupTitle],
-            [0, 0, 0, chapter.groupOrder],
-          )
-          : folderPath;
-        /** chapterFolder 是当前小节实际进入的章级文件夹或站点根文件夹。 */
-        const chapterFolder = chapterFolderPath.at(-1);
-        assignContentToFolder(
-          "article",
-          article.id,
-          chapterFolder.id,
-          chapter.groupItemOrder || chapter.order,
-        );
+        }, { targetFolderId: chapterFolder.id, sortOrder: chapter.groupItemOrder || chapter.order });
         for (const tagName of folderPathNames.slice(1)) {
           addContentTag("article", article.id, tagName);
         }
@@ -2293,7 +2294,7 @@ async function handleApiRequest(request, response, url) {
       sendJson(response, 400, { message: "该论文没有可重试的公开 PDF 地址。" });
       return true;
     }
-    queuePaperPdfProcessing(paper);
+    queuePaperPdfProcessing(paper, { force: true });
     sendJson(response, 202, { paper, processing: true });
     return true;
   }
@@ -2489,6 +2490,11 @@ async function handleApiRequest(request, response, url) {
     const requestBuffer = await readRequestBuffer(request, 32 * 1024);
     /** payload 是浏览器提交的文章链接对象。 */
     const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    const targetFolderId = String(payload.targetFolderId || "").trim();
+    if (targetFolderId && !listFolders().some((folder) => folder.id === targetFolderId)) {
+      sendJson(response, 400, { message: "所选知识库目录已不存在，请刷新后重新选择。" });
+      return true;
+    }
     /** inputUrl 是清理首尾空白后的链接。 */
     const inputUrl = typeof payload.url === "string" ? payload.url.trim() : "";
     if (!inputUrl) {
@@ -2532,7 +2538,7 @@ async function handleApiRequest(request, response, url) {
       ...parsedArticle,
       createdAt: now,
       updatedAt: now,
-    });
+    }, { targetFolderId });
     createDailyBackup();
     sendJson(response, 201, { article });
     return true;

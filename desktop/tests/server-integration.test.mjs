@@ -26,6 +26,9 @@ test("学习统计默认首页并展示资料库目录层级", () => {
   assert.match(pageSource, /class="view is-active" id="activity-view"/);
   assert.match(pageSource, /id="page-title">学习与资料统计/);
   assert.match(pageSource, /id="activity-library-chart"/);
+  assert.match(pageSource, /id="activity-secondary-toggle"/);
+  assert.match(pageSource, /id="activity-range-form"/);
+  assert.ok(pageSource.indexOf('id="activity-library-chart"') < pageSource.indexOf('id="activity-reading-chart"'));
   assert.match(pageSource, /data-view="ai" type="button" hidden/);
   assert.match(pageSource, /data-view="github"/);
   assert.match(pageSource, /id="github-view"/);
@@ -34,6 +37,9 @@ test("学习统计默认首页并展示资料库目录层级", () => {
   assert.doesNotMatch(pageSource, /资料入库节奏/);
   assert.match(applicationSource, /activeView: "activity"/);
   assert.match(applicationSource, /function renderLibraryCompositionChart\(composition\)/);
+  assert.match(applicationSource, /activityShowSecondaryFolders: false/);
+  assert.match(applicationSource, /points\.length <= 31 \? 1/);
+  assert.match(applicationSource, /classList\.toggle\("is-expanded"/);
   assert.match(applicationSource, /function renderGitHubStatistics\(statistics\)/);
   assert.match(applicationSource, /function analyzeGitHubProject\(\)/);
   assert.doesNotMatch(applicationSource, /renderImportActivityChart/);
@@ -636,6 +642,17 @@ test("上传、分类、搜索、修改分类与下载原件", async () => {
       dashboardPayload.dashboard.recentImports.some((item) => item.targetId === documentId),
     );
     assert.equal(dashboardPayload.dashboard.readingTrend.length, 30);
+
+    /** 自定义天数应按天返回，并把越界输入限制在 1 至 365 天。 */
+    const customDashboardResponse = await fetch(`${integrationBaseUrl}/api/activity-dashboard?days=14`);
+    assert.equal(customDashboardResponse.status, 200);
+    const customDashboardPayload = await customDashboardResponse.json();
+    assert.equal(customDashboardPayload.dashboard.range.days, 14);
+    assert.equal(customDashboardPayload.dashboard.readingTrend.length, 14);
+    const clampedDashboardResponse = await fetch(`${integrationBaseUrl}/api/activity-dashboard?days=999`);
+    const clampedDashboardPayload = await clampedDashboardResponse.json();
+    assert.equal(clampedDashboardPayload.dashboard.range.days, 365);
+    assert.equal(clampedDashboardPayload.dashboard.readingTrend.length, 365);
 
     /** annotationResponse 是保存一段原文高亮的响应。 */
     const annotationResponse = await fetch(

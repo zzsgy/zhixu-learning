@@ -50,7 +50,7 @@ export const classicPaperCatalog = Object.freeze([
   // 14 BioBERT：大模型方法在生物医学文本中的领域化。
   Object.freeze({ externalId: "https://arxiv.org/abs/1901.08746", title: "BioBERT: a pre-trained biomedical language representation model for biomedical text mining", titleZh: "BioBERT：用于生物医学文本挖掘的预训练语言表示模型", authors: ["Jinhyuk Lee", "Wonjin Yoon", "Sungdong Kim", "Donghyeon Kim et al."], category: "生物工程", publishedAt: "2019-01-25", sourceUrl: "https://arxiv.org/abs/1901.08746", pdfUrl: "https://arxiv.org/pdf/1901.08746", abstractZh: "在大规模生物医学语料上继续预训练 BERT，展示领域预训练对生物医学命名实体、关系抽取和问答的价值。" }),
   // 15 AlphaFold2：深度学习影响结构生物学的里程碑。
-  Object.freeze({ externalId: "https://www.nature.com/articles/s41586-021-03819-2", title: "Highly accurate protein structure prediction with AlphaFold", titleZh: "使用 AlphaFold 进行高精度蛋白质结构预测", authors: ["John Jumper", "Richard Evans", "Alexander Pritzel", "Tim Green et al."], category: "生物工程", publishedAt: "2021-07-15", sourceUrl: "https://www.nature.com/articles/s41586-021-03819-2", pdfUrl: null, abstractZh: "AlphaFold2 以端到端神经网络显著提升蛋白质三维结构预测精度，是深度学习影响结构生物学的里程碑工作。" }),
+  Object.freeze({ externalId: "https://www.nature.com/articles/s41586-021-03819-2", title: "Highly accurate protein structure prediction with AlphaFold", titleZh: "使用 AlphaFold 进行高精度蛋白质结构预测", authors: ["John Jumper", "Richard Evans", "Alexander Pritzel", "Tim Green et al."], category: "生物工程", publishedAt: "2021-07-15", sourceUrl: "https://www.nature.com/articles/s41586-021-03819-2", pdfUrl: "https://www.nature.com/articles/s41586-021-03819-2.pdf", abstractZh: "AlphaFold2 以端到端神经网络显著提升蛋白质三维结构预测精度，是深度学习影响结构生物学的里程碑工作。" }),
 ]);
 
 /** paperTopics 定义每周候选论文覆盖的技术主题和展示分类。 */
@@ -461,7 +461,6 @@ export async function ensureDailyClassicPaperCandidate(currentDate = new Date())
   const dailyKey = getDailyPaperKey(currentDate);
   /** cachedCandidates 是当天已经生成的候选。 */
   const cachedCandidates = listPaperCandidates(dailyKey);
-  if (cachedCandidates.length > 0) return cachedCandidates;
   /** routeStart 是经典路线从第一篇开始计算的本地日期。 */
   const routeStart = new Date(2026, 7, 18);
   /** currentDay 是剔除时分秒后的当前本地日期。 */
@@ -477,9 +476,13 @@ export async function ensureDailyClassicPaperCandidate(currentDate = new Date())
   );
   /** catalogItem 是今天按顺序轮到的经典论文。 */
   const catalogItem = classicPaperCatalog[dayOffset % classicPaperCatalog.length];
+  /** cachedCandidate 保留已生成候选的稳定 ID，同时允许目录修正来源元数据。 */
+  const cachedCandidate = cachedCandidates.find(
+    (candidate) => candidate.externalId === catalogItem.externalId,
+  );
   /** candidate 是与旧候选表兼容的每日经典记录。 */
   const candidate = {
-    id: `candidate_${crypto.randomUUID()}`,
+    id: cachedCandidate?.id ?? `candidate_${crypto.randomUUID()}`,
     ...catalogItem,
     abstract: catalogItem.abstractZh,
     titleZh: catalogItem.titleZh,
@@ -487,6 +490,7 @@ export async function ensureDailyClassicPaperCandidate(currentDate = new Date())
     translationSource: "codex",
     translatedAt: new Date().toISOString(),
   };
+  /** savePaperCandidates 会同步目录修正，避免旧候选永久保留失效 PDF 地址。 */
   return savePaperCandidates(dailyKey, [candidate]);
 }
 

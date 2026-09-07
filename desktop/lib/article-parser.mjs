@@ -688,6 +688,79 @@ export function normalizeLegacyHtmlImages(document) {
   return legacyImages.length;
 }
 
+/**
+ * 把 MathML/MathJax 中可验证的 TeX 源码转换为阅读页支持的 LaTeX 定界符。
+ *
+ * 没有 TeX 注释的 MathML 保留可见文本，不根据字符位置猜测公式结构。
+ *
+ * @param {Document} document 待交给 Readability 的网页文档。
+ * @returns {number} 已规范化的公式节点数。
+ */
+export function normalizeArticleMath(document) {
+  let normalizedCount = 0;
+  for (const mathElement of Array.from(document.querySelectorAll("math"))) {
+    const annotation = Array.from(mathElement.querySelectorAll("annotation")).find((element) =>
+      /(?:tex|latex)/i.test(element.getAttribute("encoding") || ""),
+    );
+    const source = String(annotation?.textContent || mathElement.textContent || "").trim();
+    if (!source) {
+      mathElement.remove();
+      continue;
+    }
+    const display = mathElement.getAttribute("display") === "block";
+    mathElement.replaceWith(document.createTextNode(display ? `\\[${source}\\]` : `\\(${source}\\)`));
+    normalizedCount += 1;
+  }
+  for (const scriptElement of Array.from(
+    document.querySelectorAll('script[type^="math/tex"],script[type*="latex"]'),
+  )) {
+    const source = String(scriptElement.textContent || "").trim();
+    if (!source) {
+      scriptElement.remove();
+      continue;
+    }
+    const display = /mode\s*=\s*display/i.test(scriptElement.getAttribute("type") || "");
+    scriptElement.replaceWith(document.createTextNode(display ? `\\[${source}\\]` : `\\(${source}\\)`));
+    normalizedCount += 1;
+  }
+  return normalizedCount;
+}
+
+/**
+ * 补回 Readability 保留图注却遗漏的正文主图。
+ *
+ * @param {string} readableHtml Readability 输出的正文 HTML。
+ * @param {Document} originalDocument 原始网页 DOM。
+ * @returns {string} 只补入与图注精确对应图片的正文 HTML。
+ */
+export function restoreReadableFigureImages(readableHtml, originalDocument) {
+  const { document } = parseHTML(`<main>${String(readableHtml || "")}</main>`);
+  const root = document.querySelector("main");
+  if (!root) return String(readableHtml || "");
+  const normalizeCaption = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const originalFigures = Array.from(originalDocument.querySelectorAll("figure"))
+    .map((figure) => ({
+      caption: normalizeCaption(figure.querySelector("figcaption")?.textContent),
+      image: figure.querySelector("img"),
+    }))
+    .filter((entry) => entry.caption && entry.image);
+  for (const figure of Array.from(root.querySelectorAll("figure"))) {
+    if (figure.querySelector("img")) continue;
+    const caption = normalizeCaption(figure.querySelector("figcaption")?.textContent);
+    const matched = originalFigures.find((entry) => entry.caption === caption);
+    if (!matched) continue;
+    const image = document.createElement("img");
+    for (const attributeName of ["src", "data-src", "data-original", "alt"]) {
+      const value = matched.image.getAttribute(attributeName);
+      if (value !== null) image.setAttribute(attributeName, value);
+    }
+    const captionElement = figure.querySelector("figcaption");
+    if (captionElement) captionElement.after(image);
+    else figure.prepend(image);
+  }
+  return root.innerHTML;
+}
+
 /** embeddedImageFormats 是允许从网页 data URL 落入本地缓存的非脚本图片格式。 */
 const embeddedImageFormats = new Map([
   ["image/png", { extension: ".png", signature: (bytes) =>
@@ -772,6 +845,8 @@ async function parseAndClassifyArticleSource(source) {
   const { document: originalDocument } = parseHTML(source.text);
   /** 旧博客可能误用 <image>；先规范化，避免 Readability 在入库前丢图。 */
   normalizeLegacyHtmlImages(originalDocument);
+  /** 网页公式先转换为阅读页可渲染的 LaTeX，避免清洗器丢弃 MathML。 */
+  normalizeArticleMath(originalDocument);
   /** Notebook 导出的 data URL 图片先写入本地缓存，避免清洗时丢失或膨胀 SQLite。 */
   persistEmbeddedArticleImages(originalDocument);
   /** sourceType 用于区分微信公众号和普通网页。 */
@@ -793,8 +868,12 @@ async function parseAndClassifyArticleSource(source) {
         keepClasses: false,
       }).parse();
   /** rawContentHtml 优先使用公众号正文，其次使用 Readability 正文。 */
-  const rawContentHtml =
+  const extractedContentHtml =
     wechatContent?.innerHTML?.trim() ?? readable?.content?.trim() ?? "";
+  /** 部分出版商页面会被 Readability 保留图注但删除主图，此处按图注精确补回。 */
+  const rawContentHtml = wechatContent
+    ? extractedContentHtml
+    : restoreReadableFigureImages(extractedContentHtml, originalDocument);
   /** sanitized 是移除危险内容后的正文。 */
   const sanitized = sanitizeArticleHtml(rawContentHtml, source.finalUrl);
   if (!sanitized.html || sanitized.text.length < minimumArticleLength) {

@@ -20,6 +20,7 @@ test("论文列表使用轻量状态字段启用中文阅读", () => {
     applicationScript,
     /readerButton\.disabled = Boolean\(paper\.pdfUrl && !paper\.sourceText/,
   );
+  assert.match(applicationScript, /缺少可翻译全文，请重新导入 PDF/);
 });
 
 /**
@@ -41,6 +42,19 @@ test("每周候选经用户确认后进入论文库", async () => {
   /** paperServiceModule 提供 ISO 周标识计算。 */
   const paperServiceModule = await import("../lib/paper-service.mjs");
   try {
+    /** 内置经典路线必须同时提供来源页和可下载 PDF。 */
+    for (const paper of paperServiceModule.classicPaperCatalog) {
+      assert.match(paper.sourceUrl, /^https:\/\//);
+      assert.match(paper.pdfUrl, /^https:\/\//, `${paper.title} 缺少公开 PDF 地址`);
+    }
+    /** AlphaFold 使用 Nature 官方文章页提供的公开 PDF。 */
+    const alphaFold = paperServiceModule.classicPaperCatalog.find(
+      (paper) => paper.title.includes("AlphaFold"),
+    );
+    assert.equal(
+      alphaFold.pdfUrl,
+      "https://www.nature.com/articles/s41586-021-03819-2.pdf",
+    );
     /** weekKey 是固定日期对应的 ISO 自然周。 */
     const weekKey = paperServiceModule.getIsoWeekKey(
       new Date("2026-07-24T08:00:00+08:00"),
@@ -84,6 +98,22 @@ test("每周候选经用户确认后进入论文库", async () => {
     ];
     databaseModule.savePaperCandidates(weekKey, candidates);
     assert.equal(databaseModule.listPaperCandidates(weekKey).length, 3);
+    /** 重复保存会修正来源元数据，同时保留原候选 ID 和选择状态。 */
+    databaseModule.savePaperCandidates(weekKey, [
+      {
+        ...candidates[1],
+        id: "candidate_bio_replacement",
+        pdfUrl: "https://arxiv.org/pdf/2607.00002",
+      },
+    ]);
+    const refreshedBioCandidate = databaseModule
+      .listPaperCandidates(weekKey)
+      .find((candidate) => candidate.externalId === candidates[1].externalId);
+    assert.equal(refreshedBioCandidate.id, "candidate_bio");
+    assert.equal(
+      refreshedBioCandidate.pdfUrl,
+      "https://arxiv.org/pdf/2607.00002",
+    );
     assert.equal(databaseModule.listPendingPaperTranslations().length, 3);
     databaseModule.updatePaperCandidateTranslation("candidate_bio", {
       titleZh: "生物过程控制",
@@ -179,6 +209,20 @@ test("每周候选经用户确认后进入论文库", async () => {
     const dailyPaper = databaseModule.selectPaperCandidate(dailyCandidates[0].id);
     assert.equal(dailyPaper.sourceType, "classic");
     assert.equal(dailyPaper.sourceLabel, "每日经典");
+    /** 已经选入论文库后，经典目录修正仍会同步到原论文。 */
+    databaseModule.savePaperCandidates(dailyCandidates[0].weekKey, [
+      {
+        ...dailyCandidates[0],
+        pdfUrl: `${dailyCandidates[0].pdfUrl}?verified=1`,
+      },
+    ]);
+    const synchronizedDailyPaper = databaseModule.selectPaperCandidate(
+      dailyCandidates[0].id,
+    );
+    assert.equal(
+      synchronizedDailyPaper.pdfUrl,
+      `${dailyCandidates[0].pdfUrl}?verified=1`,
+    );
 
     /** importedPaper 是用户手动导入中文论文网页的模拟记录。 */
     const importedPaper = databaseModule.upsertImportedPaper({
@@ -193,6 +237,47 @@ test("每周候选经用户确认后进入论文库", async () => {
     assert.equal(importedPaper.sourceType, "manual");
     assert.equal(importedPaper.fullTranslationStatus, "not_required");
     assert.equal(databaseModule.listPendingFullPaperTranslations().length, 0);
+
+    /** 缺少 PDF 和正文时必须明确失败，不能永久停留在等待翻译。 */
+    const missingSourcePaper = databaseModule.upsertImportedPaper({
+      externalId: "manual-url:https://example.com/missing-paper",
+      title: "Missing Full Text",
+      category: "其它",
+      sourceUrl: "https://example.com/missing-paper",
+      sourceLanguage: "en",
+    });
+    const paperFullTextModule = await import("../lib/paper-fulltext.mjs");
+    const markedMissingSourcePaper = await paperFullTextModule.preparePaperFullText(
+      missingSourcePaper.id,
+    );
+    assert.equal(markedMissingSourcePaper.fullTranslationStatus, "failed");
+    assert.match(markedMissingSourcePaper.extractionError, /缺少可下载的论文 PDF/);
+    databaseModule.deleteKnowledgeTarget("paper", missingSourcePaper.id);
+
+    /** 出版商 PDF 拒绝后台下载时，公开文章页正文仍可进入翻译队列。 */
+    const publisherPaper = databaseModule.upsertImportedPaper({
+      externalId: "manual-url:https://publisher.example.com/article",
+      title: "Publisher Full Text Fallback",
+      category: "其它",
+      sourceUrl: "https://publisher.example.com/article",
+      pdfUrl: "https://publisher.example.com/article.pdf",
+      sourceLanguage: "en",
+    });
+    const fallbackPaper = await paperFullTextModule.preparePaperFullText(
+      publisherPaper.id,
+      {
+        downloadPdf: async () => {
+          throw new Error("下载内容不是有效 PDF。");
+        },
+        parseSourcePage: async () => ({
+          contentText: "Complete publisher article text for translation. ".repeat(80),
+        }),
+      },
+    );
+    assert.equal(fallbackPaper.fullTranslationStatus, "pending");
+    assert.ok(fallbackPaper.sourceTextWordCount > 300);
+    assert.equal(fallbackPaper.extractionError, null);
+    databaseModule.deleteKnowledgeTarget("paper", publisherPaper.id);
 
     /** clearedResult 是带关联状态清理的论文库重置结果。 */
     const clearedResult = databaseModule.clearPaperLibrary();

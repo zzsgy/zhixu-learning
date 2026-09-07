@@ -368,12 +368,6 @@
               <h2>看见阅读节奏，也看见知识库怎样增长。</h2>
               <p id="activity-tracking-note">阅读时长从启用本页后按活跃阅读时间精确记录。</p>
             </div>
-            <div class="activity-range" role="group" aria-label="统计时间范围">
-              <button data-activity-days="7" type="button">7 天</button>
-              <button class="is-active" data-activity-days="30" type="button">30 天</button>
-              <button data-activity-days="90" type="button">90 天</button>
-              <button data-activity-days="365" type="button">1 年</button>
-            </div>
           </div>
 
           <div class="activity-summary-grid" aria-label="学习活动摘要">
@@ -383,9 +377,31 @@
             <article><span>NEW ITEMS</span><strong id="activity-new-items">0</strong><small>新增文档、文章与论文</small></article>
           </div>
 
+          <article class="activity-panel activity-library-panel">
+            <header>
+              <div><span>KNOWLEDGE LIBRARY</span><h3>资料库内容统计</h3></div>
+              <div class="activity-panel-header-actions">
+                <button class="activity-secondary-toggle" id="activity-secondary-toggle" type="button" aria-pressed="false">展开二级</button>
+                <small>纵轴为内容数量 · 横轴为文件夹</small>
+              </div>
+            </header>
+            <div class="activity-library-chart" id="activity-library-chart" role="img" aria-label="论文库与文档库文件夹内容纵向柱状图"></div>
+          </article>
+
           <div class="activity-chart-grid">
             <article class="activity-panel activity-panel-wide">
-              <header><div><span>READING TREND</span><h3>阅读活跃度</h3></div><small>活跃分钟 / 时间节点</small></header>
+              <header>
+                <div><span>READING TREND</span><h3>阅读活跃度</h3></div>
+                <div class="activity-panel-header-actions">
+                  <form class="activity-range" id="activity-range-form" aria-label="阅读活跃度统计时间范围">
+                    <label for="activity-range-days">最近</label>
+                    <input id="activity-range-days" type="number" min="1" max="365" step="1" value="30" inputmode="numeric">
+                    <span>天</span>
+                    <button type="submit">应用</button>
+                  </form>
+                  <small>活跃分钟 / 天</small>
+                </div>
+              </header>
               <div class="activity-chart" id="activity-reading-chart" role="img" aria-label="阅读活跃度折线图"></div>
             </article>
             <article class="activity-panel">
@@ -393,11 +409,6 @@
               <div class="activity-progress-chart" id="activity-progress-chart"></div>
             </article>
           </div>
-
-          <article class="activity-panel activity-library-panel">
-            <header><div><span>KNOWLEDGE LIBRARY</span><h3>资料库内容统计</h3></div><small>一级目录含全部后代，二级目录缩进显示</small></header>
-            <div class="activity-library-chart" id="activity-library-chart" role="img" aria-label="论文库与文档库一级、二级目录内容统计"></div>
-          </article>
 
           <article class="activity-panel activity-github-panel">
             <header>
@@ -442,7 +453,23 @@
                 <div><span>项目研读档案</span><h3>项目档案</h3></div>
                 <strong id="github-project-count">0</strong>
               </header>
+              <div class="github-project-tools">
+                <label for="github-project-search">查找项目</label>
+                <input id="github-project-search" type="search" placeholder="项目名、组织或关键词" autocomplete="off" />
+                <label for="github-project-sort">排序方式</label>
+                <select id="github-project-sort">
+                  <option value="recent">最近分析</option>
+                  <option value="name">项目名称 A–Z</option>
+                  <option value="stars">Star 数最多</option>
+                </select>
+                <small id="github-project-results" aria-live="polite"></small>
+              </div>
               <div class="github-project-list" id="github-project-list"></div>
+              <nav class="github-project-pagination" aria-label="项目档案分页">
+                <button id="github-project-previous" type="button" disabled>上一页</button>
+                <span id="github-project-page-label" aria-live="polite">1 / 1</span>
+                <button id="github-project-next" type="button" disabled>下一页</button>
+              </nav>
             </aside>
             <article class="github-project-detail" id="github-project-detail">
               <div class="github-project-empty">
@@ -467,14 +494,14 @@
                 <strong id="upload-limit-label">200 MB</strong>
               </p>
               <fieldset class="upload-destination" id="upload-destination-controls">
-                <legend>保存到知识库</legend>
+                <legend>保存位置</legend>
                 <label>
                   <input type="radio" name="upload-destination-mode" value="auto" checked />
-                  <span><strong>系统自动识别</strong><small>按内容分类；导入文件夹时保留原目录层级</small></span>
+                  <span><strong>自动识别</strong><small>按内容分类；导入文件夹时保留原目录层级</small></span>
                 </label>
                 <label>
                   <input type="radio" name="upload-destination-mode" value="selected" />
-                  <span><strong>指定知识库目录</strong><small>由你选择保存位置</small></span>
+                  <span><strong>指定目录</strong><small>由你选择保存位置</small></span>
                 </label>
                 <select id="upload-folder-select" disabled aria-label="选择知识库目录">
                   <option value="">请选择目录</option>
@@ -533,13 +560,27 @@
               <h2>保存网页文章</h2>
               <p>提取公开网页、微信公众号文章或教程目录的可读正文。</p>
             </div>
-            <form class="article-import-form" id="article-import-form">
+                <form class="article-import-form" id="article-import-form">
               <label for="article-url-input">文章或教程系列链接</label>
               <textarea
                 id="article-url-input"
-                placeholder="文章、Docsify 根链接，或 GitHub 的 tree/main/docs 目录"
+                placeholder="粘贴文章链接或教程目录地址"
                 rows="3"
               ></textarea>
+                  <fieldset class="upload-destination" id="article-destination-controls">
+                    <legend>保存位置</legend>
+                    <label>
+                      <input type="radio" name="article-destination-mode" value="auto" checked />
+                      <span><strong>自动识别</strong><small>按内容分类；教程系列使用推荐目录</small></span>
+                    </label>
+                    <label>
+                      <input type="radio" name="article-destination-mode" value="selected" />
+                      <span><strong>指定目录</strong><small>由你选择保存位置；保留教程章节分组</small></span>
+                    </label>
+                    <select id="article-folder-select" disabled aria-label="选择网页文章保存目录">
+                      <option value="">请选择目录</option>
+                    </select>
+                  </fieldset>
               <button class="primary-button" id="parse-article-button" type="submit">
                 解析并保存
               </button>

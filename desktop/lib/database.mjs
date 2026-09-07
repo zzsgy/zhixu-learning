@@ -172,12 +172,17 @@ database.exec(`
     video_alt_url TEXT,
     duration TEXT,
     source_text TEXT NOT NULL DEFAULT '',
+    source_html TEXT NOT NULL DEFAULT '',
+    source_structure_json TEXT NOT NULL DEFAULT '{}',
     source_text_word_count INTEGER NOT NULL DEFAULT 0,
     full_translation_html TEXT NOT NULL DEFAULT '',
     full_translation_status TEXT NOT NULL DEFAULT 'pending',
     full_translation_source TEXT,
     full_translated_at TEXT,
     full_translation_error TEXT,
+    full_translation_structure_json TEXT NOT NULL DEFAULT '{}',
+    full_translation_fidelity TEXT NOT NULL DEFAULT 'unknown',
+    full_translation_fidelity_message TEXT,
     extraction_error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -558,6 +563,8 @@ const paperLibraryColumns = Object.freeze([
   ["video_alt_url", "TEXT"],
   ["duration", "TEXT"],
   ["source_text", "TEXT NOT NULL DEFAULT ''"],
+  ["source_html", "TEXT NOT NULL DEFAULT ''"],
+  ["source_structure_json", "TEXT NOT NULL DEFAULT '{}'"],
   ["source_text_word_count", "INTEGER NOT NULL DEFAULT 0"],
   ["full_translation_html", "TEXT NOT NULL DEFAULT ''"],
   ["full_translation_status", "TEXT NOT NULL DEFAULT 'pending'"],
@@ -565,6 +572,9 @@ const paperLibraryColumns = Object.freeze([
   ["full_translated_at", "TEXT"],
   ["full_translation_error", "TEXT"],
   ["extraction_error", "TEXT"],
+  ["full_translation_structure_json", "TEXT NOT NULL DEFAULT '{}'"],
+  ["full_translation_fidelity", "TEXT NOT NULL DEFAULT 'unknown'"],
+  ["full_translation_fidelity_message", "TEXT"],
 ]);
 for (const [columnName, columnDefinition] of paperLibraryColumns) {
   ensureTableColumn("papers", columnName, columnDefinition);
@@ -1218,9 +1228,10 @@ export function revokeBrowserClient(clientId) {
  * 新增文章；同一 URL 再次解析时更新原记录。
  *
  * @param {Record<string, unknown>} article 已解析文章。
+ * @param {{targetFolderId?: string, sortOrder?: number}} options 可选的明确保存位置。
  * @returns {Record<string, unknown>} 已保存文章。
  */
-export function saveArticle(article) {
+export function saveArticle(article, { targetFolderId = "", sortOrder = 0 } = {}) {
   /** existingRow 是同一最终 URL 已存在的文章。 */
   const existingRow = database
     .prepare("SELECT id, created_at, display_title FROM articles WHERE url = ? LIMIT 1")
@@ -1334,15 +1345,17 @@ export function saveArticle(article) {
         article.author ?? "",
         article.contentText,
       );
+    // 正文、全文索引和目录归属在同一事务内写入，目录失效时整篇回滚。
+    if (targetFolderId) {
+      assignContentToFolder("article", articleId, targetFolderId, sortOrder);
+    } else if (!existingRow) {
+      const defaultFolderPath = ensureFolderPath([article.category || "其它"]);
+      assignContentToFolder("article", articleId, defaultFolderPath.at(-1).id);
+    }
     database.exec("COMMIT;");
   } catch (error) {
     database.exec("ROLLBACK;");
     throw error;
-  }
-  if (!existingRow) {
-    /** defaultFolderPath 是普通网页文章首次保存时对应的一级分类目录。 */
-    const defaultFolderPath = ensureFolderPath([article.category || "其它"]);
-    assignContentToFolder("article", articleId, defaultFolderPath.at(-1).id);
   }
   return getArticleById(articleId);
 }
@@ -2383,12 +2396,17 @@ function mapPaperRow(row) {
     videoAltUrl: row.video_alt_url,
     duration: row.duration,
     sourceText: row.source_text || "",
+    sourceHtml: row.source_html || "",
+    sourceStructure: JSON.parse(row.source_structure_json || "{}"),
     sourceTextWordCount: row.source_text_word_count || 0,
     fullTranslationHtml: row.full_translation_html || "",
     fullTranslationStatus: row.full_translation_status || "pending",
     fullTranslationSource: row.full_translation_source,
     fullTranslatedAt: row.full_translated_at,
     fullTranslationError: row.full_translation_error,
+    fullTranslationStructure: JSON.parse(row.full_translation_structure_json || "{}"),
+    fullTranslationFidelity: row.full_translation_fidelity || "unknown",
+    fullTranslationFidelityMessage: row.full_translation_fidelity_message,
     extractionError: row.extraction_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -2479,6 +2497,10 @@ export function upsertImportedPaper(paper) {
   const paperId = existingRow?.id ?? String(paper.id || `paper_${crypto.randomUUID()}`);
   /** sourceText 是文件或网页中已经提取的可读正文。 */
   const sourceText = String(paper.sourceText || "").trim();
+  /** sourceHtml 是保留图片、表格、公式和标题结构的安全正文。 */
+  const sourceHtml = String(paper.sourceHtml || "").trim();
+  /** sourceStructureJson 是导入阶段生成的可核验结构清单。 */
+  const sourceStructureJson = JSON.stringify(paper.sourceStructure || {});
   /** sourceLanguage 决定中文原文是否需要进入 Codex 翻译队列。 */
   const sourceLanguage = String(paper.sourceLanguage || "unknown");
   /** translationStatus 对中文原文标记为无需翻译。 */
@@ -2495,11 +2517,12 @@ export function upsertImportedPaper(paper) {
         id, external_id, title, abstract, title_zh, abstract_zh,
         translation_source, translated_at, authors_json, category,
         published_at, source_url, pdf_url, source_type, source_label,
-        curator_note, source_text, source_text_word_count,
+        curator_note, source_text, source_html, source_structure_json,
+        source_text_word_count,
         full_translation_status, created_at, updated_at
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', '手动导入',
-        ?, ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?
       )
       ON CONFLICT(external_id) DO UPDATE SET
         title = excluded.title,
@@ -2516,6 +2539,14 @@ export function upsertImportedPaper(paper) {
         source_text = CASE
           WHEN COALESCE(TRIM(excluded.source_text), '') <> '' THEN excluded.source_text
           ELSE papers.source_text
+        END,
+        source_html = CASE
+          WHEN COALESCE(TRIM(excluded.source_html), '') <> '' THEN excluded.source_html
+          ELSE papers.source_html
+        END,
+        source_structure_json = CASE
+          WHEN excluded.source_structure_json <> '{}' THEN excluded.source_structure_json
+          ELSE papers.source_structure_json
         END,
         source_text_word_count = MAX(excluded.source_text_word_count, papers.source_text_word_count),
         full_translation_status = CASE
@@ -2541,6 +2572,8 @@ export function upsertImportedPaper(paper) {
       paper.pdfUrl || null,
       String(paper.curatorNote || ""),
       sourceText,
+      sourceHtml,
+      sourceStructureJson,
       wordCount,
       translationStatus,
       existingRow?.created_at ?? now,
@@ -2569,12 +2602,16 @@ export function updatePaperCategory(paperId, category) {
  * 保存公开 PDF 中提取出的英文全文。
  *
  * @param {string} paperId 论文稳定本地 ID。
- * @param {{ sourceText: string, wordCount: number }} extraction 提取结果。
+ * @param {{ sourceText: string, sourceHtml?: string, sourceStructure?: Record<string, unknown>, wordCount: number, sourceLanguage?: string, resetTranslation?: boolean }} extraction 提取结果。
  * @returns {Record<string, unknown> | null} 更新后的论文。
  */
 export function updatePaperSourceText(paperId, extraction) {
   /** sourceText 是去除首尾空白后的英文论文正文。 */
   const sourceText = String(extraction.sourceText || "").trim();
+  /** sourceHtml 保留图片、表格、上下标和 LaTeX 所在的安全语义结构。 */
+  const sourceHtml = String(extraction.sourceHtml || "").trim();
+  /** sourceStructure 是入库时生成、供完成门禁使用的结构清单。 */
+  const sourceStructureJson = JSON.stringify(extraction.sourceStructure || {});
   /** wordCount 是提取正文的英文词数。 */
   const wordCount = Math.max(Number(extraction.wordCount) || 0, 0);
   /** updatedAt 是全文提取完成时间。 */
@@ -2584,13 +2621,56 @@ export function updatePaperSourceText(paperId, extraction) {
   database
     .prepare(`
       UPDATE papers
-      SET source_text = ?, source_text_word_count = ?,
-          full_translation_status = ?, full_translation_error = NULL,
+      SET source_text = ?, source_html = ?, source_structure_json = ?,
+          source_text_word_count = ?,
+          full_translation_status = CASE
+            WHEN COALESCE(TRIM(full_translation_html), '') = '' OR ? THEN ?
+            WHEN full_translation_status = 'failed' THEN 'ready'
+            ELSE full_translation_status
+          END,
+          full_translation_error = NULL,
+          full_translation_html = CASE WHEN ? THEN '' ELSE full_translation_html END,
+          full_translation_structure_json = CASE WHEN ? THEN '{}' ELSE full_translation_structure_json END,
+          full_translation_fidelity = CASE WHEN ? THEN 'unknown' ELSE full_translation_fidelity END,
+          full_translation_fidelity_message = CASE WHEN ? THEN NULL ELSE full_translation_fidelity_message END,
           extraction_error = NULL,
           updated_at = ?
       WHERE id = ?
     `)
-    .run(sourceText, wordCount, translationStatus, updatedAt, paperId);
+    .run(
+      sourceText,
+      sourceHtml,
+      sourceStructureJson,
+      wordCount,
+      extraction.resetTranslation ? 1 : 0,
+      translationStatus,
+      extraction.resetTranslation ? 1 : 0,
+      extraction.resetTranslation ? 1 : 0,
+      extraction.resetTranslation ? 1 : 0,
+      extraction.resetTranslation ? 1 : 0,
+      updatedAt,
+      paperId,
+    );
+  if (
+    !extraction.resetTranslation
+    && extraction.sourceStructure?.structureFidelity === "degraded"
+  ) {
+    database.prepare(`
+      UPDATE papers
+      SET full_translation_fidelity = CASE
+            WHEN COALESCE(TRIM(full_translation_html), '') <> '' THEN 'degraded'
+            ELSE full_translation_fidelity
+          END,
+          full_translation_fidelity_message = CASE
+            WHEN COALESCE(TRIM(full_translation_html), '') <> '' THEN ?
+            ELSE full_translation_fidelity_message
+          END
+      WHERE id = ?
+    `).run(
+      String(extraction.sourceStructure.structureMessage || "原始来源未提供完整图文结构。"),
+      paperId,
+    );
+  }
   return getPaperById(paperId);
 }
 
@@ -2714,6 +2794,27 @@ export function markPaperFullTranslationFailed(paperId, message) {
 }
 
 /**
+ * 因 Codex 临时不可用而把当前论文退回队列，不把外部额度问题记成论文失败。
+ *
+ * @param {string} paperId 论文稳定本地 ID。
+ * @param {string} message 面向用户的暂停原因。
+ * @returns {Record<string, unknown> | null} 退回等待状态后的论文。
+ */
+export function deferPaperFullTranslation(paperId, message) {
+  const updatedAt = new Date().toISOString();
+  const safeMessage = String(message || "Codex 暂时不可用，论文已保留在队列中。").slice(0, 500);
+  database
+    .prepare(`
+      UPDATE papers
+      SET full_translation_status = 'pending', full_translation_error = ?,
+          updated_at = ?
+      WHERE id = ?
+    `)
+    .run(safeMessage, updatedAt, paperId);
+  return getPaperById(paperId);
+}
+
+/**
  * 把已有英文正文的失败任务重新加入 Codex 翻译队列。
  *
  * @param {string} paperId 论文稳定本地 ID。
@@ -2730,6 +2831,8 @@ export function retryPaperFullTranslation(paperId) {
     .prepare(`
       UPDATE papers
       SET full_translation_status = 'pending', full_translation_error = NULL,
+          full_translation_html = '', full_translation_structure_json = '{}',
+          full_translation_fidelity = 'unknown', full_translation_fidelity_message = NULL,
           updated_at = ?
       WHERE id = ?
     `)
@@ -2744,7 +2847,7 @@ export function retryPaperFullTranslation(paperId) {
  * @param {string} translatedHtml 只含阅读型标签的中文 HTML。
  * @returns {Record<string, unknown> | null} 更新后的论文。
  */
-export function updatePaperFullTranslation(paperId, translatedHtml) {
+export function updatePaperFullTranslation(paperId, translatedHtml, structure = {}) {
   /** normalizedHtml 是去除首尾空白后的完整中文译文。 */
   const normalizedHtml = String(translatedHtml || "").trim();
   if (normalizedHtml.length < 500) {
@@ -2752,15 +2855,31 @@ export function updatePaperFullTranslation(paperId, translatedHtml) {
   }
   /** translatedAt 是 Codex 完成全文翻译的时间。 */
   const translatedAt = new Date().toISOString();
+  /** fidelity 必须由结构完整性校验明确给出，旧调用只能标为未核验。 */
+  const fidelity = ["complete", "degraded"].includes(structure.fidelity)
+    ? structure.fidelity
+    : "unknown";
+  const fidelityMessage = String(structure.message || "").trim() || null;
+  const translatedStructureJson = JSON.stringify(structure.translation || {});
   database
     .prepare(`
       UPDATE papers
       SET full_translation_html = ?, full_translation_status = 'ready',
           full_translation_source = 'codex', full_translated_at = ?,
-          full_translation_error = NULL, updated_at = ?
+          full_translation_error = NULL,
+          full_translation_structure_json = ?, full_translation_fidelity = ?,
+          full_translation_fidelity_message = ?, updated_at = ?
       WHERE id = ?
     `)
-    .run(normalizedHtml, translatedAt, translatedAt, paperId);
+    .run(
+      normalizedHtml,
+      translatedAt,
+      translatedStructureJson,
+      fidelity,
+      fidelityMessage,
+      translatedAt,
+      paperId,
+    );
   return getPaperById(paperId);
 }
 
@@ -2946,7 +3065,18 @@ export function savePaperCandidates(weekKey, candidates) {
       translation_source, translated_at, authors_json, category,
       published_at, source_url, pdf_url, status, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-    ON CONFLICT(week_key, external_id) DO NOTHING
+    ON CONFLICT(week_key, external_id) DO UPDATE SET
+      title = excluded.title,
+      abstract = excluded.abstract,
+      title_zh = excluded.title_zh,
+      abstract_zh = excluded.abstract_zh,
+      translation_source = excluded.translation_source,
+      translated_at = excluded.translated_at,
+      authors_json = excluded.authors_json,
+      category = excluded.category,
+      published_at = excluded.published_at,
+      source_url = excluded.source_url,
+      pdf_url = excluded.pdf_url
   `);
   /** now 是候选论文和周提醒状态的统一更新时间。 */
   const now = new Date().toISOString();
@@ -3032,7 +3162,37 @@ export function selectPaperCandidate(candidateId) {
     existingWeekStatus?.status === "selected" &&
     existingWeekStatus.selected_paper_id
   ) {
-    /** existingPaper 是本周已经选定并保存在论文库中的论文。 */
+    /** 已选论文同步候选目录中后来修正的来源与 PDF 地址。 */
+    database
+      .prepare(`
+        UPDATE papers
+        SET source_url = ?,
+            pdf_url = COALESCE(NULLIF(TRIM(?), ''), pdf_url),
+            full_translation_status = CASE
+              WHEN COALESCE(TRIM(source_text), '') = ''
+                AND COALESCE(TRIM(pdf_url), '') = ''
+                AND COALESCE(TRIM(?), '') <> ''
+              THEN 'pending'
+              ELSE full_translation_status
+            END,
+            extraction_error = CASE
+              WHEN COALESCE(TRIM(pdf_url), '') = ''
+                AND COALESCE(TRIM(?), '') <> ''
+              THEN NULL
+              ELSE extraction_error
+            END,
+            updated_at = ?
+        WHERE id = ?
+      `)
+      .run(
+        candidate.source_url,
+        candidate.pdf_url,
+        candidate.pdf_url,
+        candidate.pdf_url,
+        new Date().toISOString(),
+        existingWeekStatus.selected_paper_id,
+      );
+    /** existingPaper 是同步来源元数据后的已选论文。 */
     const existingPaper = database
       .prepare("SELECT * FROM papers WHERE id = ? LIMIT 1")
       .get(existingWeekStatus.selected_paper_id);
@@ -3615,7 +3775,8 @@ export function getGitHubProject(projectId) {
 
 /** 按最近分析时间返回 GitHub 项目档案。 */
 export function listGitHubProjects(limit = 100) {
-  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 100));
+  // null 用于完整的轻量导航索引；其它调用保留原有上限。
+  const safeLimit = limit === null ? -1 : Math.min(500, Math.max(1, Number(limit) || 100));
   return database.prepare(`
     SELECT id, full_name, url, description, primary_language, stars, forks,
       archived, pushed_at, analysis_json, analysis_source, analyzed_at, updated_at
@@ -3673,12 +3834,14 @@ export function getGitHubProjectStatistics() {
 /**
  * 返回学习统计页所需的阅读活动、进度分布和最近入库内容。
  *
- * @param {number} requestedDays 统计区间，仅允许 7、30、90、365 天。
+ * @param {number} requestedDays 统计区间天数，允许选择最近 1 至 365 天。
  * @returns {Record<string, unknown>} 活动仪表盘数据。
  */
 export function getActivityDashboard(requestedDays = 30) {
-  const allowedDays = new Set([7, 30, 90, 365]);
-  const days = allowedDays.has(Number(requestedDays)) ? Number(requestedDays) : 30;
+  const numericDays = Number(requestedDays);
+  const days = Number.isFinite(numericDays)
+    ? Math.min(365, Math.max(1, Math.round(numericDays)))
+    : 30;
   const startDate = new Date();
   startDate.setHours(0, 0, 0, 0);
   startDate.setDate(startDate.getDate() - days + 1);

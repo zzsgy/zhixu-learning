@@ -64,7 +64,8 @@ test("项目研读汇总 GitHub 证据并返回稳定的中文分析结构", asy
       });
     }
     if (pathname.endsWith("/languages")) return jsonResponse({ JavaScript: 8000, CSS: 2000 });
-    if (pathname.endsWith("/readme")) return new Response("# Field Notes\nInstall with npm.", { status: 200 });
+    // 28,000 字符截断处正好落在 emoji 代理对中间，复现上游 HTTP 400。
+    if (pathname.endsWith("/readme")) return new Response("x".repeat(27_999) + "😀末尾", { status: 200 });
     if (pathname.includes("/git/trees/")) {
       return jsonResponse({
         truncated: false,
@@ -85,9 +86,16 @@ test("项目研读汇总 GitHub 证据并返回稳定的中文分析结构", asy
     throw new Error(`测试没有覆盖请求：${url}`);
   };
   let aiRequestCount = 0;
-  const aiFetcher = async () => {
+  const aiFetcher = async (_url, options) => {
     aiRequestCount += 1;
-    const analysis = aiRequestCount === 1 ? {
+    const requestPayload = JSON.parse(options.body);
+    for (const message of requestPayload.messages) assert.equal(message.content.isWellFormed(), true);
+    if (aiRequestCount === 1) assert.match(requestPayload.messages[1].content, /\uFFFD/);
+    assert.equal(requestPayload.max_tokens, 8192);
+    if (aiRequestCount === 1) {
+      return jsonResponse({ choices: [{ message: { content: '{"overview":"回复被截断"' } }] });
+    }
+    const analysis = aiRequestCount === 2 ? {
       overview: "This is a local knowledge project used to validate repository research.",
       positioning: "It targets local knowledge management workflows.",
       architecture: "The src directory contains the application entry point and service logic.",
@@ -133,6 +141,43 @@ test("项目研读汇总 GitHub 证据并返回稳定的中文分析结构", asy
   assert.equal(project.analysisSource, "deepseek");
   assert.equal(project.analysis.coreModules[0].name, "src");
   assert.deepEqual(project.analysis.executionFlow, ["执行 npm start 启动项目。", "启动脚本加载 src/index.js 应用入口。"]);
-  assert.equal(aiRequestCount, 2);
+  assert.equal(aiRequestCount, 3);
   assert.ok(requestedUrls.some((url) => url.includes("/git/trees/main?recursive=1")));
+});
+
+test("GitHub 匿名 API 限流时改用公开项目页和 README", async () => {
+  const fetcher = async (url) => {
+    if (url === "https://api.github.com/repos/example/rate-limited") {
+      return jsonResponse(
+        { message: "API rate limit exceeded" },
+        403,
+        { "x-ratelimit-remaining": "0" },
+      );
+    }
+    if (url === "https://github.com/example/rate-limited") {
+      return new Response(`<!doctype html><html><head>
+        <meta name="octolytics-dimension-repository_default_branch" content="main">
+        <meta property="og:description" content="example/rate-limited: A public fallback repository">
+      </head><body><script type="application/json">{"stargazerCount":1234,"forksCount":35}</script>
+        <a href="/example/rate-limited/stargazers" aria-label="1.2k stars">Stars</a>
+        <a href="/example/rate-limited/forks">34 forks</a>
+        <a href="/example/rate-limited/tree/main/src">src</a>
+        <a href="/example/rate-limited/blob/main/package.json">package.json</a>
+        <a href="/topics/rag">rag</a>
+      </body></html>`, { status: 200 });
+    }
+    if (url === "https://raw.githubusercontent.com/example/rate-limited/HEAD/README.md") {
+      return new Response("# Rate Limited\nPublic README evidence.", { status: 200 });
+    }
+    throw new Error(`测试没有覆盖请求：${url}`);
+  };
+  const project = await analyzeGitHubRepository("https://github.com/example/rate-limited", { fetcher });
+  assert.equal(project.fullName, "example/rate-limited");
+  assert.equal(project.stars, 1234);
+  assert.equal(project.forks, 35);
+  assert.equal(project.defaultBranch, "main");
+  assert.deepEqual(project.topics, ["rag"]);
+  assert.equal(project.structure[0].path, "src");
+  assert.match(project.readmeExcerpt, /Public README evidence/);
+  assert.match(project.analysisWarning, /公开项目页与 README/);
 });

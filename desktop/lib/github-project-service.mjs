@@ -4,6 +4,7 @@
  * 仓库 README、目录和配置文件全部是不可信资料，只作为分析输入，不能覆盖系统指令。
  */
 import { fetchExternalResource } from "./article-parser.mjs";
+import { parseHTML } from "linkedom";
 
 const githubApiRoot = "https://api.github.com";
 const deepSeekEndpoint = "https://api.deepseek.com/chat/completions";
@@ -91,6 +92,85 @@ async function requestGitHubText(pathname, input, optional = false) {
   return (await response.text()).slice(0, 80_000);
 }
 
+/** 把 GitHub 页面上的 41.0k、6.9k 等紧凑计数转换为整数。 */
+function parseCompactGitHubCount(value) {
+  const normalized = String(value || "").trim().toLowerCase().replace(/,/g, "");
+  const match = normalized.match(/([0-9]+(?:\.[0-9]+)?)\s*([km])?/);
+  if (!match) return 0;
+  const multiplier = match[2] === "m" ? 1_000_000 : match[2] === "k" ? 1_000 : 1;
+  return Math.round(Number(match[1]) * multiplier);
+}
+
+/**
+ * GitHub 匿名 API 限流时，从公开仓库页和 raw README 获取可核验证据。
+ * 该路径不伪造缺失的贡献者、语言占比和发布信息。
+ */
+async function collectPublicGitHubFallback(identity, input) {
+  const response = await input.fetcher(identity.url, {
+    headers: { Accept: "text/html,application/xhtml+xml", "User-Agent": "Zhixu-Local-Knowledge" },
+  }, "GitHub 公开项目页");
+  if (!response.ok) throw new Error(`GitHub 公开项目页读取失败（${response.status}）。`);
+  const html = (await response.text()).slice(0, 4_000_000);
+  const { document } = parseHTML(html);
+  const metaContent = (selector) => String(document.querySelector(selector)?.getAttribute("content") || "").trim();
+  const defaultBranch = metaContent('meta[name="octolytics-dimension-repository_default_branch"]') || "main";
+  const rawDescription = metaContent('meta[property="og:description"]')
+    || metaContent('meta[name="description"]');
+  const description = rawDescription
+    .replace(new RegExp(`^${identity.owner}/${identity.repository}:\\s*`, "i"), "")
+    .replace(/\s*Contribute to .*$/i, "")
+    .trim();
+  const anchors = [...document.querySelectorAll("a[href]")];
+  const embeddedStargazerCount = Number(html.match(/"stargazerCount"\s*:\s*(\d+)/)?.[1]) || 0;
+  const embeddedForkCount = Number(html.match(/"forksCount"\s*:\s*(\d+)/)?.[1]) || 0;
+  const getMetric = (suffix) => {
+    const anchor = anchors.find((item) => String(item.getAttribute("href") || "").endsWith(suffix));
+    return parseCompactGitHubCount(anchor?.getAttribute("aria-label") || anchor?.textContent);
+  };
+  const topics = [...new Set(anchors
+    .map((item) => String(item.getAttribute("href") || "").match(/^\/topics\/([^/?#]+)/i)?.[1] || "")
+    .filter(Boolean))].slice(0, 30);
+  const pathPrefix = `/${identity.owner}/${identity.repository}/`;
+  const treeMap = new Map();
+  for (const anchor of anchors) {
+    const href = String(anchor.getAttribute("href") || "");
+    if (!href.startsWith(pathPrefix)) continue;
+    const match = href.slice(pathPrefix.length).match(/^(tree|blob)\/[^/]+\/(.+?)(?:[?#].*)?$/);
+    if (!match) continue;
+    const itemPath = decodeURIComponent(match[2]);
+    if (!itemPath || itemPath.includes("/")) continue;
+    treeMap.set(itemPath, { path: itemPath, type: match[1] === "tree" ? "tree" : "blob", size: 0 });
+  }
+  const rawReadmeUrl = `https://raw.githubusercontent.com/${encodeURIComponent(identity.owner)}/${encodeURIComponent(identity.repository)}/HEAD/README.md`;
+  const readmeResponse = await input.fetcher(rawReadmeUrl, {
+    headers: { Accept: "text/plain", "User-Agent": "Zhixu-Local-Knowledge" },
+  }, "GitHub README");
+  const readme = readmeResponse.ok ? (await readmeResponse.text()).slice(0, 80_000) : "";
+  return {
+    repository: {
+      name: identity.repository,
+      full_name: identity.fullName,
+      html_url: identity.url,
+      description,
+      private: false,
+      owner: { login: identity.owner },
+      default_branch: defaultBranch,
+      language: "Unknown",
+      topics,
+      stargazers_count: embeddedStargazerCount || getMetric("/stargazers"),
+      forks_count: embeddedForkCount || getMetric("/forks"),
+      subscribers_count: 0,
+      open_issues_count: getMetric("/issues"),
+      size: 0,
+      license: null,
+      archived: false,
+      pushed_at: null,
+    },
+    readme,
+    tree: [...treeMap.values()],
+  };
+}
+
 /** 从目录树中挑选最能说明安装方式和技术栈的配置文件。 */
 function selectImportantFiles(treeItems) {
   return treeItems
@@ -167,27 +247,63 @@ function isPredominantlyChineseAnalysis(analysis) {
     && chineseCharacterCount >= englishWordCount * 0.7;
 }
 
-/** 调用 DeepSeek 并严格读取一个 JSON 对象。 */
-async function requestDeepSeekJson(systemPrompt, userPrompt, input) {
-  const response = await input.aiFetcher(deepSeekEndpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${input.deepSeekApiKey}` },
-    body: JSON.stringify({
-      model: input.deepSeekModel || "deepseek-chat",
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-      messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
-    }),
-  }, "DeepSeek");
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload?.error?.message || `项目分析模型请求失败（${response.status}）。`);
-  const cleaned = String(payload?.choices?.[0]?.message?.content || "")
-    .trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    throw new Error("项目分析没有返回有效的结构化结果，请稍后重试。");
+/** 从模型回复中提取唯一 JSON 对象，兼容偶发的说明文字和 Markdown 围栏。 */
+function parseDeepSeekJsonContent(rawContent) {
+  const cleaned = String(rawContent || "")
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  const candidates = [cleaned];
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(cleaned.slice(firstBrace, lastBrace + 1));
   }
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {
+      /** 当前候选不是完整 JSON，继续尝试下一种边界。 */
+    }
+  }
+  return null;
+}
+
+/** 调用 DeepSeek 并读取一个 JSON 对象；结构无效时自动重新生成一次。 */
+async function requestDeepSeekJson(systemPrompt, userPrompt, input) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const retryInstruction = attempt === 1
+      ? ""
+      : "\n\n<retry_instruction>上一次回复不是完整 JSON。本次必须压缩表述并返回一个语法完整、可直接解析的 JSON 对象；不要输出任何前后说明。</retry_instruction>";
+    const response = await input.aiFetcher(deepSeekEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${input.deepSeekApiKey}` },
+      body: JSON.stringify({
+        model: input.deepSeekModel || "deepseek-chat",
+        temperature: 0.1,
+        max_tokens: 8192,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: systemPrompt.toWellFormed() },
+          // 长度截取可能切断 emoji 的 UTF-16 代理对；发送前修复孤立代理字符。
+          { role: "user", content: `${userPrompt}${retryInstruction}`.toWellFormed() },
+        ],
+      }),
+    }, "DeepSeek");
+    const responseText = await response.text();
+    let payload = {};
+    try { payload = JSON.parse(responseText); } catch { /* 上游错误可能是纯文本。 */ }
+    if (!response.ok) {
+      const detail = String(payload?.error?.message || payload?.message || responseText)
+        .replaceAll(input.deepSeekApiKey, "[已隐藏]").slice(0, 300);
+      throw new Error(`项目分析模型请求失败（${response.status}）：${detail || "服务未提供错误详情"}`);
+    }
+    const parsed = parseDeepSeekJsonContent(payload?.choices?.[0]?.message?.content);
+    if (parsed) return parsed;
+  }
+  throw new Error("项目分析模型连续两次返回了不完整的结构化结果，请稍后重试。");
 }
 
 /** 将模型偶发生成的英文报告完整转换为简体中文，不改写项目名、代码和文件路径。 */
@@ -255,6 +371,7 @@ async function createModelAnalysis(snapshot, input) {
 所有自然语言说明必须使用清楚易懂的简体中文。项目名、库名、API、代码、命令和文件路径可以保留英文，但必须用中文解释其作用。
 即使 README 和源代码全部是英文，也不得用英文段落作答。
 输出详细但避免空话，重点覆盖定位、架构、模块职责、技术栈、运行流程、优势、风险、上手路径和学习价值。
+控制输出规模：overview 不超过 500 字，positioning 不超过 350 字，architecture 不超过 800 字；每个数组最多 10 项，每项说明尽量不超过 300 字。
 只返回 JSON，不要 Markdown 围栏。格式：
 {"overview":"","positioning":"","architecture":"","coreModules":[{"name":"","detail":"","evidence":"README/目录/配置中的依据"}],"technologyStack":[{"name":"","detail":"用途","evidence":"依据"}],"executionFlow":[""],"strengths":[""],"risks":[""],"gettingStarted":[""],"learningSuggestions":[""]}`;
   const evidence = `<repository_facts>${JSON.stringify(repositoryFacts)}</repository_facts>
@@ -286,20 +403,36 @@ export async function analyzeGitHubRepository(rawUrl, options = {}) {
     aiFetcher: options.aiFetcher || defaultFetcher,
   };
   const basePath = `/repos/${encodeURIComponent(identity.owner)}/${encodeURIComponent(identity.repository)}`;
-  const repository = await requestGitHubJson(basePath, input);
+  let publicFallback = null;
+  let repository;
+  try {
+    repository = await requestGitHubJson(basePath, input);
+  } catch (error) {
+    const isAnonymousRateLimit = !input.githubToken
+      && /GitHub API 免费访问额度暂时用完/.test(String(error?.message || ""));
+    if (!isAnonymousRateLimit) throw error;
+    publicFallback = await collectPublicGitHubFallback(identity, input);
+    repository = publicFallback.repository;
+  }
   if (repository.private) throw new Error("目前只分析公开 GitHub 项目，不读取私人仓库。");
-  const languages = await requestGitHubJson(`${basePath}/languages`, input, true) || {};
-  const readme = await requestGitHubText(`${basePath}/readme`, input, true);
-  const treePayload = await requestGitHubJson(
-    `${basePath}/git/trees/${encodeURIComponent(repository.default_branch)}?recursive=1`,
-    input,
-    true,
-  ) || { tree: [], truncated: false };
-  const contributorsPayload = await requestGitHubJson(`${basePath}/contributors?per_page=10&anon=1`, input, true) || [];
-  const latestRelease = await requestGitHubJson(`${basePath}/releases/latest`, input, true);
+  const languages = publicFallback ? {} : await requestGitHubJson(`${basePath}/languages`, input, true) || {};
+  const readme = publicFallback?.readme ?? await requestGitHubText(`${basePath}/readme`, input, true);
+  const treePayload = publicFallback
+    ? { tree: publicFallback.tree, truncated: true }
+    : await requestGitHubJson(
+      `${basePath}/git/trees/${encodeURIComponent(repository.default_branch)}?recursive=1`,
+      input,
+      true,
+    ) || { tree: [], truncated: false };
+  const contributorsPayload = publicFallback
+    ? []
+    : await requestGitHubJson(`${basePath}/contributors?per_page=10&anon=1`, input, true) || [];
+  const latestRelease = publicFallback
+    ? null
+    : await requestGitHubJson(`${basePath}/releases/latest`, input, true);
   const tree = Array.isArray(treePayload.tree) ? treePayload.tree : [];
   const importantFiles = [];
-  for (const filePath of selectImportantFiles(tree)) {
+  for (const filePath of publicFallback ? [] : selectImportantFiles(tree)) {
     const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
     const content = await requestGitHubText(`${basePath}/contents/${encodedPath}`, input, true);
     if (content) importantFiles.push({ path: filePath, content: content.slice(0, 12_000) });
@@ -349,6 +482,11 @@ export async function analyzeGitHubRepository(rawUrl, options = {}) {
     importantFiles: importantFiles.map((file) => file.path),
     analysis: modelResult.analysis,
     analysisSource: modelResult.source,
-    analysisWarning: modelResult.warning,
+    analysisWarning: [
+      modelResult.warning,
+      publicFallback
+        ? "GitHub 匿名 API 已限流，本次改用公开项目页与 README；完整目录、贡献者和语言占比将在 API 恢复后补全。"
+        : "",
+    ].filter(Boolean).join(" "),
   };
 }

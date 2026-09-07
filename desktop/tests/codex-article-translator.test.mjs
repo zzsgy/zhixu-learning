@@ -33,9 +33,24 @@ const outputIndex = argumentsList.indexOf("--output-last-message");
 const outputPath = argumentsList[outputIndex + 1];
 const schemaIndex = argumentsList.indexOf("--output-schema");
 const schema = JSON.parse(fs.readFileSync(argumentsList[schemaIndex + 1], "utf8"));
-const sourceHtml = fs.readFileSync("source.html", "utf8");
+let promptAndSource = "";
+for await (const chunk of process.stdin) promptAndSource += chunk;
+const sourceHtml = promptAndSource.match(/<ZHIXU_SOURCE_HTML>\\n([\\s\\S]*?)\\n<\\/ZHIXU_SOURCE_HTML>/)?.[1] || "";
+const metadata = JSON.parse(promptAndSource.match(/<ZHIXU_METADATA_JSON>\\n([\\s\\S]*?)\\n<\\/ZHIXU_METADATA_JSON>/)?.[1] || "{}");
 const mediaMarkers = sourceHtml.match(/ZHIXU_MEDIA_\\d{6}/g) || [];
 const formulaMarkers = sourceHtml.match(/ZHIXU_MATH_\\d{6}/g) || [];
+if (sourceHtml.includes("FORCE_READ_ERROR_ONCE") && !fs.existsSync("read-error-attempted.flag")) {
+  fs.writeFileSync("read-error-attempted.flag", "1", "utf8");
+  const output = { translatedHtml: "<p>无法读取当前目录中的 source.html，文件访问被策略拒绝。</p>" };
+  if (schema.properties.translatedTitle) output.translatedTitle = "读取失败";
+  if (schema.properties.translatedSummary) output.translatedSummary = "读取失败";
+  fs.writeFileSync(outputPath, JSON.stringify(output), "utf8");
+  process.exit(0);
+}
+if (sourceHtml.includes("DROP_MEDIA_ONCE") && !fs.existsSync("media-attempted.flag")) {
+  fs.writeFileSync("media-attempted.flag", "1", "utf8");
+  mediaMarkers.shift();
+}
 setTimeout(() => {
   const output = {
     translatedHtml: "<h2>分段译文</h2>"
@@ -43,8 +58,8 @@ setTimeout(() => {
       + formulaMarkers.map((marker) => "<p><code>" + marker + "</code></p>").join("")
       + "<p>" + "这是模拟的文章中文译文。".repeat(60) + "<br>" + "这是换行后的译文。".repeat(60) + "</p>"
   };
-  if (schema.properties.translatedTitle) output.translatedTitle = "图解 Transformer";
-  if (schema.properties.translatedSummary) output.translatedSummary = "完整介绍 Transformer 结构的中文译文。";
+  if (schema.properties.translatedTitle) output.translatedTitle = metadata.title ? "图解 Transformer" : "";
+  if (schema.properties.translatedSummary) output.translatedSummary = metadata.summary ? "完整介绍 Transformer 结构的中文译文。" : "";
   fs.writeFileSync(outputPath, JSON.stringify(output), "utf8");
 }, 120);
 `,
@@ -61,7 +76,7 @@ setTimeout(() => {
     /** sourceBlocks 创建至少三个可独立处理的正文分段。 */
     const sourceBlocks = Array.from(
       { length: 4 },
-      (_, index) => `<h2>Section ${index + 1}</h2><p>${"Transformer attention explanation. ".repeat(190)} $\\mathbf{X}_${index + 1} \\in \\mathbb{R}^{L \\times d}$</p><figure><img referrerpolicy="no-referrer" loading="lazy" alt="Diagram ${index + 1}" src="https://example.test/diagram-${index + 1}.png"><figcaption>Architecture diagram ${index + 1}.</figcaption></figure>`,
+      (_, index) => `<h2>Section ${index + 1}</h2><p>${index === 0 ? "FORCE_READ_ERROR_ONCE " : ""}${index === 1 ? "DROP_MEDIA_ONCE " : ""}${"Transformer attention explanation. ".repeat(190)} $\\mathbf{X}_${index + 1} \\in \\mathbb{R}^{L \\times d}$</p><figure><img referrerpolicy="no-referrer" loading="lazy" alt="Diagram ${index + 1}" src="https://example.test/diagram-${index + 1}.png"><figcaption>Architecture diagram ${index + 1}.</figcaption></figure>`,
     ).join("\n");
     /** article 是用户主动请求翻译的英文文章。 */
     const article = databaseModule.saveArticle({
