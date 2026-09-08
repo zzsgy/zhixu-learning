@@ -580,16 +580,15 @@ for (const [columnName, columnDefinition] of paperLibraryColumns) {
   ensureTableColumn("papers", columnName, columnDefinition);
 }
 
-/** defaultFolderNames 是首次升级时创建的知识库一级文件夹。 */
+/** defaultFolderNames 是知识库按使用场景组织的一级入口。 */
 const defaultFolderNames = Object.freeze([
-  "AI",
-  "数据库",
-  "安全",
-  "程序",
-  "生物工程",
-  "工艺工程",
-  "其它",
+  "工作资料",
+  "工作台",
+  "学习",
+  "待整理",
 ]);
+/** automaticFolderRootName 是系统无法可靠识别用途时的唯一安全入口。 */
+const automaticFolderRootName = "待整理";
 
 /**
  * 在同一父目录下查找或创建文件夹。
@@ -619,21 +618,42 @@ function ensureFolder(parentId, name, sortOrder = 0) {
   return database.prepare("SELECT * FROM folders WHERE id = ?").get(folderId);
 }
 
-/** 创建默认一级文件夹并让历史内容进入对应分类目录。 */
+/** 创建默认入口；旧内容已有目录归属时绝不擅自移动。 */
 for (const [folderIndex, folderName] of defaultFolderNames.entries()) {
-  /** rootFolder 是当前分类对应的一级文件夹。 */
-  const rootFolder = ensureFolder(null, folderName, folderIndex);
-  /** now 是历史内容首次建立目录关系的时间。 */
-  const now = new Date().toISOString();
-  for (const targetType of ["document", "article"]) {
-    /** sourceTable 是目标类型对应的可信固定表名。 */
-    const sourceTable = targetType === "document" ? "documents" : "articles";
+  ensureFolder(null, folderName, folderIndex);
+}
+/** 工作台提供空的工作组织入口，不会接管既有专业资料。 */
+const workbenchFolder = ensureFolder(null, "工作台", 1);
+for (const [index, name] of ["项目", "工作记录", "交付物"].entries()) {
+  ensureFolder(workbenchFolder.id, name, index);
+}
+
+/**
+ * 返回自动导入的“待整理 / 专业分类”目录。
+ * 系统能判断专业领域，但不能替用户决定资料是工作、学习还是项目内容。
+ *
+ * @param {string} category 自动或人工给出的专业分类。
+ * @returns {Record<string, unknown>[]} 最终目录路径。
+ */
+function ensureAutomaticFolderPath(category) {
+  return ensureFolderPath([automaticFolderRootName, String(category || "其它")]);
+}
+
+/** 为历史上尚无目录归属的内容补入待整理，不触碰用户已有组织。 */
+for (const targetType of ["document", "article"]) {
+  const sourceTable = targetType === "document" ? "documents" : "articles";
+  const rows = database.prepare(`
+    SELECT DISTINCT COALESCE(category, '其它') AS category FROM ${sourceTable}
+    WHERE id NOT IN (SELECT target_id FROM content_folders WHERE target_type = ?)
+  `).all(targetType);
+  for (const row of rows) {
+    const folder = ensureAutomaticFolderPath(row.category).at(-1);
+    const now = new Date().toISOString();
     database.prepare(`
-      INSERT OR IGNORE INTO content_folders(
-        target_type, target_id, folder_id, created_at, updated_at
-      )
-      SELECT ?, id, ?, ?, ? FROM ${sourceTable} WHERE category = ?
-    `).run(targetType, rootFolder.id, now, now, folderName);
+      INSERT OR IGNORE INTO content_folders(target_type, target_id, folder_id, created_at, updated_at)
+      SELECT ?, id, ?, ?, ? FROM ${sourceTable}
+      WHERE COALESCE(category, '其它') = ?
+    `).run(targetType, folder.id, now, now, row.category);
   }
 }
 
@@ -1349,7 +1369,7 @@ export function saveArticle(article, { targetFolderId = "", sortOrder = 0 } = {}
     if (targetFolderId) {
       assignContentToFolder("article", articleId, targetFolderId, sortOrder);
     } else if (!existingRow) {
-      const defaultFolderPath = ensureFolderPath([article.category || "其它"]);
+      const defaultFolderPath = ensureAutomaticFolderPath(article.category);
       assignContentToFolder("article", articleId, defaultFolderPath.at(-1).id);
     }
     database.exec("COMMIT;");
@@ -1948,10 +1968,10 @@ export function insertDocument(document) {
       selectedFolderPath.at(-1)?.id || targetFolderId,
     );
   } else {
-    /** initialFolderNames 未指定目标时沿用文件夹层级或自动分类目录。 */
+    /** initialFolderNames 未指定目标时保留原结构，但统一置于待整理入口。 */
     const initialFolderNames = importedFolderNames.length > 0
-      ? importedFolderNames
-      : [document.category || "其它"];
+      ? [automaticFolderRootName, ...importedFolderNames]
+      : [automaticFolderRootName, document.category || "其它"];
     const initialFolderPath = ensureFolderPath(initialFolderNames);
     assignContentToFolder("document", document.id, initialFolderPath.at(-1).id);
   }
@@ -2357,9 +2377,14 @@ export function updateDocumentCategory(documentId, category) {
     }
     database.exec("COMMIT;");
     if (document) {
-      /** categoryFolder 是人工分类对应的一级文件夹。 */
-      const categoryFolder = ensureFolderPath([category]).at(-1);
-      assignContentToFolder("document", documentId, categoryFolder.id);
+      /** 已由用户放入工作资料、工作台或学习的内容，不因改专业标签被挪走。 */
+      const currentFolder = listFolders().find((folder) => folder.id === document.folderId);
+      const usesAutomaticPlacement = !currentFolder
+        || currentFolder.path.at(0)?.name === automaticFolderRootName;
+      if (usesAutomaticPlacement) {
+        const categoryFolder = ensureAutomaticFolderPath(category).at(-1);
+        assignContentToFolder("document", documentId, categoryFolder.id);
+      }
     }
     return getDocumentById(documentId);
   } catch (error) {

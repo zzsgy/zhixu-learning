@@ -1554,10 +1554,14 @@ async function handleApiRequest(request, response, url) {
       (chapter) => selectedRoutes.size === 0 || selectedRoutes.has(chapter.route),
     );
     if (chapters.length === 0) throw new Error("没有选择可导入章节。");
-    /** folderPathNames 是服务端检查结果给出的可信推荐路径。 */
+    /** recommendedFolderPathNames 是服务端检查结果给出的可信专业路径。 */
     const selectedFolder = targetFolderId ? listFolders().find((folder) => folder.id === targetFolderId) : null;
     if (targetFolderId && !selectedFolder) throw new Error("所选知识库目录已不存在，请刷新后重新选择。");
-    const folderPathNames = selectedFolder ? selectedFolder.path.map((part) => part.name) : inspection.recommendedFolderPath;
+    const recommendedFolderPathNames = inspection.recommendedFolderPath;
+    /** folderPathNames 未指定位置时只放入待整理，不猜测用户使用场景。 */
+    const folderPathNames = selectedFolder
+      ? selectedFolder.path.map((part) => part.name)
+      : ["待整理", ...recommendedFolderPathNames];
     /** folderPath 是已经创建或复用的完整文件夹路径。 */
     const folderPath = selectedFolder ? selectedFolder.path : ensureFolderPath(folderPathNames);
     /** importedArticles 保存成功写入的章节摘要。 */
@@ -1568,7 +1572,7 @@ async function handleApiRequest(request, response, url) {
       try {
         /** parsedArticle 是 Markdown 转换并安全清洗后的文章对象。 */
         const parsedArticle = await parseDocsifyChapter(chapter, {
-          categoryHint: folderPathNames[0],
+          categoryHint: recommendedFolderPathNames[0],
         });
         // 通过父目录 ID 创建分组，避免目录重名或改名时写入错误位置。
         const chapterFolderPath = chapter.groupTitle
@@ -1584,7 +1588,7 @@ async function handleApiRequest(request, response, url) {
           createdAt: now,
           updatedAt: now,
         }, { targetFolderId: chapterFolder.id, sortOrder: chapter.groupItemOrder || chapter.order });
-        for (const tagName of folderPathNames.slice(1)) {
+        for (const tagName of recommendedFolderPathNames.slice(1)) {
           addContentTag("article", article.id, tagName);
         }
         importedArticles.push(toArticleListItem(getArticleById(article.id)));

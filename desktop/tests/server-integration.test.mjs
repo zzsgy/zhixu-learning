@@ -327,11 +327,11 @@ test("上传、分类、搜索、修改分类与下载原件", async () => {
 
     /** foldersResponse 是默认一级文件夹树响应。 */
     const foldersResponse = await fetch(`${integrationBaseUrl}/api/folders`);
-    /** foldersPayload 包含分类迁移后创建的七个一级文件夹。 */
+    /** foldersPayload 包含按使用场景创建的一级入口及其专业子目录。 */
     const foldersPayload = await foldersResponse.json();
-    /** databaseFolder 是当前测试文档初始所在的数据库目录。 */
+    /** databaseFolder 是当前测试文档在待整理入口下的数据库目录。 */
     const databaseFolder = foldersPayload.folders.find(
-      (folder) => folder.name === "数据库" && !folder.parentId,
+      (folder) => folder.path.map((part) => part.name).join(" / ") === "待整理 / 数据库",
     );
     assert.ok(databaseFolder);
     assert.equal(listPayload.documents[0].folderId, databaseFolder.id);
@@ -540,10 +540,14 @@ test("上传、分类、搜索、修改分类与下载原件", async () => {
     const categoryPayload = await categoryResponse.json();
     assert.equal(categoryPayload.document.category, "程序");
     assert.equal(categoryPayload.document.categorySource, "manual");
-    /** programFolder 是人工修改分类后文档自动进入的一级目录。 */
-    const programFolder = childFolderPayload.folders.find(
-      (folder) => folder.name === "程序" && !folder.parentId,
+    /** 未指定工作用途的内容改标签后仍留在待整理入口下。 */
+    const foldersAfterCategoryPayload = await (
+      await fetch(`${integrationBaseUrl}/api/folders`)
+    ).json();
+    const programFolder = foldersAfterCategoryPayload.folders.find(
+      (folder) => folder.path.map((part) => part.name).join(" / ") === "待整理 / 程序",
     );
+    assert.ok(programFolder);
     assert.equal(categoryPayload.document.folderId, programFolder.id);
 
     /** deleteFolderResponse 验证内容移走后空文件夹可以安全删除。 */
@@ -634,7 +638,7 @@ test("上传、分类、搜索、修改分类与下载原件", async () => {
     assert.equal(dashboardPayload.dashboard.githubStatistics.projectCount, 0);
     assert.ok(
       dashboardPayload.dashboard.libraryComposition.folders.some(
-        (folder) => folder.name === "程序" && folder.level === 1 && folder.documentCount === 1,
+        (folder) => folder.name === "程序" && folder.documentCount === 1,
       ),
     );
     assert.equal(dashboardPayload.dashboard.recentReading[0].targetId, documentId);
@@ -829,7 +833,7 @@ test("上传、分类、搜索、修改分类与下载原件", async () => {
     const importedFolderTreePayload = await importedFolderTreeResponse.json();
     /** importedFolder 是与浏览器相对路径一致的知识库末级目录。 */
     const importedFolder = importedFolderTreePayload.folders.find(
-      (folder) => folder.path.map((part) => part.name).join("/") === "数据库/批量资料/设备",
+      (folder) => folder.path.map((part) => part.name).join("/") === "待整理/数据库/批量资料/设备",
     );
     assert.ok(importedFolder);
     assert.equal(folderUploadPayload.document.folderId, importedFolder.id);

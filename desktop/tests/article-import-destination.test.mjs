@@ -91,7 +91,7 @@ if (process.env.ZHIXU_DESTINATION_FIXTURE === "1") {
       const auto = await request("/api/articles/parse", { url: `https://example.com/auto-${String(targetFolderId)}`, targetFolderId });
       assert.equal(auto.status, 201);
       const location = (await folders()).find((folder) => folder.id === auto.article.folderId);
-      assert.deepEqual(location.path.map((part) => part.name), ["AI"]);
+      assert.deepEqual(location.path.map((part) => part.name), ["待整理", "AI"]);
     }
     for (const route of ["/api/articles/parse", "/api/docsify/import"]) {
       const invalid = await request(route, { url: "https://example.com/invalid", targetFolderId: "missing-folder" });
@@ -116,7 +116,7 @@ if (process.env.ZHIXU_DESTINATION_FIXTURE === "1") {
     assert.equal(series.articles[1].folderId, selected.id);
     const automaticSeries = await request("/api/docsify/import", { url: "https://example.com/auto-docs", routes: ["two"] });
     assert.equal(automaticSeries.importedCount, 1);
-    assert.deepEqual(automaticSeries.folderPath.map((folder) => folder.name), ["AI", "教程", "测试教程"]);
+    assert.deepEqual(automaticSeries.folderPath.map((folder) => folder.name), ["待整理", "AI", "教程", "测试教程"]);
     assert.equal(automaticSeries.articles[0].folderId, automaticSeries.folderPath.at(-1).id);
   });
 }
