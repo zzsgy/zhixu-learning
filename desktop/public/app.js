@@ -195,6 +195,7 @@ const dom = {
   folderBreadcrumbs: document.querySelector("#folder-breadcrumbs"),
   folderGrid: document.querySelector("#folder-grid"),
   newFolderButton: document.querySelector("#new-folder-button"),
+  newWorkRecordButton: document.querySelector("#new-work-record-button"),
   batchSelectButton: document.querySelector("#batch-select-button"),
   libraryBatchToolbar: document.querySelector("#library-batch-toolbar"),
   batchSelectionCount: document.querySelector("#batch-selection-count"),
@@ -431,6 +432,13 @@ const dom = {
   articleAiButton: document.querySelector("#article-ai-button"),
   paperAiButton: document.querySelector("#paper-ai-button"),
   moveFolderDialog: document.querySelector("#move-folder-dialog"),
+  workRecordDialog: document.querySelector("#work-record-dialog"),
+  workRecordForm: document.querySelector("#work-record-form"),
+  workRecordLocation: document.querySelector("#work-record-location"),
+  workRecordTitle: document.querySelector("#work-record-title"),
+  workRecordContent: document.querySelector("#work-record-content"),
+  workRecordCancel: document.querySelector("#work-record-cancel"),
+  workRecordCancelFooter: document.querySelector("#work-record-cancel-footer"),
   moveFolderForm: document.querySelector("#move-folder-form"),
   moveFolderEyebrow: document.querySelector("#move-folder-eyebrow"),
   moveFolderTitle: document.querySelector("#move-folder-title"),
@@ -5515,6 +5523,54 @@ function getActiveFolderPath() {
   return activeFolder?.path || [];
 }
 
+/** 当前目录是否属于工作台的“工作记录”分区。 */
+function isInWorkRecordFolder() {
+  return getActiveFolderPath().some((folder) => folder.name === "工作记录");
+}
+
+/** 打开原生工作记录编辑器，只允许写入工作记录及其子目录。 */
+function openWorkRecordEditor() {
+  if (!applicationState.activeFolderId || !isInWorkRecordFolder()) {
+    showToast("请先进入“工作台 / 工作记录”或其子目录。");
+    return;
+  }
+  dom.workRecordForm.reset();
+  dom.workRecordLocation.textContent = `将保存到：${getActiveFolderPath().map((folder) => folder.name).join(" / ")}`;
+  dom.workRecordDialog.showModal();
+  window.setTimeout(() => dom.workRecordTitle.focus(), 0);
+}
+
+/** 将手写内容保存为当前工作记录目录中的 Markdown 文档。 */
+async function saveWorkRecord() {
+  const title = dom.workRecordTitle.value.replace(/\s+/g, " ").trim();
+  const content = dom.workRecordContent.value.trim();
+  if (!title || !content) {
+    showToast("请填写工作记录的标题和正文。");
+    return;
+  }
+  if (!applicationState.activeFolderId || !isInWorkRecordFolder()) {
+    showToast("当前不在工作记录目录，未保存。");
+    return;
+  }
+  try {
+    const markdown = `# ${title}\n\n${content}\n`;
+    const payload = await requestJson("/api/documents", {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "X-File-Name": encodeURIComponent(`${title}.md`),
+        "X-Target-Folder-Id": applicationState.activeFolderId,
+      },
+      body: markdown,
+    });
+    dom.workRecordDialog.close();
+    await loadLibrary();
+    showToast(`工作记录“${payload.document.title}”已保存。`);
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 /**
  * 打开一个文件夹并清除与目录视图冲突的虚拟筛选。
  *
@@ -6463,6 +6519,10 @@ function renderLibrary() {
     String(applicationState.favoriteOnly),
   );
   dom.newFolderButton.disabled = Boolean(
+    applicationState.searchQuery || applicationState.favoriteOnly,
+  );
+  dom.newWorkRecordButton.hidden = !isInWorkRecordFolder();
+  dom.newWorkRecordButton.disabled = Boolean(
     applicationState.searchQuery || applicationState.favoriteOnly,
   );
   renderLibraryBatchToolbar();
@@ -8206,6 +8266,13 @@ async function initializeApplication() {
   });
   dom.newFolderButton.addEventListener("click", () => {
     void createLibraryFolder();
+  });
+  dom.newWorkRecordButton.addEventListener("click", openWorkRecordEditor);
+  dom.workRecordCancel.addEventListener("click", () => dom.workRecordDialog.close());
+  dom.workRecordCancelFooter.addEventListener("click", () => dom.workRecordDialog.close());
+  dom.workRecordForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void saveWorkRecord();
   });
   dom.batchSelectButton.addEventListener("click", () => {
     setLibraryBatchMode(!applicationState.libraryBatchMode);

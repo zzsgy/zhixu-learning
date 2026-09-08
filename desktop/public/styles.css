@@ -1133,6 +1133,8 @@ body.has-reading-toc .floating-reader-back {
 .knowledge-card-dialog label { display: grid; gap: 7px; color: var(--ink-soft); font-size: 11px; }
 .knowledge-card-dialog input, .knowledge-card-dialog textarea, .knowledge-card-dialog select { width: 100%; border: 1px solid var(--line-dark); background: var(--paper-raised); color: var(--ink); padding: 12px; font: inherit; resize: vertical; }
 .knowledge-card-dialog footer { display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid var(--line); padding-top: 18px; }
+.work-record-dialog textarea { min-height: 280px; line-height: 1.8; }
+.work-record-dialog .work-record-hint { margin: -4px 0 0; color: var(--ink-soft); font-size: 11px; line-height: 1.6; }
 
 /* 专题页将多种知识内容组织成长期学习路线。 */
 .topics-hero {
