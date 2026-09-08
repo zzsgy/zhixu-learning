@@ -331,6 +331,7 @@ const dom = {
   paperReaderBackButton: document.querySelector("#paper-reader-back-button"),
   paperSourceLink: document.querySelector("#paper-source-link"),
   paperPdfLink: document.querySelector("#paper-pdf-link"),
+  paperChinesePdfButton: document.querySelector("#paper-chinese-pdf-button"),
   paperVideoLink: document.querySelector("#paper-video-link"),
   paperReaderMeta: document.querySelector("#paper-reader-meta"),
   paperReaderTitle: document.querySelector("#paper-reader-title"),
@@ -7158,6 +7159,27 @@ function schedulePaperTranslationPolling(paperId) {
   }, 4000);
 }
 
+/** 生成或复用中文 PDF，并在新标签页交给 Chrome 原生 PDF 阅读器。 */
+async function openChinesePaperPdf() {
+  const paper = applicationState.selectedPaper;
+  if (!paper) return;
+  const targetWindow = window.open("about:blank", "_blank");
+  dom.paperChinesePdfButton.disabled = true;
+  dom.paperChinesePdfButton.textContent = "正在生成…";
+  try {
+    const payload = await requestJson(`/api/papers/${encodeURIComponent(paper.id)}/chinese-pdf`, { method: "POST" });
+    if (targetWindow) targetWindow.location.replace(payload.url);
+    else window.open(payload.url, "_blank", "noopener,noreferrer");
+    showToast(payload.cached ? "已打开缓存的中文 PDF。" : "中文 PDF 已生成并打开。");
+  } catch (error) {
+    targetWindow?.close();
+    showToast(error.message);
+  } finally {
+    dom.paperChinesePdfButton.disabled = false;
+    dom.paperChinesePdfButton.textContent = "中文 PDF";
+  }
+}
+
 /**
  * 在站内独立页面打开论文中文阅读版。
  *
@@ -7201,6 +7223,9 @@ async function openPaper(paperId, options = {}) {
       paper.sourceType === "weekly" ? "arXiv 原文" : "论文原文";
     dom.paperPdfLink.hidden = !paper.pdfUrl;
     dom.paperPdfLink.href = paper.pdfUrl || "#";
+    dom.paperChinesePdfButton.hidden = paper.fullTranslationStatus !== "ready" || !paper.fullTranslationHtml;
+    dom.paperChinesePdfButton.disabled = false;
+    dom.paperChinesePdfButton.textContent = "中文 PDF";
     dom.paperVideoLink.hidden = !paper.videoUrl;
     dom.paperVideoLink.href = paper.videoUrl || "#";
     dom.paperReaderContent.replaceChildren();
@@ -8407,6 +8432,7 @@ async function initializeApplication() {
     });
   }
   dom.paperReaderBackButton.addEventListener("click", () => void returnToPreviousPage("papers"));
+  dom.paperChinesePdfButton.addEventListener("click", () => void openChinesePaperPdf());
   dom.floatingReaderBack.addEventListener("click", () => {
     /** fallbackView 根据当前是否为论文阅读页选择无历史时的安全去向。 */
     const fallbackView = !dom.paperReader.hidden ? "papers" : "library";

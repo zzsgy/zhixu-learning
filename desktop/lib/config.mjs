@@ -97,6 +97,8 @@ export const attachmentDirectory = path.join(dataDirectory, "attachments");
 export const articleImageDirectory = path.join(dataDirectory, "article-images");
 /** paperDirectory 是公开论文 PDF 与全文提取结果的本地缓存目录。 */
 export const paperDirectory = path.join(dataDirectory, "papers");
+/** paperChinesePdfDirectory 缓存由本机 Chrome 排版生成的中文论文 PDF。 */
+export const paperChinesePdfDirectory = path.join(dataDirectory, "paper-chinese-pdfs");
 /** articleTranslationWorkDirectory 保存可恢复的文章分段翻译中间结果。 */
 export const articleTranslationWorkDirectory = path.join(
   dataDirectory,
@@ -197,6 +199,7 @@ export function ensureLocalDirectories() {
     attachmentDirectory,
     articleImageDirectory,
     paperDirectory,
+    paperChinesePdfDirectory,
     articleTranslationWorkDirectory,
     paperTranslationWorkDirectory,
     ocrDirectory,

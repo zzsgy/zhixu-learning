@@ -12,6 +12,7 @@ import { parseHTML } from "linkedom";
 import {
   articleImageDirectory,
   attachmentDirectory,
+  paperChinesePdfDirectory,
   paperDirectory,
   publicDirectory,
   serverConfig,
@@ -992,6 +993,76 @@ function attachImportJobLocations(jobs) {
       },
     };
   });
+}
+
+function escapePaperExportText(value) {
+  return String(value || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+/** 生成隔离的中文论文打印页；正文只保留阅读型标签和安全属性。 */
+function createChinesePaperExportHtml(paper, origin) {
+  const { document: parsedDocument } = parseHTML(`<main>${paper.fullTranslationHtml || ""}</main>`);
+  const allowedTags = new Set(["H2", "H3", "H4", "P", "UL", "OL", "LI", "BLOCKQUOTE", "PRE", "CODE", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "STRONG", "EM", "SUB", "SUP", "BR", "IMG"]);
+  const discardedTags = new Set(["SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "TEMPLATE", "FORM"]);
+  for (const element of [...parsedDocument.querySelectorAll("main *")]) {
+    if (discardedTags.has(element.tagName)) {
+      element.remove();
+      continue;
+    }
+    if (!allowedTags.has(element.tagName)) {
+      element.replaceWith(...element.childNodes);
+      continue;
+    }
+    for (const attribute of [...element.attributes]) {
+      if (!["alt", "colspan", "rowspan", "src"].includes(attribute.name.toLowerCase())) element.removeAttribute(attribute.name);
+    }
+    if (element.tagName === "IMG") {
+      const source = element.getAttribute("src") || "";
+      if (/^https?:\/\//i.test(source)) element.setAttribute("src", `${origin}/api/article-images?url=${encodeURIComponent(source)}`);
+      else element.remove();
+    }
+  }
+  const title = escapePaperExportText(paper.titleZh || paper.title);
+  const originalTitle = escapePaperExportText(paper.titleZh ? paper.title : "");
+  const abstract = escapePaperExportText(paper.abstractZh || paper.abstract || "");
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${title}</title><link rel="stylesheet" href="/vendor/katex/katex.min.css"><style>@page{size:A4;margin:18mm 17mm 20mm}*{box-sizing:border-box}body{margin:0;color:#182622;font-family:"Noto Serif SC","Microsoft YaHei",serif;font-size:11pt;line-height:1.72}h1{font-size:25pt;line-height:1.25;margin:0 0 8mm}h2{font-size:18pt;break-after:avoid;margin:11mm 0 4mm}h3{font-size:14pt;break-after:avoid;margin:8mm 0 3mm}h4{font-size:12pt;break-after:avoid}p,li{orphans:3;widows:3}header{border-bottom:1px solid #9db4ac;margin-bottom:10mm;padding-bottom:7mm}.original{color:#697a75;font-style:italic}.abstract{border-left:3px solid #5a998c;padding-left:5mm;color:#42534e}img{display:block;max-width:100%;max-height:225mm;object-fit:contain;margin:6mm auto;break-inside:avoid}table{width:100%;border-collapse:collapse;margin:6mm 0;font-size:8.5pt;break-inside:auto}tr{break-inside:avoid}th,td{border:1px solid #aebdb8;padding:2mm;vertical-align:top}pre{white-space:pre-wrap;word-break:break-word;background:#f3f7f5;padding:4mm}blockquote{margin:5mm 0;border-left:3px solid #9db4ac;padding-left:5mm;color:#42534e}.katex-display{overflow:hidden}</style></head><body><header><h1>${title}</h1>${originalTitle ? `<p class="original">${originalTitle}</p>` : ""}${abstract ? `<p class="abstract">${abstract}</p>` : ""}</header><main>${parsedDocument.querySelector("main")?.innerHTML || ""}</main><script type="module">import renderMathInElement from "/vendor/katex/contrib/auto-render.mjs";renderMathInElement(document.querySelector("main"),{delimiters:[{left:"$$",right:"$$",display:true},{left:"\\[",right:"\\]",display:true},{left:"\\(",right:"\\)",display:false},{left:"$",right:"$",display:false}],throwOnError:false,strict:"ignore",trust:false});document.documentElement.dataset.pdfReady="true";</script></body></html>`;
+}
+
+function getChinesePaperPdfPaths(paper) {
+  const safeId = String(paper.id).replace(/[^a-zA-Z0-9_-]/g, "_");
+  const hash = crypto.createHash("sha256").update(paper.fullTranslationHtml || "").digest("hex");
+  return { pdfPath: path.join(paperChinesePdfDirectory, `${safeId}.pdf`), hashPath: path.join(paperChinesePdfDirectory, `${safeId}.sha256`), hash };
+}
+
+function findLocalChrome() {
+  const candidates = [process.env.ZHIXU_CHROME_PATH, "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || "";
+}
+
+async function generateChinesePaperPdf(paper) {
+  if (paper.fullTranslationStatus !== "ready" || !paper.fullTranslationHtml?.trim()) throw new Error("中文全文尚未完成，暂时不能生成中文 PDF。");
+  const paths = getChinesePaperPdfPaths(paper);
+  if (fs.existsSync(paths.pdfPath) && fs.existsSync(paths.hashPath) && fs.readFileSync(paths.hashPath, "utf8").trim() === paths.hash) return { ...paths, cached: true };
+  const chromePath = findLocalChrome();
+  if (!chromePath) throw new Error("未找到本机 Chrome，请安装 Chrome 或配置 ZHIXU_CHROME_PATH。");
+  const temporaryPdfPath = `${paths.pdfPath}.${crypto.randomUUID()}.tmp.pdf`;
+  const profileDirectory = path.join(paperChinesePdfDirectory, `chrome-${crypto.randomUUID()}`);
+  const exportUrl = `http://${serverConfig.host}:${serverConfig.port}/api/papers/${encodeURIComponent(paper.id)}/chinese-export`;
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn(chromePath, ["--headless=new", "--disable-gpu", "--no-pdf-header-footer", `--user-data-dir=${profileDirectory}`, "--virtual-time-budget=15000", `--print-to-pdf=${temporaryPdfPath}`, exportUrl], { windowsHide: true, stdio: "ignore" });
+      child.once("error", reject);
+      child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`Chrome 生成中文 PDF 失败（退出码 ${code}）。`)));
+    });
+    if (!fs.existsSync(temporaryPdfPath) || fs.statSync(temporaryPdfPath).size < 1024) throw new Error("Chrome 未生成有效的中文 PDF。");
+    fs.renameSync(temporaryPdfPath, paths.pdfPath);
+    fs.writeFileSync(paths.hashPath, paths.hash, "utf8");
+    return { ...paths, cached: false };
+  } finally {
+    fs.rmSync(profileDirectory, { recursive: true, force: true });
+    fs.rmSync(temporaryPdfPath, { force: true });
+  }
 }
 
 async function handleApiRequest(request, response, url) {
@@ -2325,6 +2396,50 @@ async function handleApiRequest(request, response, url) {
       }
     }
     sendJson(response, 200, result);
+    return true;
+  }
+
+  /** chinesePaperExportMatch 是仅供本机 Chrome 打印的中文论文排版页。 */
+  const chinesePaperExportMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/chinese-export$/);
+  if (request.method === "GET" && chinesePaperExportMatch) {
+    const paper = getPaperById(decodeURIComponent(chinesePaperExportMatch[1]));
+    if (!paper || paper.fullTranslationStatus !== "ready" || !paper.fullTranslationHtml?.trim()) {
+      sendJson(response, 404, { message: "中文全文尚未完成。" });
+      return true;
+    }
+    const origin = `http://${serverConfig.host}:${serverConfig.port}`;
+    const html = createChinesePaperExportHtml(paper, origin);
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Length": Buffer.byteLength(html), "Cache-Control": "no-store", "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'" });
+    response.end(html);
+    return true;
+  }
+
+  /** chinesePaperPdfMatch 生成或读取按译文哈希缓存的中文 PDF。 */
+  const chinesePaperPdfMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/chinese-pdf$/);
+  if (request.method === "POST" && chinesePaperPdfMatch) {
+    const paper = getPaperById(decodeURIComponent(chinesePaperPdfMatch[1]));
+    if (!paper) {
+      sendJson(response, 404, { message: "找不到这篇论文。" });
+      return true;
+    }
+    const result = await generateChinesePaperPdf(paper);
+    sendJson(response, result.cached ? 200 : 201, { cached: result.cached, url: `/api/papers/${encodeURIComponent(paper.id)}/chinese-pdf` });
+    return true;
+  }
+  if (request.method === "GET" && chinesePaperPdfMatch) {
+    const paper = getPaperById(decodeURIComponent(chinesePaperPdfMatch[1]));
+    if (!paper) {
+      sendJson(response, 404, { message: "找不到这篇论文。" });
+      return true;
+    }
+    const { pdfPath, hashPath, hash } = getChinesePaperPdfPaths(paper);
+    if (!fs.existsSync(pdfPath) || !fs.existsSync(hashPath) || fs.readFileSync(hashPath, "utf8").trim() !== hash) {
+      sendJson(response, 404, { message: "中文 PDF 尚未生成或译文已更新，请重新生成。" });
+      return true;
+    }
+    const pdfSize = fs.statSync(pdfPath).size;
+    response.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": pdfSize, "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(`${paper.titleZh || paper.title}-中文.pdf`)}`, "Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff" });
+    fs.createReadStream(pdfPath).pipe(response);
     return true;
   }
 
