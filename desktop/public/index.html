@@ -1019,10 +1019,18 @@
             <label>标题
               <input id="work-record-title" type="text" maxlength="180" placeholder="例如：B15 水试问题跟进（2026-09-08）" autocomplete="off" required />
             </label>
-            <label>正文
-              <textarea id="work-record-content" rows="14" placeholder="记录背景、现场情况、判断、待办与下一步……" required></textarea>
+            <label>正文（Markdown）
+              <span class="work-record-markdown-toolbar" id="work-record-markdown-toolbar" aria-label="Markdown 格式工具">
+                <button type="button" data-markdown-prefix="## " data-markdown-suffix="" data-markdown-placeholder="小标题">标题</button>
+                <button type="button" data-markdown-prefix="**" data-markdown-suffix="**" data-markdown-placeholder="重点内容">加粗</button>
+                <button type="button" data-markdown-prefix="- " data-markdown-suffix="" data-markdown-placeholder="事项">列表</button>
+                <button type="button" data-markdown-prefix="- [ ] " data-markdown-suffix="" data-markdown-placeholder="待办事项">待办</button>
+                <button type="button" data-markdown-prefix="> " data-markdown-suffix="" data-markdown-placeholder="引用或结论">引用</button>
+                <button type="button" data-markdown-prefix="`" data-markdown-suffix="`" data-markdown-placeholder="命令或变量">代码</button>
+              </span>
+              <textarea id="work-record-content" rows="14" spellcheck="false" placeholder="## 背景&#10;&#10;- 现场情况&#10;- 判断与结论&#10;- [ ] 下一步待办" required></textarea>
             </label>
-            <p class="work-record-hint">保存后会生成可检索、可阅读、可备份的本地 Markdown 文档。</p>
+            <p class="work-record-hint">支持标题、加粗、列表、待办、引用和行内代码；保存后会生成可检索、可阅读、可备份的本地 Markdown 文档。</p>
             <footer>
               <button class="secondary-button" id="work-record-cancel-footer" type="button">取消</button>
               <button class="primary-button" type="submit">保存工作记录</button>

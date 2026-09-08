@@ -437,6 +437,7 @@ const dom = {
   workRecordLocation: document.querySelector("#work-record-location"),
   workRecordTitle: document.querySelector("#work-record-title"),
   workRecordContent: document.querySelector("#work-record-content"),
+  workRecordMarkdownToolbar: document.querySelector("#work-record-markdown-toolbar"),
   workRecordCancel: document.querySelector("#work-record-cancel"),
   workRecordCancelFooter: document.querySelector("#work-record-cancel-footer"),
   moveFolderForm: document.querySelector("#move-folder-form"),
@@ -5528,6 +5529,30 @@ function isInWorkRecordFolder() {
   return getActiveFolderPath().some((folder) => folder.name === "工作记录");
 }
 
+/** 为工作台的三个固定入口提供用途说明，避免只看到名称而不清楚归档边界。 */
+function getWorkbenchFolderDescription(folder) {
+  const folderPath = folder.path.map((part) => part.name).join(" / ");
+  const descriptions = {
+    "工作台 / 项目": "围绕明确目标持续积累方案、过程资料、会议记录与结论。",
+    "工作台 / 工作记录": "按时间记录现场情况、判断、待办、复盘和日常工作过程。",
+    "工作台 / 交付物": "存放可发送、评审、验收或长期归档的稳定成果版本。",
+  };
+  return descriptions[folderPath] || "";
+}
+
+/** 将 Markdown 格式包裹或插入到编辑器当前选区。 */
+function insertWorkRecordMarkdown(button) {
+  const input = dom.workRecordContent;
+  const prefix = button.dataset.markdownPrefix || "";
+  const suffix = button.dataset.markdownSuffix || "";
+  const placeholder = button.dataset.markdownPlaceholder || "内容";
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  const selected = input.value.slice(start, end) || placeholder;
+  input.setRangeText(`${prefix}${selected}${suffix}`, start, end, "end");
+  input.focus();
+}
+
 /** 打开原生工作记录编辑器，只允许写入工作记录及其子目录。 */
 function openWorkRecordEditor() {
   if (!applicationState.activeFolderId || !isInWorkRecordFolder()) {
@@ -5712,6 +5737,8 @@ function renderFolderGrid() {
         `${folder.itemCount} 项内容${folder.childCount ? ` · ${folder.childCount} 个子文件夹` : ""}`,
       ),
     );
+    const description = getWorkbenchFolderDescription(folder);
+    if (description) openButton.append(createTextElement("p", "folder-description", description));
     /** actions 是移动、重命名和安全删除入口。 */
     const actions = document.createElement("div");
     actions.className = "folder-card-actions";
@@ -8274,6 +8301,9 @@ async function initializeApplication() {
     event.preventDefault();
     void saveWorkRecord();
   });
+  for (const button of dom.workRecordMarkdownToolbar.querySelectorAll("button")) {
+    button.addEventListener("click", () => insertWorkRecordMarkdown(button));
+  }
   dom.batchSelectButton.addEventListener("click", () => {
     setLibraryBatchMode(!applicationState.libraryBatchMode);
   });

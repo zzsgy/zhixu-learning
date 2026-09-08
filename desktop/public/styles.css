@@ -871,6 +871,7 @@ body.has-reading-toc .floating-reader-back {
 .folder-icon { color: var(--amber); font-size: 28px; line-height: 1; }
 .folder-card h3 { margin: 15px 0 7px; font-family: var(--serif); font-size: 21px; }
 .folder-card p { margin: 0; color: var(--ink-soft); font-size: 11px; }
+.folder-card .folder-description { max-width: 330px; margin-top: 9px; padding-right: 10px; line-height: 1.55; }
 .folder-card-actions {
   position: absolute;
   right: 12px;
@@ -1133,8 +1134,11 @@ body.has-reading-toc .floating-reader-back {
 .knowledge-card-dialog label { display: grid; gap: 7px; color: var(--ink-soft); font-size: 11px; }
 .knowledge-card-dialog input, .knowledge-card-dialog textarea, .knowledge-card-dialog select { width: 100%; border: 1px solid var(--line-dark); background: var(--paper-raised); color: var(--ink); padding: 12px; font: inherit; resize: vertical; }
 .knowledge-card-dialog footer { display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid var(--line); padding-top: 18px; }
-.work-record-dialog textarea { min-height: 280px; line-height: 1.8; }
+.work-record-dialog textarea { min-height: 280px; line-height: 1.8; font-family: var(--mono); font-size: 12px; }
 .work-record-dialog .work-record-hint { margin: -4px 0 0; color: var(--ink-soft); font-size: 11px; line-height: 1.6; }
+.work-record-markdown-toolbar { display: flex; flex-wrap: wrap; gap: 6px; }
+.work-record-markdown-toolbar button { border: 1px solid var(--line-dark); background: var(--paper); color: var(--ink-soft); cursor: pointer; padding: 5px 8px; font-family: var(--mono); font-size: 10px; }
+.work-record-markdown-toolbar button:hover { border-color: var(--cyan-strong); background: var(--quote-bg); color: var(--ink); }
 
 /* 专题页将多种知识内容组织成长期学习路线。 */
 .topics-hero {
