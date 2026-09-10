@@ -8,6 +8,22 @@ import path from "node:path";
 import test from "node:test";
 import { createArticleImageCache } from "../lib/article-image-cache.mjs";
 
+test("缓存协商得到的 AVIF 文章图片", async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "zhixu-avif-cache-"));
+  try {
+    const cache = createArticleImageCache({
+      imageDirectory: temporaryDirectory,
+      fetchImage: async () => ({ bytes: new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112, 97, 118, 105, 102]), contentType: "image/avif" }),
+    });
+    const cached = await cache.resolve("https://images.example.test/chart.png");
+    assert.equal(cached.contentType, "image/avif");
+    assert.equal(path.extname(cached.cachedPath), ".avif");
+    assert.ok(fs.existsSync(cached.cachedPath));
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("同一文章图片的首次并发请求只下载和写入一次", async (context) => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "zhixu-article-image-"));
   context.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));

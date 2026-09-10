@@ -6,7 +6,7 @@ import test from "node:test";
 
 const projectDirectory = path.resolve(import.meta.dirname, "..");
 const chromePath = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const port = 47832;
+const port = 47839;
 const baseUrl = `http://127.0.0.1:${port}`;
 
 async function waitForServer() {

@@ -46,6 +46,8 @@ const applicationState = {
   paperTranslationPollTimer: null,
   /** searchTimer 用于合并快速连续输入。 */
   searchTimer: null,
+  /** editingWorkRecordId 是当前正在覆盖保存的原生 Markdown 工作记录。 */
+  editingWorkRecordId: "",
   /** readingWorkspace 是当前内容的阅读状态、笔记和高亮批注。 */
   readingWorkspace: null,
   /** activeReadingSurface 是当前可进行目录和高亮操作的正文根节点。 */
@@ -435,6 +437,8 @@ const dom = {
   moveFolderDialog: document.querySelector("#move-folder-dialog"),
   workRecordDialog: document.querySelector("#work-record-dialog"),
   workRecordForm: document.querySelector("#work-record-form"),
+  workRecordDialogTitle: document.querySelector("#work-record-dialog-title"),
+  workRecordSubmit: document.querySelector("#work-record-submit"),
   workRecordLocation: document.querySelector("#work-record-location"),
   workRecordTitle: document.querySelector("#work-record-title"),
   workRecordContent: document.querySelector("#work-record-content"),
@@ -4437,6 +4441,35 @@ async function loadStorageOperations() {
   await Promise.all([loadBrowserClients(), loadImportJobs()]);
 }
 
+/** 从文档库进入导入页时，将当前目录同步为两种内容的默认保存位置。 */
+function openUploadFromCurrentLocation() {
+  const folder = applicationState.activeView === "library"
+    ? applicationState.folders.find((item) => item.id === applicationState.activeFolderId)
+    : null;
+  if (folder) {
+    if (!applicationState.uploadInProgress) {
+      applicationState.uploadFolderMode = "selected";
+      applicationState.selectedUploadFolderId = folder.id;
+      for (const control of dom.uploadDestinationModes) {
+        control.checked = control.value === "selected";
+      }
+      dom.uploadFolderSelect.value = folder.id;
+      dom.uploadFolderSelect.disabled = false;
+    }
+    if (!applicationState.articleImportBusy) {
+      applicationState.articleFolderMode = "selected";
+      applicationState.selectedArticleFolderId = folder.id;
+      for (const control of dom.articleDestinationModes) {
+        control.checked = control.value === "selected";
+      }
+      dom.articleFolderSelect.value = folder.id;
+      dom.articleFolderSelect.disabled = false;
+      updateArticleDestinationPreview();
+    }
+  }
+  showView("upload");
+}
+
 function showView(viewName) {
   if (viewName !== "storage") {
     window.clearTimeout(applicationState.importJobPollTimer);
@@ -4707,8 +4740,52 @@ function renderArticleReadingMode() {
   } else {
     dom.articleReaderContent.replaceChildren(createArticleOriginalContent(article));
   }
+  renderArticleVideos(article, requestedMode);
   renderReadingMath(dom.articleReaderContent);
   renderArticleTranslationControls(article);
+}
+
+/** Create click-to-load players from validated video IDs, never imported iframe markup. */
+function renderArticleVideos(article, mode) {
+  const videos = Array.isArray(article.videos) ? article.videos : [];
+  const original = new DOMParser().parseFromString(article.contentHtml || '', 'text/html');
+  const originalHeadings = Array.from(original.querySelectorAll('h1,h2,h3,h4'));
+  const surface = mode === 'bilingual'
+    ? dom.articleReaderContent.querySelector('.is-original')
+    : dom.articleReaderContent;
+  if (!surface) return;
+  for (const video of videos) {
+    if (video.platform !== 'youtube' || !/^[\w-]{11}$/.test(video.id)) continue;
+    const card = document.createElement('section');
+    card.className = 'article-video-card';
+    const frameArea = document.createElement('div');
+    frameArea.className = 'article-video-stage';
+    const play = createTextElement('button', 'primary-button', '▶ 播放视频');
+    play.type = 'button';
+    frameArea.append(createTextElement('p', '', 'YouTube · 在线视频'), play);
+    play.addEventListener('click', () => {
+      const frame = document.createElement('iframe');
+      frame.src = `https://www.youtube-nocookie.com/embed/${video.id}?autoplay=1`;
+      frame.title = video.title || 'YouTube 视频';
+      frame.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
+      frame.referrerPolicy = 'strict-origin-when-cross-origin';
+      frame.setAttribute('allowfullscreen', '');
+      frameArea.replaceChildren(frame);
+    });
+    const link = createTextElement('a', '', '在 YouTube 打开 ↗');
+    link.href = `https://www.youtube.com/watch?v=${video.id}`;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    card.append(frameArea, link, createTextElement('small', '', '播放需要连接 YouTube；无法加载时可打开原视频。'));
+    const blocks = Array.from(surface.querySelectorAll('h1,h2,h3,h4,p'));
+    let anchor = blocks.find((block) => block.textContent.trim() === video.anchor);
+    if (!anchor && mode === 'translation') {
+      const headingIndex = originalHeadings.findIndex((heading) => heading.textContent.trim() === video.anchor);
+      if (headingIndex >= 0) anchor = surface.querySelectorAll('h1,h2,h3,h4')[headingIndex];
+    }
+    if (anchor) anchor.before(card);
+    else surface.prepend(card);
+  }
 }
 
 /**
@@ -5525,9 +5602,10 @@ function getActiveFolderPath() {
   return activeFolder?.path || [];
 }
 
-/** 当前目录是否属于工作台的“工作记录”分区。 */
+/** 当前目录是否精确为工作台的“工作记录”入口。 */
 function isInWorkRecordFolder() {
-  return getActiveFolderPath().some((folder) => folder.name === "工作记录");
+  const names = getActiveFolderPath().map((folder) => folder.name);
+  return names.length === 2 && names[0] === "工作台" && names[1] === "工作记录";
 }
 
 /** 为工作台的三个固定入口提供用途说明，避免只看到名称而不清楚归档边界。 */
@@ -5554,16 +5632,48 @@ function insertWorkRecordMarkdown(button) {
   input.focus();
 }
 
-/** 打开原生工作记录编辑器，只允许写入工作记录及其子目录。 */
+/** 打开原生工作记录新建窗口，只允许写入固定工作记录入口。 */
 function openWorkRecordEditor() {
   if (!applicationState.activeFolderId || !isInWorkRecordFolder()) {
-    showToast("请先进入“工作台 / 工作记录”或其子目录。");
+    showToast("请先进入“工作台 / 工作记录”目录。");
     return;
   }
   dom.workRecordForm.reset();
+  applicationState.editingWorkRecordId = "";
+  dom.workRecordDialogTitle.textContent = "新建工作记录";
+  dom.workRecordSubmit.textContent = "保存工作记录";
   dom.workRecordLocation.textContent = `将保存到：${getActiveFolderPath().map((folder) => folder.name).join(" / ")}`;
   dom.workRecordDialog.showModal();
   window.setTimeout(() => dom.workRecordTitle.focus(), 0);
+}
+
+/** 从完整 Markdown 中去掉由编辑器维护的首个一级标题。 */
+function getWorkRecordBody(markdown) {
+  return String(markdown || "").replace(/^#\s+[^\r\n]+\r?\n(?:\r?\n)?/, "").trim();
+}
+
+/** 读取已有工作记录并在同一 Markdown 编辑器中打开。 */
+async function editWorkRecord(item) {
+  try {
+    const targetId = item.targetId || item.id;
+    const payload = await requestJson(`/api/documents/${encodeURIComponent(targetId)}`);
+    const record = payload.document;
+    if (record.documentKind !== "work_record" || record.extension !== ".md") {
+      throw new Error("这不是由知序创建的可编辑工作记录。");
+    }
+    applicationState.editingWorkRecordId = record.id;
+    dom.workRecordDialogTitle.textContent = "编辑工作记录";
+    dom.workRecordSubmit.textContent = "保存修改";
+    dom.workRecordTitle.value = record.title;
+    dom.workRecordContent.value = getWorkRecordBody(record.extractedText);
+    const folder = applicationState.folders.find((candidate) => candidate.id === record.folderId);
+    const location = folder?.path?.map((part) => part.name).join(" / ") || "当前归档目录";
+    dom.workRecordLocation.textContent = `正在编辑：${location}`;
+    dom.workRecordDialog.showModal();
+    window.setTimeout(() => dom.workRecordContent.focus(), 0);
+  } catch (error) {
+    showToast(error.message);
+  }
 }
 
 /** 将手写内容保存为当前工作记录目录中的 Markdown 文档。 */
@@ -5574,24 +5684,32 @@ async function saveWorkRecord() {
     showToast("请填写工作记录的标题和正文。");
     return;
   }
-  if (!applicationState.activeFolderId || !isInWorkRecordFolder()) {
+  const isEditing = Boolean(applicationState.editingWorkRecordId);
+  if (!isEditing && (!applicationState.activeFolderId || !isInWorkRecordFolder())) {
     showToast("当前不在工作记录目录，未保存。");
     return;
   }
   try {
-    const markdown = `# ${title}\n\n${content}\n`;
-    const payload = await requestJson("/api/documents", {
-      method: "POST",
+    const payload = await requestJson(
+      isEditing
+        ? `/api/documents/${encodeURIComponent(applicationState.editingWorkRecordId)}/work-record`
+        : "/api/documents",
+      {
+      method: isEditing ? "PUT" : "POST",
       headers: {
-        "Content-Type": "text/markdown; charset=utf-8",
-        "X-File-Name": encodeURIComponent(`${title}.md`),
-        "X-Target-Folder-Id": applicationState.activeFolderId,
+        "Content-Type": isEditing ? "application/json" : "text/markdown; charset=utf-8",
+        ...(!isEditing ? {
+          "X-File-Name": encodeURIComponent(`${title}.md`),
+          "X-Target-Folder-Id": applicationState.activeFolderId,
+          "X-Document-Kind": "work_record",
+        } : {}),
       },
-      body: markdown,
+      body: isEditing ? JSON.stringify({ title, content }) : `# ${title}\n\n${content}\n`,
     });
     dom.workRecordDialog.close();
+    applicationState.editingWorkRecordId = "";
     await loadLibrary();
-    showToast(`工作记录“${payload.document.title}”已保存。`);
+    showToast(`工作记录“${payload.document.title}”已${isEditing ? "更新" : "保存"}。`);
   } catch (error) {
     showToast(error.message);
   }
@@ -6464,6 +6582,14 @@ function renderDocumentGrid() {
     renameButton.title = `修改《${documentItem.title}》的显示名称`;
     renameButton.hidden = documentItem.targetType === "paper";
     renameButton.addEventListener("click", () => void renameKnowledgeItem(documentItem));
+    /** editButton 只为知序原生 Markdown 工作记录开放正文编辑。 */
+    const editButton = document.createElement("button");
+    editButton.type = "button";
+    editButton.className = "content-edit-button";
+    editButton.textContent = "编辑";
+    editButton.title = `编辑《${documentItem.title}》的 Markdown 正文`;
+    editButton.hidden = documentItem.targetType !== "document" || documentItem.documentKind !== "work_record";
+    editButton.addEventListener("click", () => void editWorkRecord(documentItem));
 
     /** metadata 是卡片顶部分类和日期。 */
     const metadata = document.createElement("div");
@@ -6517,7 +6643,7 @@ function renderDocumentGrid() {
     const actionGroup = document.createElement("div");
     actionGroup.className = "document-card-actions";
     actionGroup.hidden = applicationState.libraryBatchMode;
-    actionGroup.append(favoriteButton, renameButton, moveButton, deleteButton);
+    actionGroup.append(favoriteButton, editButton, renameButton, moveButton, deleteButton);
     card.append(selectionLabel, openButton, actionGroup);
     dom.documentGrid.append(card);
   }
@@ -8239,9 +8365,9 @@ async function initializeApplication() {
     void snoozeWeeklyPaperReminder();
   });
   for (const button of document.querySelectorAll("[data-open-upload]")) {
-    button.addEventListener("click", () => showView("upload"));
+    button.addEventListener("click", openUploadFromCurrentLocation);
   }
-  dom.topUploadButton.addEventListener("click", () => showView("upload"));
+  dom.topUploadButton.addEventListener("click", openUploadFromCurrentLocation);
   for (const modeControl of dom.uploadDestinationModes) {
     modeControl.addEventListener("change", () => {
       applicationState.uploadFolderMode = modeControl.value === "selected" ? "selected" : "auto";

@@ -99,6 +99,9 @@ test("上传成功后自动收起状态行且空队列不占版面", () => {
   assert.match(applicationSource, /\/api\/folders\/\$\{encodeURIComponent\(folder\.id\)\}\/move/);
   assert.match(applicationSource, /function renameKnowledgeItem\(item\)/);
   assert.match(applicationSource, /className = "content-rename-button"/);
+  assert.match(applicationSource, /names\.length === 2 && names\[0\] === "工作台" && names\[1\] === "工作记录"/);
+  assert.match(applicationSource, /documentItem\.documentKind !== "work_record"/);
+  assert.match(styleSource, /#new-work-record-button\[hidden\]\s*\{\s*display:\s*none !important;/);
 });
 
 /**
@@ -160,6 +163,12 @@ test("本地文档默认按章节阅读且在新标签页打开 PDF 原版", () 
   assert.match(serverSource, /renderPdfTableRegion/);
   assert.match(serverSource, /renderPdfEmbeddedFigure/);
   assert.match(serverSource, /listPdfEmbeddedFigures/);
+  assert.match(serverSource, /listPdfEmbeddedFigures\(filePath\)\.catch/);
+  assert.match(serverSource, /PDF 内嵌插图提取已降级/);
+  assert.match(
+    fs.readFileSync(path.join(projectDirectory, "lib", "config.mjs"), "utf8"),
+    /pdfImagesPath:[^\n]+\|\| "pdfimages"/,
+  );
   assert.match(extractorSource, /extractPdfReadingStructure/);
   assert.match(extractorSource, /extractPdfOutline/);
   assert.match(serverSource, /document\.pdfOutline = readingAssets\.outline/);
@@ -241,6 +250,52 @@ test("上传、分类、搜索、修改分类与下载原件", async () => {
     /** workerPayload 在集成测试中应明确显示工作器已关闭。 */
     const workerPayload = await workerResponse.json();
     assert.equal(workerPayload.worker.status, "disabled");
+    /** 工作记录只能在固定入口新建，并可在原生 Markdown 编辑器中再次保存。 */
+    const workRecordFoldersPayload = await fetch(`${integrationBaseUrl}/api/folders`).then((response) => response.json());
+    const workRecordFolder = workRecordFoldersPayload.folders.find(
+      (folder) => folder.path?.map((part) => part.name).join(" / ") === "工作台 / 工作记录",
+    );
+    const learningFolder = workRecordFoldersPayload.folders.find(
+      (folder) => folder.path?.map((part) => part.name).join(" / ") === "学习",
+    );
+    assert.ok(workRecordFolder);
+    assert.ok(learningFolder);
+    const rejectedWorkRecord = await fetch(`${integrationBaseUrl}/api/documents`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/markdown",
+        "X-File-Name": encodeURIComponent("错误目录.md"),
+        "X-Target-Folder-Id": learningFolder.id,
+        "X-Document-Kind": "work_record",
+      },
+      body: "# 错误目录\n\n不应保存。\n",
+    });
+    assert.equal(rejectedWorkRecord.status, 422);
+    const createdWorkRecord = await fetch(`${integrationBaseUrl}/api/documents`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/markdown",
+        "X-File-Name": encodeURIComponent("集成测试工作记录.md"),
+        "X-Target-Folder-Id": workRecordFolder.id,
+        "X-Document-Kind": "work_record",
+      },
+      body: "# 集成测试工作记录\n\n## 初始内容\n\n- [ ] 待办\n",
+    });
+    assert.equal(createdWorkRecord.status, 201);
+    const createdWorkRecordPayload = await createdWorkRecord.json();
+    assert.equal(createdWorkRecordPayload.document.documentKind, "work_record");
+    const editedWorkRecord = await fetch(
+      `${integrationBaseUrl}/api/documents/${encodeURIComponent(createdWorkRecordPayload.document.id)}/work-record`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "已编辑工作记录", content: "## 新内容\n\n- [x] 已完成" }),
+      },
+    );
+    assert.equal(editedWorkRecord.status, 200);
+    const editedWorkRecordPayload = await editedWorkRecord.json();
+    assert.equal(editedWorkRecordPayload.document.title, "已编辑工作记录");
+    assert.match(editedWorkRecordPayload.document.extractedText, /已完成/);
     /** sourceText 是用于测试分类和下载完整性的 Markdown 原文。 */
     const sourceText =
       "# PostgreSQL MVCC\n\n数据库事务通过 MVCC 提供一致性快照，查询优化器会评估索引成本。";
@@ -320,7 +375,8 @@ test("上传、分类、搜索、修改分类与下载原件", async () => {
     );
     /** listPayload 是文档列表和统计。 */
     const listPayload = await listResponse.json();
-    assert.equal(listPayload.statistics.total, 1);
+    assert.equal(listPayload.statistics.total, 2);
+    assert.equal(listPayload.documents.length, 1);
     assert.equal(listPayload.documents[0].id, documentId);
     assert.equal(listPayload.documents[0].title, "PostgreSQL 事务与 MVCC");
     assert.equal(listPayload.documents[0].isFavorite, true);
@@ -632,7 +688,7 @@ test("上传、分类、搜索、修改分类与下载原件", async () => {
     assert.equal(dashboardPayload.dashboard.summary.totalReadingSeconds, 95);
     assert.equal(dashboardPayload.dashboard.summary.readItemCount, 1);
     assert.ok(dashboardPayload.dashboard.summary.newItemCount >= 1);
-    assert.equal(dashboardPayload.dashboard.libraryComposition.documentCount, 1);
+    assert.equal(dashboardPayload.dashboard.libraryComposition.documentCount, 2);
     assert.equal(dashboardPayload.dashboard.libraryComposition.articleCount, 0);
     assert.equal(dashboardPayload.dashboard.libraryComposition.paperCount, 0);
     assert.equal(dashboardPayload.dashboard.githubStatistics.projectCount, 0);

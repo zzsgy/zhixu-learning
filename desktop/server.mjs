@@ -96,6 +96,7 @@ import {
   retryImportJob,
   updateArticleTranslation,
   updateDocumentCategory,
+  updateWorkRecordDocument,
   updateReadingAnnotation,
   updateReadingSession,
   updateReadingState,
@@ -357,7 +358,12 @@ async function getPdfReadingAssets(document, filePath) {
   if (pdfReadingTextCache.has(cacheKey)) return pdfReadingTextCache.get(cacheKey);
   const [readingStructure, figuresByPage] = await Promise.all([
     extractPdfReadingStructure(fs.readFileSync(filePath)),
-    listPdfEmbeddedFigures(filePath),
+    listPdfEmbeddedFigures(filePath).catch((error) => {
+      // pdimages 只用于获得更清晰的原始插图，不应阻断 PDF 正文阅读。
+      // 精简版 Poppler 通常仅包含 pdftoppm，此时仍可用页面区域渲染图表。
+      console.warn(`PDF 内嵌插图提取已降级：${error.message}`);
+      return {};
+    }),
   ]);
   const readingAssets = {
     markedText: readingStructure.markedText,
@@ -890,6 +896,15 @@ function toDocumentListItem(document) {
   /** extractedText 被排除，避免文档列表响应随着知识库增长而过大。 */
   const { extractedText: _extractedText, ...listItem } = document;
   return { ...listItem, tags: listContentTags("document", document.id) };
+}
+
+/** 判断文件夹是否精确为根目录“工作台 / 工作记录”。 */
+function isWorkRecordFolder(folderId) {
+  const folders = listFolders();
+  const child = folders.find((folder) => folder.id === String(folderId || ""));
+  if (!child || child.name !== "工作记录") return false;
+  const root = folders.find((folder) => folder.id === child.parentId);
+  return Boolean(root && root.name === "工作台" && !root.parentId);
 }
 
 /**
@@ -2815,8 +2830,15 @@ async function handleApiRequest(request, response, url) {
     const rawRelativePath = String(request.headers["x-relative-path"] ?? "");
     /** targetFolderId 是用户上传前明确选择的知识库目录；空值表示自动识别。 */
     const targetFolderId = String(request.headers["x-target-folder-id"] ?? "").trim();
+    /** documentKind 只接受知序内部定义的工作记录类型，普通上传一律视为导入文件。 */
+    const requestedDocumentKind = String(request.headers["x-document-kind"] ?? "").trim();
+    const documentKind = requestedDocumentKind === "work_record" ? "work_record" : "imported";
     if (targetFolderId && !listFolders().some((folder) => folder.id === targetFolderId)) {
       sendJson(response, 400, { message: "选择的知识库目录已不存在，请刷新后重试。" });
+      return true;
+    }
+    if (documentKind === "work_record" && !isWorkRecordFolder(targetFolderId)) {
+      sendJson(response, 422, { message: "工作记录只能在“工作台 / 工作记录”目录中新建。" });
       return true;
     }
     /** folderPath 是需要在知识库中创建或复用的安全目录层级。 */
@@ -2895,6 +2917,7 @@ async function handleApiRequest(request, response, url) {
         sizeBytes: fileBuffer.length,
         sha256,
         title: documentTitle,
+        documentKind,
         category: classification.category,
         categorySource: classification.source,
         categoryConfidence: classification.confidence,
@@ -2930,6 +2953,54 @@ async function handleApiRequest(request, response, url) {
 
   /** detailMatch 匹配单份文档详情地址。 */
   const detailMatch = url.pathname.match(/^\/api\/documents\/([^/]+)$/);
+  /** workRecordMatch 是原生 Markdown 工作记录的正文编辑地址。 */
+  const workRecordMatch = url.pathname.match(/^\/api\/documents\/([^/]+)\/work-record$/);
+  if (request.method === "PUT" && workRecordMatch) {
+    const documentId = decodeURIComponent(workRecordMatch[1]);
+    const current = getDocumentById(documentId);
+    if (!current) {
+      sendJson(response, 404, { message: "找不到这份工作记录。" });
+      return true;
+    }
+    if (current.documentKind !== "work_record" || current.extension !== ".md") {
+      sendJson(response, 403, { message: "只有由知序创建的 Markdown 工作记录可以编辑正文。" });
+      return true;
+    }
+    const requestBuffer = await readRequestBuffer(request, 5 * 1024 * 1024);
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    const title = String(payload.title || "").replace(/\s+/g, " ").trim();
+    const content = String(payload.content || "").trim();
+    if (!title || title.length > 180 || !content) {
+      sendJson(response, 422, { message: "标题、正文不能为空，且标题不能超过 180 个字符。" });
+      return true;
+    }
+    const markdown = `# ${title}\n\n${content}\n`;
+    const fileBuffer = Buffer.from(markdown, "utf8");
+    const sha256 = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+    const storedPath = path.join(attachmentDirectory, current.storedName);
+    if (!isPathInsideDirectory(storedPath, attachmentDirectory) || !fs.existsSync(storedPath)) {
+      sendJson(response, 409, { message: "工作记录的本地 Markdown 文件已丢失，无法安全覆盖。" });
+      return true;
+    }
+    const originalBuffer = fs.readFileSync(storedPath);
+    createDailyBackup();
+    try {
+      fs.writeFileSync(storedPath, fileBuffer);
+      const document = updateWorkRecordDocument(documentId, {
+        title,
+        extractedText: markdown,
+        sizeBytes: fileBuffer.length,
+        sha256,
+        summary: createDocumentSummary(markdown, `${title}.md`),
+      });
+      if (!document) throw new Error("工作记录类型校验失败，未更新数据库。");
+      sendJson(response, 200, { document });
+    } catch (error) {
+      fs.writeFileSync(storedPath, originalBuffer);
+      throw error;
+    }
+    return true;
+  }
   if (request.method === "PATCH" && detailMatch) {
     const requestBuffer = await readRequestBuffer(request, 32 * 1024);
     const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
@@ -3265,7 +3336,7 @@ function serveStaticFile(request, response, url) {
     // 本地个人应用优先保证修改立即可见，避免 HTML 与旧 CSS/JS 混用。
     "Cache-Control": "no-store",
     "Content-Security-Policy":
-      "default-src 'self'; style-src 'self'; script-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "default-src 'self'; style-src 'self'; script-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src https://www.youtube-nocookie.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
   });

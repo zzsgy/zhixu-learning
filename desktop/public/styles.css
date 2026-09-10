@@ -605,6 +605,12 @@ body.has-reading-toc .floating-reader-back {
 }
 .primary-button { border-color: #527d72; background: #527d72; color: #fff; }
 .secondary-button { background: transparent; color: var(--ink); }
+#new-work-record-button[hidden] { display: none !important; }
+.article-video-card { margin: 24px 0; padding: 16px; border: 1px solid var(--line-dark); border-radius: 12px; }
+.article-video-stage { aspect-ratio: 16 / 9; background: #142822; color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 8px; overflow: hidden; }
+.article-video-stage iframe { width: 100%; height: 100%; border: 0; }
+.article-video-card > a { display: inline-block; margin-top: 12px; }
+.article-video-card > small { display: block; color: var(--ink-soft); font-size: 12px; margin-top: 6px; }
 .view { display: none; }
 .view.is-active { display: block; }
 

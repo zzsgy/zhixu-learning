@@ -9,6 +9,7 @@ import fs, { readFileSync } from "node:fs";
 import net from "node:net";
 import tls from "node:tls";
 import { Readability } from "@mozilla/readability";
+import { extractArticleVideos } from "./article-video.mjs";
 import { parseHTML } from "linkedom";
 import { EnvHttpProxyAgent, fetch as undiciFetch } from "undici";
 import { classifyDocument } from "./classifier.mjs";
@@ -490,7 +491,7 @@ export async function fetchPublicImage(inputUrl) {
     /** contentType 是仅允许常见文章图片格式的响应类型。 */
     const contentType =
       response.headers.get("content-type")?.split(";")[0].toLowerCase() ?? "";
-    if (!["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"].includes(contentType)) {
+    if (!["image/avif", "image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"].includes(contentType)) {
       throw new Error("远程资源不是支持的文章图片。");
     }
     /** declaredLength 是图片服务器声明的容量。 */
@@ -761,6 +762,119 @@ export function restoreReadableFigureImages(readableHtml, originalDocument) {
   return root.innerHTML;
 }
 
+/**
+ * 在 Readability 运行前为无图注的大图加入稳定位置锚点。
+ *
+ * Framer 等站点常把正文图放在只有布局 div 的容器中；Readability 会把整个
+ * 容器当成装饰元素删除。短文本锚点能随正文保留，解析后再恢复成原始图片。
+ *
+ * @param {Document} document 原始网页 DOM。
+ * @returns {Array<{token: string, src: string, alt: string, placement: string}>} 待恢复图片。
+ */
+export function markStandaloneArticleImages(document) {
+  const markedImages = [];
+  const readingSequence = Array.from(document.querySelectorAll("h1, h2, h3, h4, p, li, blockquote, img"));
+  const images = readingSequence.filter((element) => element.tagName?.toLowerCase() === "img");
+  for (const image of images) {
+    if (image.closest("figure, header, nav, footer, aside")) continue;
+    const src = image.getAttribute("data-src")
+      || image.getAttribute("data-original")
+      || image.getAttribute("src")
+      || "";
+    if (!src) continue;
+    const width = Number.parseInt(image.getAttribute("width") || "0", 10);
+    const height = Number.parseInt(image.getAttribute("height") || "0", 10);
+    /** 明确的大尺寸或正文图片容器才补锚点，避免把头像、图标和品牌标志带入正文。 */
+    const isLargeImage = width >= 480 || height >= 360;
+    const isNamedContentImage = Boolean(image.closest('[data-framer-name="Image"], [data-framer-background-image-wrapper="true"]'));
+    if (!isLargeImage && !isNamedContentImage) continue;
+    const token = `ZHIXU_ARTICLE_IMAGE_${String(markedImages.length + 1).padStart(4, "0")}`;
+    const imageIndex = readingSequence.indexOf(image);
+    const isUsableTextAnchor = (element) => (
+      element.tagName?.toLowerCase() !== "img"
+      && !element.closest("header, nav, footer, aside")
+      && String(element.textContent || "").replace(/\s+/g, " ").trim().length >= 12
+    );
+    /** 优先把标记附到图片后的第一段真实正文，避免随纯布局容器一起被删除。 */
+    const nextAnchor = readingSequence.slice(imageIndex + 1).find(isUsableTextAnchor);
+    const previousAnchor = readingSequence.slice(0, imageIndex).reverse().find(isUsableTextAnchor);
+    const anchor = nextAnchor || previousAnchor;
+    if (!anchor) continue;
+    const placement = nextAnchor ? "before" : "after";
+    if (placement === "before") anchor.prepend(document.createTextNode(`${token} `));
+    else anchor.append(document.createTextNode(` ${token}`));
+    markedImages.push({ token, src, alt: image.getAttribute("alt") || "", placement });
+  }
+  return markedImages;
+}
+
+/** 把 Readability 保留下来的图片锚点替换回标准图片节点。 */
+export function restoreMarkedArticleImages(readableHtml, markedImages) {
+  if (!Array.isArray(markedImages) || markedImages.length === 0) return String(readableHtml || "");
+  const { document } = parseHTML(`<main>${String(readableHtml || "")}</main>`);
+  const root = document.querySelector("main");
+  if (!root) return String(readableHtml || "");
+  const findMarkerTextNode = (node, token) => {
+    for (const child of Array.from(node.childNodes || [])) {
+      if (child.nodeType === 3 && String(child.textContent || "").includes(token)) return child;
+      const nested = findMarkerTextNode(child, token);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  for (const markedImage of markedImages) {
+    /** Readability 可能移除 data 属性，但会保留唯一锚点文本。 */
+    const markerTextNode = findMarkerTextNode(root, markedImage.token);
+    if (!markerTextNode) continue;
+    markerTextNode.textContent = String(markerTextNode.textContent || "")
+      .replace(markedImage.token, "")
+      .replace(/^\s+|\s+$/g, " ");
+    const markerBlock = markerTextNode.parentElement?.closest("p, h1, h2, h3, h4, li, blockquote")
+      || markerTextNode.parentElement;
+    if (!markerBlock) continue;
+    const image = document.createElement("img");
+    image.setAttribute("src", markedImage.src);
+    image.setAttribute("alt", markedImage.alt);
+    if (markedImage.placement === "after") markerBlock.after(image);
+    else markerBlock.before(image);
+  }
+  return root.innerHTML;
+}
+
+/**
+ * 按正文块序号把原文图片同步到结构一致的既有译文中。
+ * 翻译器保持段落和标题顺序，因此以“图片前已有多少非图片块”为稳定锚点。
+ */
+export function mergeArticleImagesByBlockPosition(sourceHtml, translatedHtml) {
+  const { document: sourceDocument } = parseHTML(`<main>${String(sourceHtml || "")}</main>`);
+  const { document: translatedDocument } = parseHTML(`<main>${String(translatedHtml || "")}</main>`);
+  const sourceRoot = sourceDocument.querySelector("main");
+  const translatedRoot = translatedDocument.querySelector("main");
+  if (!sourceRoot || !translatedRoot) return String(translatedHtml || "");
+  const sourceBlocks = Array.from(sourceRoot.children);
+  const sourceImages = sourceBlocks.filter((element) => element.tagName?.toLowerCase() === "img");
+  if (sourceImages.length === 0 || translatedRoot.querySelector("img")) return translatedRoot.innerHTML;
+  let nonImageBlockCount = 0;
+  for (const sourceBlock of sourceBlocks) {
+    if (sourceBlock.tagName?.toLowerCase() !== "img") {
+      nonImageBlockCount += 1;
+      continue;
+    }
+    const translatedBlocks = Array.from(translatedRoot.children).filter(
+      (element) => element.tagName?.toLowerCase() !== "img",
+    );
+    const anchor = translatedBlocks[nonImageBlockCount] || null;
+    const image = translatedDocument.createElement("img");
+    image.setAttribute("src", sourceBlock.getAttribute("src") || "");
+    image.setAttribute("alt", sourceBlock.getAttribute("alt") || "");
+    image.setAttribute("loading", "lazy");
+    image.setAttribute("referrerpolicy", "no-referrer");
+    if (anchor) anchor.before(image);
+    else translatedRoot.append(image);
+  }
+  return translatedRoot.innerHTML;
+}
+
 /** embeddedImageFormats 是允许从网页 data URL 落入本地缓存的非脚本图片格式。 */
 const embeddedImageFormats = new Map([
   ["image/png", { extension: ".png", signature: (bytes) =>
@@ -854,6 +968,10 @@ async function parseAndClassifyArticleSource(source) {
     source.finalUrl.hostname.toLowerCase() === "mp.weixin.qq.com"
       ? "wechat"
       : "web";
+  /** standaloneImages 让 Readability 不会吞掉 Framer 等页面的无图注正文大图。 */
+  const standaloneImages = sourceType === "web"
+    ? markStandaloneArticleImages(originalDocument)
+    : [];
   /** wechatContent 是微信公众号正文容器。 */
   const wechatContent = originalDocument.querySelector(
     "#js_content, .rich_media_content",
@@ -871,9 +989,12 @@ async function parseAndClassifyArticleSource(source) {
   const extractedContentHtml =
     wechatContent?.innerHTML?.trim() ?? readable?.content?.trim() ?? "";
   /** 部分出版商页面会被 Readability 保留图注但删除主图，此处按图注精确补回。 */
-  const rawContentHtml = wechatContent
+  const figureRestoredHtml = wechatContent
     ? extractedContentHtml
     : restoreReadableFigureImages(extractedContentHtml, originalDocument);
+  const rawContentHtml = wechatContent
+    ? figureRestoredHtml
+    : restoreMarkedArticleImages(figureRestoredHtml, standaloneImages);
   /** sanitized 是移除危险内容后的正文。 */
   const sanitized = sanitizeArticleHtml(rawContentHtml, source.finalUrl);
   if (!sanitized.html || sanitized.text.length < minimumArticleLength) {
@@ -941,6 +1062,7 @@ async function parseAndClassifyArticleSource(source) {
     publishedAt,
     coverImageUrl,
     contentHtml: sanitized.html,
+    videos: extractArticleVideos(source.text),
     contentText: sanitized.text,
     sourceLanguage,
     translationStatus:

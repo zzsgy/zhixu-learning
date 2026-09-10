@@ -7,6 +7,7 @@ import path from "node:path";
 
 /** 支持写入磁盘缓存的图片 MIME、扩展名映射。 */
 const imageFormats = new Map([
+  ["image/avif", ".avif"],
   ["image/jpeg", ".jpg"],
   ["image/png", ".png"],
   ["image/gif", ".gif"],

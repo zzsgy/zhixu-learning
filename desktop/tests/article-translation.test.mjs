@@ -40,6 +40,7 @@ test("英文文章经用户请求后进入 Codex 队列并保留双语内容", a
       coverImageUrl: null,
       contentHtml: `<h2>Introduction</h2><p>${sourceText}</p>`,
       contentText: sourceText,
+      videos: [{ platform: 'youtube', id: 'JWMF5EpP0KE', anchor: 'Introduction' }],
       sourceLanguage: "en",
       translationStatus: "not_requested",
       wordCount: sourceText.length,
@@ -47,6 +48,7 @@ test("英文文章经用户请求后进入 Codex 队列并保留双语内容", a
       updatedAt: "2026-08-18T00:00:00.000Z",
     });
     assert.equal(savedArticle.sourceLanguage, "en");
+    assert.equal(databaseModule.getArticleById(savedArticle.id).videos[0].id, 'JWMF5EpP0KE');
     /** duplicateByTitle 验证不同网址但原标题一致时不会创建第二篇网页文章。 */
     const duplicateByTitle = databaseModule.findDuplicateArticle({
       url: "https://example.com/copied-title",

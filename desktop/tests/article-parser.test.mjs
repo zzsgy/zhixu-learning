@@ -12,12 +12,15 @@ import {
   createExternalFetchError,
   detectArticleLanguage,
   lookupPublicAddresses,
+  markStandaloneArticleImages,
+  mergeArticleImagesByBlockPosition,
   normalizeLegacyHtmlImages,
   normalizeArticleMath,
   parseAndClassifyCapturedArticle,
   persistEmbeddedArticleImages,
   readNetworkErrorCode,
   restoreReadableFigureImages,
+  restoreMarkedArticleImages,
   sanitizeArticleHtml,
 } from "../lib/article-parser.mjs";
 
@@ -33,6 +36,34 @@ test("补回 Readability 丢失的出版商正文主图并保留图注位置", (
   );
   assert.match(restored, /<img[^>]+figure-1\.png/);
   assert.match(restored, /figcaption>Fig\. 1: Model architecture/);
+});
+
+test("用位置锚点恢复 Framer 无图注正文大图并忽略页头图标", () => {
+  const { document } = parseHTML(`
+    <body>
+      <header><img width="900" height="500" src="/brand-banner.png"></header>
+      <main><h2>Physical Work</h2><div data-framer-name="Image">
+        <img width="1920" height="1286" src="/physical-work.png" alt="">
+      </div><p>Chart explanation.</p></main>
+    </body>
+  `);
+  const markedImages = markStandaloneArticleImages(document);
+  assert.equal(markedImages.length, 1);
+  assert.equal(markedImages[0].src, "/physical-work.png");
+  const restored = restoreMarkedArticleImages(
+    `<h2>Physical Work</h2><p>${markedImages[0].token}</p><p>Chart explanation.</p>`,
+    markedImages,
+  );
+  assert.match(restored, /<img[^>]+physical-work\.png/);
+  assert.doesNotMatch(restored, /ZHIXU_ARTICLE_IMAGE/);
+  assert.doesNotMatch(restored, /brand-banner/);
+});
+
+test("按块位置把修复后的原文图片同步到既有中文译文", () => {
+  const sourceHtml = "<h3>Physical Work</h3><img src=\"https://img.example/chart.png\" alt=\"Chart\"><p>Explanation</p>";
+  const translatedHtml = "<h3>体力劳动</h3><p>说明</p>";
+  const merged = mergeArticleImagesByBlockPosition(sourceHtml, translatedHtml);
+  assert.match(merged, /^<h3>体力劳动<\/h3><img[^>]+chart\.png[^>]*><p>说明<\/p>$/);
 });
 
 test("把带 TeX 注释的 MathML 转成阅读页可渲染公式", () => {

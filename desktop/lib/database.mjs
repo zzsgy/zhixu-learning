@@ -38,6 +38,7 @@ database.exec(`
     sha256 TEXT NOT NULL,
     title TEXT NOT NULL,
     display_title TEXT NOT NULL DEFAULT '',
+    document_kind TEXT NOT NULL DEFAULT 'imported',
     category TEXT NOT NULL,
     category_source TEXT NOT NULL DEFAULT 'rules',
     category_confidence REAL NOT NULL DEFAULT 0,
@@ -496,7 +497,27 @@ function ensureTableColumn(tableName, columnName, columnDefinition) {
 
 /** 用户修改的展示名称独立于来源标题，重新解析或更新原文时不会被覆盖。 */
 ensureTableColumn("documents", "display_title", "TEXT NOT NULL DEFAULT ''");
+ensureTableColumn("documents", "document_kind", "TEXT NOT NULL DEFAULT 'imported'");
 ensureTableColumn("articles", "display_title", "TEXT NOT NULL DEFAULT ''");
+ensureTableColumn("articles", "videos_json", "TEXT NOT NULL DEFAULT '[]'");
+
+/** 兼容此前由原生编辑器创建、但尚未带类型标记的工作记录。 */
+database.prepare(`
+  UPDATE documents
+  SET document_kind = 'work_record'
+  WHERE document_kind = 'imported'
+    AND extension = '.md'
+    AND id IN (
+      SELECT cf.target_id
+      FROM content_folders AS cf
+      JOIN folders AS child ON child.id = cf.folder_id
+      JOIN folders AS root ON root.id = child.parent_id
+      WHERE cf.target_type = 'document'
+        AND child.name = '工作记录'
+        AND root.name = '工作台'
+        AND root.parent_id IS NULL
+    )
+`).run();
 
 /** articleTranslationColumns 是网页文章的语言识别和 Codex 译文字段。 */
 const articleTranslationColumns = Object.freeze([
@@ -674,6 +695,7 @@ function mapDocumentRow(row) {
     sha256: row.sha256,
     title: row.display_title || row.title,
     sourceTitle: row.title,
+    documentKind: row.document_kind || "imported",
     category: row.category,
     categorySource: row.category_source,
     categoryConfidence: row.category_confidence,
@@ -814,6 +836,7 @@ function mapArticleRow(row) {
     publishedAt: row.published_at,
     coverImageUrl: row.cover_image_url,
     contentHtml: row.content_html,
+    videos: JSON.parse(row.videos_json || '[]'),
     contentText: row.content_text,
     sourceLanguage: row.source_language || "unknown",
     translationStatus: row.translation_status || "not_required",
@@ -1267,10 +1290,10 @@ export function saveArticle(article, { targetFolderId = "", sortOrder = 0 } = {}
         INSERT INTO articles (
           id, url, source_type, title, summary, category, category_source,
           category_confidence, author, published_at, cover_image_url,
-          content_html, content_text, source_language, translation_status,
+          content_html, content_text, source_language, translation_status, videos_json,
           translated_title, translated_summary, translated_html, translated_text,
           translation_source, translated_at, word_count, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(url) DO UPDATE SET
           source_type = excluded.source_type,
           title = excluded.title,
@@ -1282,6 +1305,7 @@ export function saveArticle(article, { targetFolderId = "", sortOrder = 0 } = {}
           published_at = excluded.published_at,
           cover_image_url = excluded.cover_image_url,
           content_html = excluded.content_html,
+          videos_json = excluded.videos_json,
           content_text = excluded.content_text,
           source_language = excluded.source_language,
           translation_status = CASE
@@ -1338,6 +1362,7 @@ export function saveArticle(article, { targetFolderId = "", sortOrder = 0 } = {}
         article.contentText,
         article.sourceLanguage || "unknown",
         article.translationStatus || "not_required",
+        JSON.stringify(article.videos || []),
         article.translatedTitle || "",
         article.translatedSummary || "",
         article.translatedHtml || "",
@@ -1377,6 +1402,23 @@ export function saveArticle(article, { targetFolderId = "", sortOrder = 0 } = {}
     database.exec("ROLLBACK;");
     throw error;
   }
+  return getArticleById(articleId);
+}
+
+/** 更新文章原文与既有译文中的媒体 HTML，不改变正文文本和翻译完成状态。 */
+export function updateArticleMedia(articleId, { contentHtml, translatedHtml, coverImageUrl }) {
+  const current = getArticleById(articleId);
+  if (!current) return null;
+  database.prepare(`
+    UPDATE articles SET content_html = ?, translated_html = ?, cover_image_url = ?, updated_at = ?
+    WHERE id = ?
+  `).run(
+    String(contentHtml || current.contentHtml || ""),
+    String(translatedHtml || current.translatedHtml || ""),
+    coverImageUrl ?? current.coverImageUrl ?? null,
+    new Date().toISOString(),
+    articleId,
+  );
   return getArticleById(articleId);
 }
 
@@ -1907,10 +1949,10 @@ export function insertDocument(document) {
   const insertDocumentStatement = database.prepare(`
     INSERT INTO documents (
       id, original_name, stored_name, mime_type, extension, size_bytes,
-      sha256, title, category, category_source, category_confidence,
+      sha256, title, document_kind, category, category_source, category_confidence,
       summary, extracted_text, extraction_status, created_at, updated_at
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     )
   `);
   /** insertSearchStatement 写入全文搜索索引。 */
@@ -1931,6 +1973,7 @@ export function insertDocument(document) {
       document.sizeBytes,
       document.sha256,
       document.title,
+      document.documentKind || "imported",
       document.category,
       document.categorySource,
       document.categoryConfidence,
@@ -1976,6 +2019,49 @@ export function insertDocument(document) {
     assignContentToFolder("document", document.id, initialFolderPath.at(-1).id);
   }
   return getDocumentById(document.id);
+}
+
+/**
+ * 更新由知序原生编辑器创建的 Markdown 工作记录及全文索引。
+ *
+ * @param {string} documentId 文档 ID。
+ * @param {{title: string, extractedText: string, sizeBytes: number, sha256: string, summary: string}} changes 新内容。
+ * @returns {Record<string, unknown> | null} 更新后的文档。
+ */
+export function updateWorkRecordDocument(documentId, changes) {
+  const current = getDocumentById(documentId);
+  if (!current || current.documentKind !== "work_record" || current.extension !== ".md") return null;
+  const title = normalizeDisplayTitle(changes.title);
+  const extractedText = String(changes.extractedText || "");
+  const updatedAt = new Date().toISOString();
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    database.prepare(`
+      UPDATE documents SET
+        title = ?, display_title = '', original_name = ?, size_bytes = ?, sha256 = ?,
+        summary = ?, extracted_text = ?, extraction_status = 'ready', updated_at = ?
+      WHERE id = ? AND document_kind = 'work_record'
+    `).run(
+      title,
+      `${title}.md`,
+      Number(changes.sizeBytes) || 0,
+      String(changes.sha256 || ""),
+      String(changes.summary || ""),
+      extractedText,
+      updatedAt,
+      documentId,
+    );
+    database.prepare("DELETE FROM document_search WHERE document_id = ?").run(documentId);
+    database.prepare(`
+      INSERT INTO document_search(document_id, title, original_name, category, summary, extracted_text)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(documentId, title, `${title}.md`, current.category, String(changes.summary || ""), extractedText);
+    database.exec("COMMIT;");
+    return getDocumentById(documentId);
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
 }
 
 /**
