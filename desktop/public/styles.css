@@ -3271,7 +3271,8 @@ mark.reading-highlight.is-focused { box-shadow: 0 0 0 3px var(--amber); }
 :root[data-reading-theme="immersive"] .article-prose,
 :root[data-reading-theme="immersive"] .paper-prose,
 :root[data-reading-theme="immersive"] .readable-content {
-  max-width: 65ch;
+  width: min(1120px, 100%);
+  max-width: none;
   border-color: transparent;
   background: transparent;
   box-shadow: none;

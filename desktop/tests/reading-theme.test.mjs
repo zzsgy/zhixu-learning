@@ -26,6 +26,7 @@ test("沉浸夜读使用本地霞鹜文楷并把目录移到右侧", () => {
   assert.match(styles, /data-reading-theme="immersive"/);
   assert.match(styles, /body\.is-reading-page \.main-content/);
   assert.match(styles, /--sidebar-bg: #11111d/);
+  assert.match(styles, /width: min\(1120px, 100%\);/);
   assert.match(styles, /right: 22px;[\s\S]*left: auto;[\s\S]*width: 192px;/);
   assert.match(fontStyles, /font-family: 'LXGW WenKai'/);
   assert.doesNotMatch(fontStyles, /https?:\/\//);
