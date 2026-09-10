@@ -1,0 +1,28 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+const [html, script, styles, fontStyles] = await Promise.all([
+  readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+  readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+  readFile(new URL("../public/styles.css", import.meta.url), "utf8"),
+  readFile(new URL("../public/vendor/lxgw-wenkai/lxgwwenkai-regular.css", import.meta.url), "utf8"),
+]);
+
+test("阅读工作台提供三个互斥且可记忆的阅读样式", () => {
+  for (const theme of ["classic", "immersive", "paper"]) {
+    assert.match(html, new RegExp(`data-reading-theme="${theme}"`));
+  }
+  assert.match(script, /zhixu-reading-theme/);
+  assert.match(script, /document\.documentElement\.dataset\.readingTheme = theme/);
+  assert.match(script, /setAttribute\("aria-checked"/);
+});
+
+test("沉浸夜读使用本地霞鹜文楷并把目录移到右侧", () => {
+  assert.match(html, /\/vendor\/lxgw-wenkai\/lxgwwenkai-regular\.css/);
+  assert.match(styles, /--reading-wenkai: "LXGW WenKai"/);
+  assert.match(styles, /data-reading-theme="immersive"/);
+  assert.match(styles, /right: 22px;[\s\S]*left: auto;[\s\S]*width: 192px;/);
+  assert.match(fontStyles, /font-family: 'LXGW WenKai'/);
+  assert.doesNotMatch(fontStyles, /https?:\/\//);
+});

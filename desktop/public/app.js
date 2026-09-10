@@ -111,6 +111,8 @@ const applicationState = {
   readingFontSize: 18,
   /** readingLineHeight 是正文区域当前使用的无单位行距。 */
   readingLineHeight: 1.9,
+  /** readingTheme 是阅读页独立使用的视觉样式，不改变知识库其他页面。 */
+  readingTheme: "classic",
   /** knowledgeCards 是全部来源可追溯知识卡片。 */
   knowledgeCards: [],
   /** dueKnowledgeCards 是当前已经到期的今日复习卡片。 */
@@ -378,6 +380,7 @@ const dom = {
   readingLineIncrease: document.querySelector("#reading-line-increase"),
   readingLineReset: document.querySelector("#reading-line-reset"),
   readingLineLabel: document.querySelector("#reading-line-label"),
+  readingThemeOptions: document.querySelectorAll("[data-reading-theme]"),
   readingTagForm: document.querySelector("#reading-tag-form"),
   readingTagInput: document.querySelector("#reading-tag-input"),
   readingTagList: document.querySelector("#reading-tag-list"),
@@ -2842,6 +2845,40 @@ function setupReadingLineHeight() {
   dom.readingLineReset.addEventListener("click", () =>
     applyReadingLineHeight(readingLineDefault),
   );
+}
+
+/** readingThemeNames 是允许持久化的阅读样式名称。 */
+const readingThemeNames = new Set(["classic", "immersive", "paper"]);
+
+/**
+ * 只切换文档、文章和论文阅读页的视觉样式。
+ *
+ * @param {string} requestedTheme 用户选择的阅读样式。
+ * @returns {void}
+ */
+function applyReadingTheme(requestedTheme) {
+  /** theme 是经过白名单约束的最终样式名称。 */
+  const theme = readingThemeNames.has(requestedTheme) ? requestedTheme : "classic";
+  applicationState.readingTheme = theme;
+  document.documentElement.dataset.readingTheme = theme;
+  for (const option of dom.readingThemeOptions) {
+    option.setAttribute("aria-checked", String(option.dataset.readingTheme === theme));
+  }
+  try {
+    window.localStorage.setItem("zhixu-reading-theme", theme);
+  } catch (error) {}
+}
+
+/** 从浏览器本地偏好初始化阅读样式。 */
+function setupReadingTheme() {
+  let savedTheme = "classic";
+  try {
+    savedTheme = window.localStorage.getItem("zhixu-reading-theme") || "classic";
+  } catch (error) {}
+  applyReadingTheme(savedTheme);
+  for (const option of dom.readingThemeOptions) {
+    option.addEventListener("click", () => applyReadingTheme(option.dataset.readingTheme));
+  }
 }
 
 /**
@@ -8263,6 +8300,7 @@ async function initializeApplication() {
   setupThemeToggle();
   setupViewMode();
   setupPaperViewMode();
+  setupReadingTheme();
   setupReadingFontSize();
   setupReadingLineHeight();
   setupReadingWorkbenchResize();

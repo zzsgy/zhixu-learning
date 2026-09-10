@@ -28,6 +28,7 @@
   --reading-font-size: 18px;
   /* 阅读正文的行距由右侧工作台动态覆盖。 */
   --reading-line-height: 1.9;
+  --reading-wenkai: "LXGW WenKai", "Noto Serif SC", "Songti SC", STSong, serif;
   --sidebar: 248px;
   --serif: "Noto Serif SC", "Songti SC", STSong, serif;
   --sans: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
@@ -3080,6 +3081,14 @@ body.has-reading-toc .floating-reader-back {
   transition: width .2s ease;
 }
 .reading-font-control, .reading-line-control { display: grid; grid-template-columns: 1fr 32px 48px 32px auto; align-items: center; gap: 6px; margin-top: 16px; }
+.reading-theme-control { margin: 18px 0 0; border: 0; border-top: 1px solid var(--line); padding: 15px 0 0; }
+.reading-theme-control legend { padding: 0; color: var(--ink-soft); font-size: 10px; }
+.reading-theme-control > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin-top: 9px; }
+.reading-theme-control button { min-width: 0; border: 1px solid var(--line); background: var(--paper-raised); cursor: pointer; padding: 9px 6px 8px; color: var(--ink-soft); text-align: left; }
+.reading-theme-control button strong, .reading-theme-control button small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reading-theme-control button strong { color: var(--ink); font-size: 10px; }
+.reading-theme-control button small { margin-top: 4px; font-size: 8px; }
+.reading-theme-control button[aria-checked="true"] { border-color: var(--cyan-strong); background: color-mix(in srgb, var(--cyan) 13%, var(--paper-raised)); box-shadow: inset 0 -2px var(--cyan-strong); }
 .reading-font-control > span, .reading-line-control > span { color: var(--ink-soft); font-size: 10px; }
 .reading-font-control strong, .reading-line-control strong { text-align: center; font-family: var(--mono); font-size: 10px; }
 .reading-font-control button, .reading-line-control button { min-height: 30px; border: 1px solid var(--line); background: var(--paper-raised); cursor: pointer; padding: 0 7px; font-size: 11px; }
@@ -3202,6 +3211,100 @@ mark.reading-highlight.is-green { background: rgba(127, 205, 151, .52); }
 mark.reading-highlight.is-blue { background: rgba(112, 183, 228, .48); }
 mark.reading-highlight.is-red { background: rgba(224, 119, 112, .46); }
 mark.reading-highlight.is-focused { box-shadow: 0 0 0 3px var(--amber); }
+
+/* 阅读样式只覆盖三类正文页。沉浸夜读复刻参考站的霞鹜文楷、深蓝黑纸张和右侧本页目录。 */
+:root[data-reading-theme="immersive"] .reader,
+:root[data-reading-theme="immersive"] .article-reader,
+:root[data-reading-theme="immersive"] .paper-reader {
+  --ink: #c9c5bf;
+  --ink-soft: #8a8678;
+  --line: #292938;
+  --line-dark: #3a3a4a;
+  --paper: #0f0f1a;
+  --paper-raised: #16162a;
+  --quote-bg: #2a2518;
+  --card-bg: rgba(22, 22, 42, .88);
+  --cyan-strong: #5ba3e8;
+  --amber: #c9a227;
+  color: var(--ink);
+  background: var(--paper);
+}
+:root[data-reading-theme="immersive"] .article-reading-page,
+:root[data-reading-theme="immersive"] .paper-reading-page,
+:root[data-reading-theme="immersive"] .reader-layout { max-width: 1120px; }
+:root[data-reading-theme="immersive"] .article-reading-page h1,
+:root[data-reading-theme="immersive"] .paper-reading-page h1,
+:root[data-reading-theme="immersive"] .reader-article > h1 { color: #e0ddd7; font-family: var(--sans); font-weight: 700; letter-spacing: -.035em; }
+:root[data-reading-theme="immersive"] .article-prose,
+:root[data-reading-theme="immersive"] .paper-prose,
+:root[data-reading-theme="immersive"] .readable-content {
+  max-width: 65ch;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: #c9c5bf;
+  font-family: var(--reading-wenkai);
+}
+:root[data-reading-theme="immersive"] .article-prose :is(h1, h2, h3, h4),
+:root[data-reading-theme="immersive"] .paper-prose :is(h1, h2, h3, h4),
+:root[data-reading-theme="immersive"] .readable-content :is(h1, h2, h3, h4) { color: #e0ddd7; font-family: var(--sans); }
+:root[data-reading-theme="immersive"] .reading-surface :is(a, a:visited) { color: #5ba3e8; }
+:root[data-reading-theme="immersive"] .reading-surface :is(code, pre, kbd) { font-family: var(--mono); }
+:root[data-reading-theme="immersive"] .reading-surface blockquote { border-left-color: #c9a227; background: #2a2518; color: #b8b4a8; }
+:root[data-reading-theme="immersive"] .reading-toc-sidebar {
+  border-color: #3a3a4a;
+  background: #0f0f1a;
+  color: #c9c5bf;
+  box-shadow: 0 20px 54px rgba(0, 0, 0, .42);
+}
+:root[data-reading-theme="immersive"] .reading-toc-sidebar-header { border-bottom-color: #292938; }
+:root[data-reading-theme="immersive"] .reading-toc-sidebar-header span { color: #8a8678; }
+:root[data-reading-theme="immersive"] .reading-toc-sidebar-header strong { color: #b8b4a8; font-family: var(--sans); }
+:root[data-reading-theme="immersive"] .reading-toc-sidebar-header button { border-color: #3a3a4a; color: #8a8678; }
+:root[data-reading-theme="immersive"] .reading-toc button { color: #8a8678; }
+:root[data-reading-theme="immersive"] .reading-toc button:hover { color: #c9c5bf; }
+
+/* 暖白纸张保留同一款正文文楷，以低对比米色降低长时间阅读刺激。 */
+:root[data-reading-theme="paper"] .reader,
+:root[data-reading-theme="paper"] .article-reader,
+:root[data-reading-theme="paper"] .paper-reader {
+  --ink: #302d28;
+  --ink-soft: #766f65;
+  --line: #e1d8ca;
+  --line-dark: #cbbfac;
+  --paper: #f4efe6;
+  --paper-raised: #faf6ee;
+  --quote-bg: #ebe1cf;
+  --card-bg: rgba(250, 246, 238, .9);
+  color: var(--ink);
+  background: var(--paper);
+}
+:root[data-reading-theme="paper"] .article-prose,
+:root[data-reading-theme="paper"] .paper-prose,
+:root[data-reading-theme="paper"] .readable-content { color: var(--ink); font-family: var(--reading-wenkai); }
+:root[data-reading-theme="paper"] .article-prose :is(h1, h2, h3, h4),
+:root[data-reading-theme="paper"] .paper-prose :is(h1, h2, h3, h4),
+:root[data-reading-theme="paper"] .readable-content :is(h1, h2, h3, h4) { color: #25231f; font-family: var(--sans); }
+
+@media (min-width: 1280px) {
+  :root[data-reading-theme="immersive"] body.has-reading-toc:not(.has-reading-workbench) .reader,
+  :root[data-reading-theme="immersive"] body.has-reading-toc:not(.has-reading-workbench) .article-reader,
+  :root[data-reading-theme="immersive"] body.has-reading-toc:not(.has-reading-workbench) .paper-reader { margin-right: 222px; margin-left: 0; }
+  :root[data-reading-theme="immersive"] .reading-toc-sidebar {
+    top: 96px;
+    right: 22px;
+    bottom: 28px;
+    left: auto;
+    width: 192px;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
+  }
+  :root[data-reading-theme="immersive"] .reading-toc-sidebar-header { min-height: 46px; }
+  :root[data-reading-theme="immersive"] .reading-toc-sidebar-header strong { font-size: 13px; }
+  :root[data-reading-theme="immersive"] .reading-toc button { font-size: 12px; }
+}
 
 /* AI 引用定位反馈：不修改正文，只在目标语义块周围显示短暂焦点。 */
 .reading-surface .is-ai-citation-focus {

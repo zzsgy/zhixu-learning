@@ -10,7 +10,8 @@
     <title>知序｜本地知识库</title>
     <script src="/theme-init.js?v=20260818-2"></script>
     <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
-    <link rel="stylesheet" href="/styles.css?v=20260829-1" />
+    <link rel="stylesheet" href="/vendor/lxgw-wenkai/lxgwwenkai-regular.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260910-1" />
   </head>
   <body>
     <div class="app-shell">
@@ -904,6 +905,20 @@
             <div class="reading-progress-track" aria-hidden="true">
               <span id="reading-progress-bar"></span>
             </div>
+            <fieldset class="reading-theme-control" id="reading-theme-control">
+              <legend>阅读样式</legend>
+              <div role="radiogroup" aria-label="阅读页面样式">
+                <button data-reading-theme="classic" type="button" role="radio" aria-checked="true">
+                  <strong>知序经典</strong><small>原有布局</small>
+                </button>
+                <button data-reading-theme="immersive" type="button" role="radio" aria-checked="false">
+                  <strong>沉浸夜读</strong><small>霞鹜文楷</small>
+                </button>
+                <button data-reading-theme="paper" type="button" role="radio" aria-checked="false">
+                  <strong>柔和纸张</strong><small>暖白文楷</small>
+                </button>
+              </div>
+            </fieldset>
             <div class="reading-font-control" aria-label="阅读正文字号">
               <span>正文字号</span>
               <button id="reading-font-decrease" type="button" aria-label="减小字号">−</button>
@@ -1105,6 +1120,6 @@
         <div class="toast" id="toast" hidden role="status"></div>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260819-2"></script>
+    <script type="module" src="/app.js?v=20260910-1"></script>
   </body>
 </html>
