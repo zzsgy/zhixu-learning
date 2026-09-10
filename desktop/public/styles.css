@@ -29,6 +29,11 @@
   /* 阅读正文的行距由右侧工作台动态覆盖。 */
   --reading-line-height: 1.9;
   --reading-wenkai: "LXGW WenKai", "Noto Serif SC", "Songti SC", STSong, serif;
+  --reading-code-bg: #111816;
+  --reading-code-panel: #18211e;
+  --reading-code-border: #52615b;
+  --reading-code-ink: #edf3ef;
+  --reading-code-muted: #9caaa4;
   --sidebar: 248px;
   --serif: "Noto Serif SC", "Songti SC", STSong, serif;
   --sans: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
@@ -3198,6 +3203,84 @@ body.has-reading-toc .floating-reader-back {
 .reading-surface h2,
 .reading-surface h3,
 .reading-surface h4 { scroll-margin-top: 28px; }
+
+/* 阅读语义组件：代码始终使用等宽字体，提示字段继承各阅读主题的纸张和文字变量。 */
+.reading-code-shell {
+  overflow: hidden;
+  margin: 32px 0;
+  border: 1px solid var(--reading-code-border);
+  border-radius: 14px;
+  background: var(--reading-code-bg);
+  box-shadow: 0 14px 34px color-mix(in srgb, #000 18%, transparent);
+  color: var(--reading-code-ink);
+}
+.reading-code-toolbar {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid color-mix(in srgb, var(--reading-code-border) 72%, transparent);
+  background: var(--reading-code-panel);
+  padding: 0 14px 0 18px;
+}
+.reading-code-language { color: var(--reading-code-muted); font-family: var(--mono); font-size: 10px; font-weight: 750; letter-spacing: .12em; }
+.reading-code-copy { border: 1px solid color-mix(in srgb, var(--reading-code-border) 72%, transparent); border-radius: 6px; background: transparent; color: var(--reading-code-muted); cursor: pointer; padding: 6px 10px; font-family: var(--sans); font-size: 10px; }
+.reading-code-copy:hover { border-color: var(--cyan-strong); color: var(--reading-code-ink); }
+.reading-code-shell pre,
+.article-prose .reading-code-shell pre,
+.paper-prose .reading-code-shell pre,
+.readable-content .reading-code-shell pre {
+  overflow-x: auto;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--reading-code-bg);
+  color: var(--reading-code-ink);
+  padding: 24px 28px 26px;
+  tab-size: 2;
+  font-family: var(--mono);
+  font-size: clamp(13px, calc(var(--reading-font-size) * .78), 16px);
+  line-height: 1.75;
+}
+.reading-code-shell code { color: inherit; font-family: inherit; font-size: inherit; }
+.code-token.is-comment { color: #7f938a; font-style: italic; }
+.code-token.is-keyword { color: #ff6b75; font-weight: 650; }
+.code-token.is-string { color: #78b7ff; }
+.code-token.is-number { color: #d6a6ff; }
+.code-token.is-function { color: #f2d58a; }
+.reading-surface :not(pre) > code {
+  border: 1px solid color-mix(in srgb, var(--line-dark) 58%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--ink) 8%, var(--paper-raised));
+  padding: .08em .38em;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .84em;
+  font-weight: 700;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.reading-callout,
+.article-prose .reading-callout,
+.paper-prose .reading-callout,
+.readable-content .reading-callout {
+  position: relative;
+  margin: 28px 0;
+  border: 0;
+  border-left: 5px solid var(--amber);
+  border-radius: 0 11px 11px 0;
+  background: color-mix(in srgb, var(--amber) 10%, var(--paper-raised));
+  padding: 20px 26px;
+  color: var(--ink);
+  font-family: inherit;
+}
+.reading-callout.is-note { border-left-color: var(--cyan-strong); background: color-mix(in srgb, var(--cyan-strong) 9%, var(--paper-raised)); }
+.reading-callout.is-warning { border-left-color: #d85e55; background: color-mix(in srgb, #d85e55 10%, var(--paper-raised)); }
+.reading-callout.is-important { border-left-color: var(--amber); }
+.reading-callout.is-example { border-left-color: #b493ef; background: color-mix(in srgb, #b493ef 9%, var(--paper-raised)); }
+.reading-callout.is-conclusion { border-left-color: #54a87f; background: color-mix(in srgb, #54a87f 9%, var(--paper-raised)); }
+.reading-callout > :first-child { margin-top: 0; }
+.reading-callout > :last-child { margin-bottom: 0; }
 mark.reading-highlight {
   border-radius: 2px;
   background: rgba(245, 215, 110, .62);
@@ -3229,6 +3312,11 @@ mark.reading-highlight.is-focused { box-shadow: 0 0 0 3px var(--amber); }
   --sidebar-ink: #e0ddd7;
   --sidebar-muted: #8a8678;
   --sidebar-line: #292938;
+  --reading-code-bg: #0b1015;
+  --reading-code-panel: #141923;
+  --reading-code-border: #6e6b5e;
+  --reading-code-ink: #f2eee5;
+  --reading-code-muted: #989388;
   background-color: #0f0f1a;
   color: var(--ink);
   color-scheme: dark;
@@ -3313,6 +3401,11 @@ mark.reading-highlight.is-focused { box-shadow: 0 0 0 3px var(--amber); }
   --sidebar-ink: #302d28;
   --sidebar-muted: #766f65;
   --sidebar-line: #cbbfac;
+  --reading-code-bg: #25231f;
+  --reading-code-panel: #312e29;
+  --reading-code-border: #756e63;
+  --reading-code-ink: #f5efe4;
+  --reading-code-muted: #bdb4a7;
   background-color: #f4efe6;
 }
 :root[data-reading-theme="paper"] body.is-reading-page .main-content,

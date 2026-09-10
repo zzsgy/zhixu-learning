@@ -31,3 +31,16 @@ test("沉浸夜读使用本地霞鹜文楷并把目录移到右侧", () => {
   assert.match(fontStyles, /font-family: 'LXGW WenKai'/);
   assert.doesNotMatch(fontStyles, /https?:\/\//);
 });
+
+test("三类阅读正文统一增强代码块、行内代码和特殊提示字段", () => {
+  assert.match(script, /function enhanceReadingSemantics\(readingSurface\)/);
+  assert.match(script, /inferReadingCodeLanguage/);
+  assert.match(script, /navigator\.clipboard\.writeText\(sourceCode\)/);
+  assert.match(script, /\["example", \/\^\(\?:示例\|示意片段/);
+  assert.match(script, /enhanceReadingSemantics\(dom\.readerContent\)/);
+  assert.match(script, /enhanceReadingSemantics\(dom\.articleReaderContent\)/);
+  assert.match(script, /enhanceReadingSemantics\(dom\.paperReaderContent\)/);
+  assert.match(styles, /\.reading-code-shell/);
+  assert.match(styles, /\.reading-surface :not\(pre\) > code/);
+  assert.match(styles, /\.reading-callout\.is-warning/);
+});

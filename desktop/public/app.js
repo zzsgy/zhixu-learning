@@ -2394,6 +2394,119 @@ function buildDocumentChapterTableOfContents() {
   });
 }
 
+/** codeKeywords 是基础语法着色共同识别的保留字。 */
+const codeKeywords = new Set([
+  "as", "async", "await", "break", "case", "catch", "class", "const", "continue",
+  "def", "do", "else", "elif", "except", "export", "extends", "false", "finally",
+  "for", "from", "function", "if", "import", "in", "interface", "let", "new", "none",
+  "null", "of", "pass", "raise", "return", "select", "static", "switch", "throw", "true",
+  "try", "type", "update", "var", "where", "while", "with", "yield",
+]);
+
+/**
+ * 根据代码特征推断工具栏中的简短语言名称。
+ *
+ * @param {string} sourceCode 未修改的代码文本。
+ * @returns {string} 供阅读者识别的语言名称。
+ */
+function inferReadingCodeLanguage(sourceCode) {
+  const source = String(sourceCode || "").trim();
+  if (/^(?:\{|\[)[\s\S]*(?:\}|\])$/.test(source) && /"[^"\n]+"\s*:/.test(source)) return "JSON";
+  if (/\b(?:SELECT|INSERT|UPDATE|DELETE|CREATE TABLE|ALTER TABLE)\b/i.test(source)) return "SQL";
+  if (/\b(?:from\s+[\w.]+\s+import|import\s+[\w.]+|def\s+\w+\s*\(|print\s*\()/m.test(source)) return "PYTHON";
+  if (/\b(?:const|let|var|function|interface|export|import)\b|=>|console\.log\s*\(/m.test(source)) return "JS / TS";
+  if (/^(?:\$\s*)?(?:npm|pnpm|yarn|pip|git|docker|curl|node|python)\b/m.test(source)) return "SHELL";
+  if (/^\s*</m.test(source) && /<\/?[a-z][^>]*>/i.test(source)) return "HTML";
+  return "CODE";
+}
+
+/**
+ * 对代码文本做轻量、只改变展示的语法着色。
+ *
+ * @param {HTMLElement} codeElement 代码节点。
+ * @param {string} sourceCode 用于复制的原始文本。
+ * @returns {void}
+ */
+function highlightReadingCode(codeElement, sourceCode) {
+  /** tokenPattern 识别注释、字符串、数字、关键字候选和函数名。 */
+  const tokenPattern = /(\/\/[^\n]*|#[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*(?=\s*\()|\b[A-Za-z_$][\w$]*\b)/gm;
+  const fragment = document.createDocumentFragment();
+  let previousIndex = 0;
+  for (const match of sourceCode.matchAll(tokenPattern)) {
+    const token = match[0];
+    const tokenIndex = match.index ?? 0;
+    fragment.append(document.createTextNode(sourceCode.slice(previousIndex, tokenIndex)));
+    let tokenType = "plain";
+    if (token.startsWith("//") || token.startsWith("#")) tokenType = "comment";
+    else if (["\"", "'", "`"].includes(token[0])) tokenType = "string";
+    else if (/^\d/.test(token)) tokenType = "number";
+    else if (codeKeywords.has(token.toLowerCase())) tokenType = "keyword";
+    else if (sourceCode.slice(tokenIndex + token.length).match(/^\s*\(/)) tokenType = "function";
+    if (tokenType === "plain") fragment.append(document.createTextNode(token));
+    else fragment.append(createTextElement("span", `code-token is-${tokenType}`, token));
+    previousIndex = tokenIndex + token.length;
+  }
+  fragment.append(document.createTextNode(sourceCode.slice(previousIndex)));
+  codeElement.replaceChildren(fragment);
+}
+
+/**
+ * 增强阅读页中的代码块、行内代码和提示类特殊文本。
+ *
+ * @param {HTMLElement} readingSurface 当前正文根节点。
+ * @returns {void}
+ */
+function enhanceReadingSemantics(readingSurface) {
+  if (!readingSurface) return;
+  for (const preElement of readingSurface.querySelectorAll("pre")) {
+    if (preElement.closest(".reading-code-shell") || preElement.classList.contains("readable-plain-fallback")) continue;
+    const codeElement = preElement.querySelector("code") || preElement;
+    const sourceCode = codeElement.textContent || "";
+    if (!sourceCode.trim()) continue;
+    const language = inferReadingCodeLanguage(sourceCode);
+    const shell = document.createElement("section");
+    shell.className = "reading-code-shell";
+    const toolbar = document.createElement("header");
+    toolbar.className = "reading-code-toolbar";
+    const copyButton = createTextElement("button", "reading-code-copy", "复制");
+    copyButton.type = "button";
+    copyButton.setAttribute("aria-label", `复制 ${language} 代码`);
+    copyButton.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(sourceCode);
+        copyButton.textContent = "已复制";
+        window.setTimeout(() => { copyButton.textContent = "复制"; }, 1400);
+      } catch (error) {
+        showToast("复制失败，请选中代码后手动复制。");
+      }
+    });
+    toolbar.append(createTextElement("span", "reading-code-language", language), copyButton);
+    preElement.before(shell);
+    shell.append(toolbar, preElement);
+    if (codeElement !== preElement) highlightReadingCode(codeElement, sourceCode);
+  }
+
+  /** calloutRules 按优先级识别中英文提示字段。 */
+  const calloutRules = [
+    ["warning", /^(?:警告|风险|危险|Warning|Caution)\s*[：:]/i],
+    ["important", /^(?:注意|重要|务必|Important|Attention)\s*[：:]/i],
+    ["example", /^(?:示例|示意片段|案例|Example)\s*[：:]/i],
+    ["note", /^(?:提示|说明|备注|注|Tip|Note)\s*[：:]/i],
+    ["conclusion", /^(?:结论|要点|小结|Conclusion|Summary)\s*[：:]/i],
+  ];
+  for (const element of readingSurface.querySelectorAll("blockquote, p")) {
+    if (
+      element.closest(".reading-code-shell")
+      || element.classList.contains("reading-callout")
+      || element.parentElement?.closest(".reading-callout")
+    ) continue;
+    const text = (element.textContent || "").trim();
+    const matchedRule = calloutRules.find(([, pattern]) => pattern.test(text));
+    if (!matchedRule) continue;
+    element.classList.add("reading-callout", `is-${matchedRule[0]}`);
+  }
+}
+
 /**
  * 只渲染当前选中的一个文档章节。
  *
@@ -2434,6 +2547,7 @@ async function renderDocumentChapter(requestedIndex, options = {}) {
     );
   }
   dom.readerContent.replaceChildren(fragment);
+  enhanceReadingSemantics(dom.readerContent);
   await yieldDocumentRendering();
   if (renderSequence !== applicationState.documentRenderSequence) return false;
   applicationState.activeReadingSurface = dom.readerContent;
@@ -4779,6 +4893,7 @@ function renderArticleReadingMode() {
     dom.articleReaderContent.replaceChildren(createArticleOriginalContent(article));
   }
   renderArticleVideos(article, requestedMode);
+  enhanceReadingSemantics(dom.articleReaderContent);
   renderReadingMath(dom.articleReaderContent);
   renderArticleTranslationControls(article);
 }
@@ -7311,6 +7426,7 @@ function schedulePaperTranslationPolling(paperId) {
         dom.paperReaderContent.replaceChildren(
           createSafePaperTranslation(paper.fullTranslationHtml),
         );
+        enhanceReadingSemantics(dom.paperReaderContent);
         renderReadingMath(dom.paperReaderContent);
         await initializeReadingWorkspace("paper", paper.id, dom.paperReaderContent);
         showToast("Codex 已完成论文中文全文翻译。");
@@ -7419,6 +7535,7 @@ async function openPaper(paperId, options = {}) {
       // 失败原因和重新排队入口统一由状态区渲染。
     }
     await renderPaperTranslationStatus(paper);
+    enhanceReadingSemantics(dom.paperReaderContent);
     if (["pending", "processing"].includes(paper.fullTranslationStatus)) {
       schedulePaperTranslationPolling(paper.id);
     }
