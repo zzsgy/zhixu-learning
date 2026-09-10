@@ -30,6 +30,22 @@ test("desktop shell includes a native startup surface and brand asset", () => {
   assert.match(icon, /知序桌面版图标/);
 });
 
+test("Windows autostart avoids temporary Codex runtimes", () => {
+  const installer = fs.readFileSync(
+    path.join(stagedProjectDirectory, "scripts", "install-autostart.ps1"),
+    "utf8",
+  );
+  const launcher = fs.readFileSync(
+    path.join(stagedProjectDirectory, "scripts", "run-service.ps1"),
+    "utf8",
+  );
+  assert.match(installer, /run-service\.ps1/);
+  assert.match(installer, /-WindowStyle Hidden/);
+  assert.match(launcher, /node_modules\\electron\\dist\\electron\.exe/);
+  assert.match(launcher, /ELECTRON_RUN_AS_NODE/);
+  assert.match(launcher, /codex-runtimes/);
+});
+
 test("Windows installer excludes local knowledge data and private configuration", () => {
   /** packageManifest 是桌面打包入口和 electron-builder 文件白名单。 */
   const packageManifest = JSON.parse(

@@ -20,22 +20,20 @@ $projectDirectory = if ($scriptFilePath) {
 } else {
   (Get-Location).Path
 }
-# runnerPath is the absolute path of the Zhixu service supervisor.
-$runnerPath = Join-Path $projectDirectory "service-runner.mjs"
-# nodeCommand contains the Node.js executable available to the current user.
-$nodeCommand = Get-Command node.exe -ErrorAction Stop
-# nodePath is the absolute executable path stored in the scheduled task.
-$nodePath = $nodeCommand.Source
+# serviceLauncherPath selects a stable Node or the project Electron runtime.
+$serviceLauncherPath = Join-Path $projectDirectory "scripts\run-service.ps1"
+# powershellPath is the stable inbox Windows host used by Task Scheduler.
+$powershellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 
-if (-not (Test-Path -LiteralPath $runnerPath)) {
-  throw "The Zhixu service runner was not found: $runnerPath"
+if (-not (Test-Path -LiteralPath $serviceLauncherPath)) {
+  throw "The Zhixu service launcher was not found: $serviceLauncherPath"
 }
 
-# actionArguments are the arguments passed to Node.js by Task Scheduler.
-$actionArguments = "--disable-warning=ExperimentalWarning `"$runnerPath`""
+# actionArguments keep the scheduled process hidden and independent of profile PATH changes.
+$actionArguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$serviceLauncherPath`""
 # taskAction is the local process started after Windows logon.
 $taskAction = New-ScheduledTaskAction `
-  -Execute $nodePath `
+  -Execute $powershellPath `
   -Argument $actionArguments `
   -WorkingDirectory $projectDirectory
 # taskTrigger starts Zhixu whenever the current user logs on.

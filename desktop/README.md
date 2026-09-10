@@ -153,8 +153,8 @@
 
 - 双击 `start-zhixu.bat` 后，知序由 `service-runner.mjs` 在后台运行；关闭启动窗口不会再终止服务。
 - 守护进程会在 Node.js 服务异常退出后自动重启，并采用最长30秒的退避间隔，避免故障时高频循环。
-- 普通日志写入 `work/zhixu-service.log`，错误日志写入 `work/zhixu-service-error.log`。
-- 首次安装登录自启动：在 PowerShell 中运行 `powershell -ExecutionPolicy Bypass -File scripts/install-autostart.ps1`。
+- 普通日志写入 `work/zhixu-service.log`，错误日志写入 `work/zhixu-service-error.log`；守护进程会在跨日或日志达到 5 MB 时自动归档，归档默认保留30天。
+- 首次安装登录自启动：在 PowerShell 中运行 `powershell -ExecutionPolicy Bypass -File scripts/install-autostart.ps1`。计划任务通过 `scripts/run-service.ps1` 优先使用正式 Node.js；未安装系统 Node 时回退到项目内 Electron 运行时，不使用 Codex 临时缓存路径。
 - 如需移除登录自启动：运行 `powershell -ExecutionPolicy Bypass -File scripts/uninstall-autostart.ps1`。
 - 电脑关机期间本地网站无法访问；重新登录 Windows 后，计划任务会自动恢复服务。
 - 浏览器扩展只能在知序服务运行期间提交收藏；任务一旦写入 SQLite，服务重启后可以继续处理。

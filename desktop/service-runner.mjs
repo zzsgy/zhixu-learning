@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { rotateLogFile } from "./lib/log-rotation.mjs";
 
 /** projectDirectory 是知序桌面版项目根目录。 */
 const projectDirectory = import.meta.dirname;
@@ -30,6 +31,10 @@ let activeServerProcess = null;
 let consecutiveFailures = 0;
 
 fs.mkdirSync(workDirectory, { recursive: true });
+
+/** 守护进程启动时按日期或 5 MB 上限轮换日志，并保留最近 30 天。 */
+rotateLogFile(outputLogPath, { maxBytes: 5 * 1024 * 1024, retentionDays: 30 });
+rotateLogFile(errorLogPath, { maxBytes: 5 * 1024 * 1024, retentionDays: 30 });
 
 /** outputLogStream 是以追加方式写入的标准输出日志流。 */
 const outputLogStream = fs.createWriteStream(outputLogPath, {
