@@ -2451,6 +2451,28 @@ function highlightReadingCode(codeElement, sourceCode) {
 }
 
 /**
+ * 兼容历史文章中被富文本拆成相邻 code 节点、却没有行尾换行的目录树。
+ *
+ * @param {HTMLPreElement} preElement 文章、论文或文档正文里的预格式节点。
+ * @returns {void}
+ */
+function normalizeReadingPreformattedLines(preElement) {
+  const directCodeLines = Array.from(preElement.children).filter(
+    (child) => child.tagName?.toLowerCase() === "code",
+  );
+  if (directCodeLines.length < 2 || directCodeLines.length !== preElement.children.length) return;
+  const hasOnlyWhitespaceText = Array.from(preElement.childNodes).every((node) => (
+    node.nodeType !== Node.TEXT_NODE || !String(node.textContent || "").trim()
+ ));
+  if (!hasOnlyWhitespaceText) return;
+  const codeElement = document.createElement("code");
+  codeElement.textContent = directCodeLines
+    .map((line) => String(line.textContent || "").replace(/\u00a0/g, " "))
+    .join("\n");
+  preElement.replaceChildren(codeElement);
+}
+
+/**
  * 增强阅读页中的代码块、行内代码和提示类特殊文本。
  *
  * @param {HTMLElement} readingSurface 当前正文根节点。
@@ -2460,6 +2482,7 @@ function enhanceReadingSemantics(readingSurface) {
   if (!readingSurface) return;
   for (const preElement of readingSurface.querySelectorAll("pre")) {
     if (preElement.closest(".reading-code-shell") || preElement.classList.contains("readable-plain-fallback")) continue;
+    normalizeReadingPreformattedLines(preElement);
     const codeElement = preElement.querySelector("code") || preElement;
     const sourceCode = codeElement.textContent || "";
     if (!sourceCode.trim()) continue;

@@ -569,6 +569,38 @@ function resolveSafeUrl(value, baseUrl, forceHttps) {
  * @param {URL} baseUrl 文章最终地址。
  * @returns {{ html: string, text: string }} 安全正文与纯文本。
  */
+/**
+ * 将部分富文本编辑器拆成多个相邻 code 节点的预格式文本恢复为真正的多行代码。
+ *
+ * 公众号等页面会把目录树的每一行分别包进 `<code>`，却不在节点间写入换行；
+ * 浏览器读取 textContent 时会把这些行粘成一行，导致阅读页只能横向滚动。
+ *
+ * @param {Element} root 已隔离的正文根节点。
+ * @returns {number} 本次恢复的预格式块数量。
+ */
+export function normalizePreformattedCodeLines(root) {
+  let normalizedCount = 0;
+  for (const preElement of Array.from(root.querySelectorAll("pre"))) {
+    /** directCodeLines 只处理 pre 的直接子 code，避免改写正常的语法高亮嵌套结构。 */
+    const directCodeLines = Array.from(preElement.children).filter(
+      (child) => child.tagName?.toLowerCase() === "code",
+    );
+    if (directCodeLines.length < 2 || directCodeLines.length !== preElement.children.length) continue;
+    /** hasOnlyWhitespaceText 防止把混有真实裸文本的预格式块错误拼接。 */
+    const hasOnlyWhitespaceText = Array.from(preElement.childNodes).every((node) => (
+      node.nodeType !== 3 || !String(node.textContent || "").trim()
+    ));
+    if (!hasOnlyWhitespaceText) continue;
+    const codeElement = preElement.ownerDocument.createElement("code");
+    codeElement.textContent = directCodeLines
+      .map((line) => String(line.textContent || "").replace(/\u00a0/g, " "))
+      .join("\n");
+    preElement.replaceChildren(codeElement);
+    normalizedCount += 1;
+  }
+  return normalizedCount;
+}
+
 export function sanitizeArticleHtml(rawHtml, baseUrl) {
   /** parsedDocument 是专门用于清洗的隔离文档。 */
   const { document: parsedDocument } = parseHTML(
@@ -654,6 +686,8 @@ export function sanitizeArticleHtml(rawHtml, baseUrl) {
     (list) => !list.querySelector("li"),
   );
   for (const emptyList of emptyLists) emptyList.remove();
+  /** 先恢复富文本错误拆开的代码行，再把正文写入数据库。 */
+  normalizePreformattedCodeLines(root);
   /** text 是用于搜索和分类的纯文本正文。 */
   const text = (root.textContent ?? "")
     .replace(/\u00a0/g, " ")

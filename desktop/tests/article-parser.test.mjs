@@ -145,6 +145,15 @@ test("清理空列表项并保留真实列表和代码块", () => {
   assert.match(result.html, /print\("hello"\)/);
 });
 
+test("把富文本拆开的相邻代码节点恢复为保留缩进的多行预格式文本", () => {
+  const result = sanitizeArticleHtml(
+    `<pre><code>business/</code><code>├── index.md</code><code>│&nbsp; └── meta/</code></pre>`,
+    new URL("https://example.com/article"),
+  );
+  assert.match(result.html, /<pre><code>business\/\n├── index\.md\n│\s+└── meta\/<\/code><\/pre>/);
+  assert.match(result.text, /business\/\n├── index\.md\n│\s+└── meta\//);
+});
+
 /**
  * 验证 Fetch 顶层通用异常可以追溯到底层 socket 错误。
  */

@@ -34,6 +34,8 @@ test("沉浸夜读使用本地霞鹜文楷并把目录移到右侧", () => {
 
 test("三类阅读正文统一增强代码块、行内代码和特殊提示字段", () => {
   assert.match(script, /function enhanceReadingSemantics\(readingSurface\)/);
+  assert.match(script, /function normalizeReadingPreformattedLines\(preElement\)/);
+  assert.match(script, /normalizeReadingPreformattedLines\(preElement\)/);
   assert.match(script, /inferReadingCodeLanguage/);
   assert.match(script, /navigator\.clipboard\.writeText\(sourceCode\)/);
   assert.match(script, /\["example", \/\^\(\?:示例\|示意片段/);
