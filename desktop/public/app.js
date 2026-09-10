@@ -4512,6 +4512,7 @@ function showView(viewName) {
     window.clearTimeout(applicationState.importJobPollTimer);
   }
   closeReadingWorkspace();
+  document.body.classList.remove("is-reading-page");
   applicationState.activeView = viewName;
   applicationState.selectedDocument = null;
   applicationState.selectedArticle = null;
@@ -4959,6 +4960,7 @@ async function openArticle(articleId, options = {}) {
     dom.reader.hidden = true;
     dom.paperReader.hidden = true;
     dom.articleReader.hidden = false;
+    document.body.classList.add("is-reading-page");
     updateFloatingReaderBackButton();
     dom.pageEyebrow.textContent = "ARTICLE READER";
     dom.pageTitle.textContent = "文章阅读";
@@ -7365,6 +7367,7 @@ async function openPaper(paperId, options = {}) {
     dom.reader.hidden = true;
     dom.articleReader.hidden = true;
     dom.paperReader.hidden = false;
+    document.body.classList.add("is-reading-page");
     updateFloatingReaderBackButton();
     dom.pageEyebrow.textContent = "PAPER READER";
     dom.pageTitle.textContent =
@@ -7718,6 +7721,7 @@ async function openDocument(documentId, options = {}) {
     dom.reader.hidden = false;
     dom.articleReader.hidden = true;
     dom.paperReader.hidden = true;
+    document.body.classList.add("is-reading-page");
     updateFloatingReaderBackButton();
     dom.pageEyebrow.textContent = "DOCUMENT READER";
     dom.pageTitle.textContent = "文档阅读";

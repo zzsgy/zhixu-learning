@@ -3213,6 +3213,39 @@ mark.reading-highlight.is-red { background: rgba(224, 119, 112, .46); }
 mark.reading-highlight.is-focused { box-shadow: 0 0 0 3px var(--amber); }
 
 /* 阅读样式只覆盖三类正文页。沉浸夜读复刻参考站的霞鹜文楷、深蓝黑纸张和右侧本页目录。 */
+:root[data-reading-theme="immersive"] body.is-reading-page {
+  --ink: #c9c5bf;
+  --ink-soft: #8a8678;
+  --line: #292938;
+  --line-dark: #3a3a4a;
+  --paper: #0f0f1a;
+  --paper-raised: #16162a;
+  --quote-bg: #2a2518;
+  --card-bg: rgba(22, 22, 42, .9);
+  --cyan-strong: #5ba3e8;
+  --amber: #c9a227;
+  --grid-line: rgba(201, 197, 191, .025);
+  --sidebar-bg: #11111d;
+  --sidebar-ink: #e0ddd7;
+  --sidebar-muted: #8a8678;
+  --sidebar-line: #292938;
+  background-color: #0f0f1a;
+  color: var(--ink);
+  color-scheme: dark;
+}
+:root[data-reading-theme="immersive"] body.is-reading-page .main-content,
+:root[data-reading-theme="immersive"] body.is-reading-page .topbar { background: #0f0f1a; }
+:root[data-reading-theme="immersive"] body.is-reading-page .sidebar { background: #11111d; }
+:root[data-reading-theme="immersive"] body.is-reading-page .brand-mark { background: #2a2518; color: #e0ddd7; }
+:root[data-reading-theme="immersive"] body.is-reading-page .nav-item:hover { background: #191928; color: #e0ddd7; }
+:root[data-reading-theme="immersive"] body.is-reading-page .nav-item.is-active { background: #16162a; color: #e0ddd7; box-shadow: none; }
+:root[data-reading-theme="immersive"] body.is-reading-page .database-state { color: #76c9b2; }
+:root[data-reading-theme="immersive"] body.is-reading-page :is(.floating-reader-back, .reading-toc-reopen, .reading-workbench-toggle) {
+  border-color: #3a3a4a;
+  background: #16162a;
+  color: #c9c5bf;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .38);
+}
 :root[data-reading-theme="immersive"] .reader,
 :root[data-reading-theme="immersive"] .article-reader,
 :root[data-reading-theme="immersive"] .paper-reader {
@@ -3265,6 +3298,24 @@ mark.reading-highlight.is-focused { box-shadow: 0 0 0 3px var(--amber); }
 :root[data-reading-theme="immersive"] .reading-toc button:hover { color: #c9c5bf; }
 
 /* 暖白纸张保留同一款正文文楷，以低对比米色降低长时间阅读刺激。 */
+:root[data-reading-theme="paper"] body.is-reading-page {
+  --ink: #302d28;
+  --ink-soft: #766f65;
+  --line: #e1d8ca;
+  --line-dark: #cbbfac;
+  --paper: #f4efe6;
+  --paper-raised: #faf6ee;
+  --quote-bg: #ebe1cf;
+  --card-bg: rgba(250, 246, 238, .9);
+  --grid-line: rgba(80, 65, 45, .035);
+  --sidebar-bg: #e8dfd0;
+  --sidebar-ink: #302d28;
+  --sidebar-muted: #766f65;
+  --sidebar-line: #cbbfac;
+  background-color: #f4efe6;
+}
+:root[data-reading-theme="paper"] body.is-reading-page .main-content,
+:root[data-reading-theme="paper"] body.is-reading-page .topbar { background: #f4efe6; }
 :root[data-reading-theme="paper"] .reader,
 :root[data-reading-theme="paper"] .article-reader,
 :root[data-reading-theme="paper"] .paper-reader {
