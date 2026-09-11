@@ -120,6 +120,7 @@ import {
   extractDocumentText,
   extractPdfReadingStructure,
   extractWordHtml,
+  isPdfTextLayerCorrupted,
 } from "./lib/extractor.mjs";
 import {
   detectArticleLanguage,
@@ -2897,10 +2898,15 @@ async function handleApiRequest(request, response, url) {
       originalName,
       mimeType,
     });
+    /** corruptedPdfText 表示 PDF 有足量字符但字形到 Unicode 的映射已损坏。 */
+    const corruptedPdfText = extension === ".pdf"
+      && isPdfTextLayerCorrupted(extractionResult.text);
+    /** usableExtractionText 避免乱码进入分类、摘要、搜索和首次阅读。 */
+    const usableExtractionText = corruptedPdfText ? "" : extractionResult.text;
     /** classification 是本地规则与可选 DeepSeek 得到的最终分类。 */
     const classification = await classifyDocument({
       fileName: originalName,
-      text: extractionResult.text,
+      text: usableExtractionText,
     });
     /** now 是文档创建和更新时间。 */
     const now = new Date().toISOString();
@@ -2921,9 +2927,9 @@ async function handleApiRequest(request, response, url) {
         category: classification.category,
         categorySource: classification.source,
         categoryConfidence: classification.confidence,
-        summary: createDocumentSummary(extractionResult.text, originalName),
-        extractedText: extractionResult.text,
-        extractionStatus: extractionResult.status,
+        summary: createDocumentSummary(usableExtractionText, originalName),
+        extractedText: usableExtractionText,
+        extractionStatus: corruptedPdfText ? "corrupted:pdf-text" : extractionResult.status,
         folderPath,
         targetFolderId,
         createdAt: now,
@@ -2931,7 +2937,7 @@ async function handleApiRequest(request, response, url) {
       });
       /** needsOcr 表示图片或缺少可用文本层的 PDF 应进入后台识别。 */
       const needsOcr = isOcrSupportedExtension(extension)
-        && (extension !== ".pdf" || extractionResult.text.trim().length < 80);
+        && (extension !== ".pdf" || usableExtractionText.trim().length < 80 || corruptedPdfText);
       let importJob = null;
       if (needsOcr) {
         document = queueDocumentOcr(document.id);
@@ -3040,11 +3046,23 @@ async function handleApiRequest(request, response, url) {
       const filePath = path.join(attachmentDirectory, document.storedName);
       if (fs.existsSync(filePath)) {
         const readingAssets = await getPdfReadingAssets(document, filePath);
-        document.extractedText = readingAssets.markedText;
         document.pdfFigures = readingAssets.figuresByPage;
-        document.pdfTables = readingAssets.tablesByPage;
-        document.pdfStructuredPages = readingAssets.structuredPages;
         document.pdfOutline = readingAssets.outline;
+        /** OCR 完成后必须优先使用数据库分页结果，不能再被原 PDF 的坏文字层覆盖。 */
+        const ocrPages = document.ocrStatus === "completed"
+          ? listDocumentPages(document.id)
+          : [];
+        if (ocrPages.length > 0) {
+          document.extractedText = ocrPages
+            .map((page) => `[[ZHIXU_PDF_PAGE:${page.pageNumber}]]\n${page.text}`)
+            .join("\n\n");
+          document.pdfTables = {};
+          document.pdfStructuredPages = {};
+        } else if (document.extractionStatus !== "corrupted:pdf-text") {
+          document.extractedText = readingAssets.markedText;
+          document.pdfTables = readingAssets.tablesByPage;
+          document.pdfStructuredPages = readingAssets.structuredPages;
+        }
       }
     }
     sendJson(response, 200, { document });

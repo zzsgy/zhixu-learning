@@ -47,6 +47,16 @@ test("学习统计默认首页并展示资料库目录层级", () => {
   assert.doesNotMatch(applicationSource, /renderImportActivityChart/);
 });
 
+test("损坏的 PDF 文字层自动转入 OCR 且阅读时优先使用 OCR 分页", () => {
+  const projectDirectory = path.resolve(import.meta.dirname, "..");
+  const serverSource = fs.readFileSync(path.join(projectDirectory, "server.mjs"), "utf8");
+  assert.match(serverSource, /isPdfTextLayerCorrupted\(extractionResult\.text\)/);
+  assert.match(serverSource, /extractionStatus: corruptedPdfText \? "corrupted:pdf-text"/);
+  assert.match(serverSource, /document\.ocrStatus === "completed"/);
+  assert.match(serverSource, /listDocumentPages\(document\.id\)/);
+  assert.match(serverSource, /\[\[ZHIXU_PDF_PAGE:\$\{page\.pageNumber\}\]\]/);
+});
+
 /**
  * 成功上传只保留短暂通知，失败状态仍由队列项承载。
  */

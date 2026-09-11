@@ -86,6 +86,52 @@ function normalizeExtractedText(value) {
 }
 
 /**
+ * 判断 PDF 是否提取到了数量充足、但 Unicode 映射明显损坏的伪文字层。
+ *
+ * 这类 PDF 页面渲染正常，却会把中文映射成控制字符、私用区字形及大量
+ * CJK 扩展字。检测使用多个高置信度信号，避免因少量图标或生僻字误触发 OCR。
+ *
+ * @param {string} value PDF.js 提取的文字。
+ * @returns {boolean} 是否应放弃原文字层并改用 OCR。
+ */
+export function isPdfTextLayerCorrupted(value) {
+  /** text 去除知序页码标记，避免标记字符稀释异常比例。 */
+  const text = String(value || "").replace(/\[\[ZHIXU_PDF_PAGE:\d+\]\]/g, "");
+  /** characters 只统计非空白字符。 */
+  const characters = [...text].filter((character) => !/\s/u.test(character));
+  if (characters.length < 80) return false;
+  let controlCount = 0;
+  let privateUseCount = 0;
+  let replacementCount = 0;
+  let extensionACount = 0;
+  let exoticScriptCount = 0;
+  for (const character of characters) {
+    const codePoint = character.codePointAt(0) || 0;
+    if ((codePoint <= 0x1f && ![0x09, 0x0a, 0x0d].includes(codePoint))
+      || (codePoint >= 0x7f && codePoint <= 0x9f)) controlCount += 1;
+    if ((codePoint >= 0xe000 && codePoint <= 0xf8ff)
+      || (codePoint >= 0xf0000 && codePoint <= 0xffffd)
+      || (codePoint >= 0x100000 && codePoint <= 0x10fffd)) privateUseCount += 1;
+    if (codePoint === 0xfffd) replacementCount += 1;
+    if (codePoint >= 0x3400 && codePoint <= 0x4dbf) extensionACount += 1;
+    if ((codePoint >= 0x0530 && codePoint <= 0x058f)
+      || (codePoint >= 0x10a0 && codePoint <= 0x10ff)
+      || (codePoint >= 0x1200 && codePoint <= 0x137f)
+      || (codePoint >= 0x2d30 && codePoint <= 0x2d7f)
+      || (codePoint >= 0x2f00 && codePoint <= 0x2fdf)) exoticScriptCount += 1;
+  }
+  const total = characters.length;
+  const severeCount = controlCount + privateUseCount + replacementCount;
+  if (replacementCount >= 3) return true;
+  if (controlCount >= 8 && controlCount / total >= 0.005) return true;
+  if (privateUseCount >= 50 && privateUseCount / total >= 0.03) return true;
+  return severeCount >= 24
+    && severeCount / total >= 0.012
+    && extensionACount + exoticScriptCount >= 80
+    && (extensionACount + exoticScriptCount) / total >= 0.08;
+}
+
+/**
  * 按 pdf-parse 的原始版面顺序提取单页文字。
  *
  * @param {object} pageData PDF.js 单页对象。

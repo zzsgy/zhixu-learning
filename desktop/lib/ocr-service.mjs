@@ -402,6 +402,11 @@ export async function recognizeDocument(input) {
         String(serverConfig.ocrDpi),
         "tsv",
       ]);
+      if (/can't open tsv|read_params_file:\s*can't open tsv/i.test(tesseractOutput.stderr)) {
+        throw new Error(
+          "Tesseract 缺少 tessdata/configs/tsv 配置；请补齐完整 tessdata 目录，而不只是语言模型。",
+        );
+      }
       pages.push(parseTesseractTsv(tesseractOutput.stdout.toString("utf8"), index + 1));
     }
     /** recognizedWords 是所有页面用于计算总体置信度的词语坐标。 */

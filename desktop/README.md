@@ -42,7 +42,7 @@
 ## 本地 OCR
 
 - OCR 使用本机 Tesseract，默认语言为 `chi_sim+eng`；扫描 PDF 使用本机 `pdftoppm` 先渲染逐页图片。
-- Windows 安装完成后，可把工具加入 `PATH`，也可在 `.env.local` 配置 `ZHIXU_TESSERACT_PATH` 和 `ZHIXU_PDFTOPPM_PATH`。
+- Windows 安装完成后，可把工具加入 `PATH`，也可在 `.env.local` 配置 `ZHIXU_TESSERACT_PATH` 和 `ZHIXU_PDFTOPPM_PATH`。如果设置了 `TESSDATA_PREFIX`，该目录除 `chi_sim.traineddata`、`eng.traineddata` 外还必须保留完整的 `configs`（尤其是 `configs/tsv`），否则 Tesseract 能通过版本检查但无法返回知序需要的分页坐标。
 - 图片和缺少有效文本层的 PDF 会自动进入 `document_ocr` 后台任务；上传接口不会等待整份扫描件识别完成。
 - OCR 保存逐页正文、词语坐标、页级与总体置信度，并更新文档全文索引；原始图片或 PDF 始终保留。
 - 文档阅读页显示识别状态、页数和总体置信度，可在失败或结果不理想时重新执行。
