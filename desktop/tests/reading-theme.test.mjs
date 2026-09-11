@@ -40,10 +40,13 @@ test("沉浸夜读中的 PDF 文档使用居中单列正文和顶部信息条", 
 });
 
 test("超长标题、推广块和异常媒体不会破坏阅读页比例", () => {
-  assert.match(script, /function removeDecorativeArticleImage\(image, sourceCount\)/);
+  assert.match(script, /function removeDecorativeArticleImage\(image, sourceCount, relativeWidthPercent = 0\)/);
   assert.match(script, /function removeLegacyArticlePromotionBlocks\(root\)/);
   assert.match(script, /removeLegacyArticlePromotionBlocks\(safeArticleRoot\)/);
   assert.match(script, /image\.dataset\.zhixuDisplayWidth/);
+  assert.match(script, /image\.dataset\.zhixuRelativeWidthPercent \|\| image\.dataset\.zhixuDisplayWidthPercent/);
+  assert.match(script, /image\.classList\.add\("article-inline-decoration"\)/);
+  assert.doesNotMatch(script, /image\.style\.width = `\$\{Math\.min\(displayWidthPercent/);
   assert.match(script, /image\.naturalWidth <= 400[\s\S]*image\.naturalHeight >= 1200[\s\S]*aspectRatio >= 4/);
   assert.match(script, /sourceCount >= 2[\s\S]*image\.naturalWidth <= 180[\s\S]*image\.naturalHeight <= 320/);
   assert.match(script, /safeArticleRoot\.querySelectorAll\("section, div, p"\)\)\.reverse\(\)/);
@@ -52,6 +55,7 @@ test("超长标题、推广块和异常媒体不会破坏阅读页比例", () =>
   assert.match(styles, /\.article-reading-page h1\.is-long-title \{ font-size: clamp\(32px, 3\.6vw, 54px\)/);
   assert.match(styles, /\.article-prose p\.article-section-heading \{/);
   assert.match(styles, /\.article-prose img \{[\s\S]*max-height: min\(78vh, 900px\);[\s\S]*object-fit: contain;/);
+  assert.match(styles, /\.article-prose img\.article-inline-decoration \{[\s\S]*max-width: min\(28%, 240px\);[\s\S]*width: auto !important;/);
 });
 
 test("三类阅读正文统一增强代码块、行内代码和特殊提示字段", () => {

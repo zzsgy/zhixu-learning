@@ -166,7 +166,8 @@ test("导入时删除紧凑推广块并只保留图片的安全显示宽度", ()
   assert.doesNotMatch(result.html, /点击蓝字|关注我们|huge-question|banner\.jpg/);
   assert.match(result.html, /这是需要完整保留的正文知识内容/);
   assert.match(result.html, /data-zhixu-display-width="320"/);
-  assert.match(result.html, /data-zhixu-display-width-percent="24"/);
+  assert.match(result.html, /data-zhixu-relative-width-percent="24"/);
+  assert.doesNotMatch(result.html, /data-zhixu-display-width-percent/);
   assert.doesNotMatch(result.html, /position|transform|onerror/);
 });
 

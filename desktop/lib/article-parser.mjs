@@ -743,7 +743,8 @@ export function sanitizeArticleHtml(rawHtml, baseUrl) {
         element.setAttribute("data-zhixu-display-width", String(displayWidth.value));
       }
       if (displayWidth?.unit === "%") {
-        element.setAttribute("data-zhixu-display-width-percent", String(displayWidth.value));
+        /** 百分比依赖已经被剥离的父容器，只保留为相对布局标记，不能直接用于正文宽度。 */
+        element.setAttribute("data-zhixu-relative-width-percent", String(displayWidth.value));
       }
     }
     if (tagName === "td" || tagName === "th") {

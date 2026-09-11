@@ -4746,11 +4746,28 @@ function setArticleImageSource(image, remoteSource) {
  *
  * @param {HTMLImageElement} image 已完成解码的正文图片。
  * @param {number} sourceCount 同一原始地址在文章中的出现次数。
+ * @param {number} relativeWidthPercent 原图相对于已被清理父容器的宽度比例。
  * @returns {void}
  */
-function removeDecorativeArticleImage(image, sourceCount) {
+function removeDecorativeArticleImage(image, sourceCount, relativeWidthPercent = 0) {
   if (image.naturalWidth <= 0 || image.naturalHeight <= 0) return;
   const aspectRatio = image.naturalHeight / image.naturalWidth;
+  /**
+   * isInlineDecoration 匹配原网页在小容器内按 100% 显示的角标、曲线等装饰。
+   * 父容器宽度已经被安全清洗移除，不能再把这个百分比套到整篇正文。
+   */
+  const parent = image.parentElement;
+  const isInlineDecoration = relativeWidthPercent >= 80
+    && image.naturalWidth <= 240
+    && image.naturalHeight <= 160
+    && !(image.getAttribute("alt") || "").trim()
+    && parent?.matches("section, div, p")
+    && !(parent.textContent || "").trim()
+    && parent.querySelectorAll("img").length === 1;
+  if (isInlineDecoration) {
+    image.classList.add("article-inline-decoration");
+    return;
+  }
   /** isLayoutStrip 匹配失去裁剪样式后被完整展开的竖长章节拼接素材。 */
   const isLayoutStrip = image.naturalWidth <= 400
     && image.naturalHeight >= 1200
@@ -4760,19 +4777,19 @@ function removeDecorativeArticleImage(image, sourceCount) {
     && image.naturalWidth <= 180
     && image.naturalHeight <= 320;
   if (!isLayoutStrip && !isRepeatedSmallDecoration) return;
-  let parent = image.parentElement;
+  let emptyParent = image.parentElement;
   image.remove();
   while (
-    parent
-    && parent.matches("section, div, p")
-    && !parent.id
-    && !parent.className
-    && !(parent.textContent || "").trim()
-    && !parent.querySelector("img, video, iframe, table, pre, code")
+    emptyParent
+    && emptyParent.matches("section, div, p")
+    && !emptyParent.id
+    && !emptyParent.className
+    && !(emptyParent.textContent || "").trim()
+    && !emptyParent.querySelector("img, video, iframe, table, pre, code")
   ) {
-    const nextParent = parent.parentElement;
-    parent.remove();
-    parent = nextParent;
+    const nextParent = emptyParent.parentElement;
+    emptyParent.remove();
+    emptyParent = nextParent;
   }
 }
 
@@ -4885,16 +4902,22 @@ function createArticleOriginalContent(article) {
     const remoteSource = image.getAttribute("src") || "";
     /** 新记录的安全宽度提示恢复源站有意使用的小图尺寸，但绝不恢复任意样式。 */
     const displayWidth = Number(image.dataset.zhixuDisplayWidth);
-    const displayWidthPercent = Number(image.dataset.zhixuDisplayWidthPercent);
+    /** 兼容上一版已经入库的 displayWidthPercent，并统一视为不可直接应用的相对提示。 */
+    const relativeWidthPercent = Number(
+      image.dataset.zhixuRelativeWidthPercent || image.dataset.zhixuDisplayWidthPercent,
+    );
     if (Number.isFinite(displayWidth) && displayWidth > 0) {
       image.style.width = `${Math.min(displayWidth, 1040)}px`;
-    } else if (Number.isFinite(displayWidthPercent) && displayWidthPercent > 0) {
-      image.style.width = `${Math.min(displayWidthPercent, 100)}%`;
     }
     image.removeAttribute("data-zhixu-display-width");
     image.removeAttribute("data-zhixu-display-width-percent");
+    image.removeAttribute("data-zhixu-relative-width-percent");
     image.addEventListener("load", () => {
-      removeDecorativeArticleImage(image, imageSourceCounts.get(remoteSource) || 0);
+      removeDecorativeArticleImage(
+        image,
+        imageSourceCounts.get(remoteSource) || 0,
+        Number.isFinite(relativeWidthPercent) ? relativeWidthPercent : 0,
+      );
     }, { once: true });
     if (/^https?:\/\//i.test(remoteSource)) {
       setArticleImageSource(image, remoteSource);
