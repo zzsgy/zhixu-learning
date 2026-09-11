@@ -118,7 +118,7 @@
 .activity-library-scale { position: relative; height: 220px; margin-top: 30px; border-right: 1px solid var(--line); }
 .activity-library-scale span { position: absolute; right: 8px; color: var(--ink-soft); font-family: var(--mono); font-size: 9px; transform: translateY(50%); }
 .activity-library-columns { display: grid; grid-template-columns: repeat(var(--activity-library-column-count), minmax(56px, 1fr)); align-items: end; gap: 16px; min-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 30px 18px 12px; }
-.activity-library-columns.is-expanded { grid-template-columns: repeat(var(--activity-library-column-count), 48px); gap: 10px; }
+.activity-library-columns.is-expanded { grid-template-columns: repeat(var(--activity-library-column-count), minmax(48px, 1fr)); min-width: max(100%, calc(var(--activity-library-column-count) * 58px)); gap: 10px; }
 .activity-library-column { display: grid; grid-template-rows: 18px 220px 48px; gap: 7px; align-items: end; min-width: 0; }
 .activity-library-value { align-self: center; color: var(--ink); font-family: var(--mono); font-size: 10px; text-align: center; }
 .activity-library-track { display: flex; width: 28px; height: 220px; align-self: end; justify-self: center; flex-direction: column-reverse; overflow: hidden; border-radius: 6px 6px 2px 2px; background: repeating-linear-gradient(to top, transparent 0 54px, var(--line) 54px 55px), color-mix(in srgb, var(--line) 45%, transparent); }
@@ -373,7 +373,7 @@ ol.github-report-list li::before { position: absolute; left: 13px; color: var(--
   .activity-library-legend { flex-wrap: wrap; gap: 10px 14px; }
   .activity-library-legend small { width: 100%; margin-left: 0; }
   .activity-library-columns { grid-template-columns: repeat(var(--activity-library-column-count), minmax(52px, 1fr)); gap: 10px; }
-  .activity-library-columns.is-expanded { grid-template-columns: repeat(var(--activity-library-column-count), 44px); gap: 8px; }
+  .activity-library-columns.is-expanded { grid-template-columns: repeat(var(--activity-library-column-count), minmax(44px, 1fr)); min-width: max(100%, calc(var(--activity-library-column-count) * 52px)); gap: 8px; }
   .activity-github-empty { align-items: stretch; flex-direction: column; }
   .github-project-list { grid-template-columns: 1fr; }
   .github-project-index-item:nth-child(odd) { border-right: 0; }
