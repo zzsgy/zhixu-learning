@@ -4741,17 +4741,25 @@ function setArticleImageSource(image, remoteSource) {
 }
 
 /**
- * 移除公众号正文中依赖原站布局的重复竖长装饰条，并向上清理空白包装层。
- * 单张纵向信息图不会命中，避免误删正常流程图和长截图。
+ * 移除公众号正文中依赖原站布局的竖长拼接素材和重复小装饰，并清理空白包装层。
+ * 正常内容图通常具有可阅读宽度；二维码等单张小图不会命中。
  *
  * @param {HTMLImageElement} image 已完成解码的正文图片。
  * @param {number} sourceCount 同一原始地址在文章中的出现次数。
  * @returns {void}
  */
-function removeRepeatedDecorativeArticleImage(image, sourceCount) {
-  if (sourceCount < 2 || image.naturalWidth <= 0 || image.naturalHeight <= 0) return;
+function removeDecorativeArticleImage(image, sourceCount) {
+  if (image.naturalWidth <= 0 || image.naturalHeight <= 0) return;
   const aspectRatio = image.naturalHeight / image.naturalWidth;
-  if (image.naturalWidth > 400 || image.naturalHeight < 1200 || aspectRatio < 4) return;
+  /** isLayoutStrip 匹配失去裁剪样式后被完整展开的竖长章节拼接素材。 */
+  const isLayoutStrip = image.naturalWidth <= 400
+    && image.naturalHeight >= 1200
+    && aspectRatio >= 4;
+  /** isRepeatedSmallDecoration 匹配尾部麦穗等重复小装饰，保留单张二维码。 */
+  const isRepeatedSmallDecoration = sourceCount >= 2
+    && image.naturalWidth <= 180
+    && image.naturalHeight <= 320;
+  if (!isLayoutStrip && !isRepeatedSmallDecoration) return;
   let parent = image.parentElement;
   image.remove();
   while (
@@ -4804,6 +4812,20 @@ function createArticleOriginalContent(article) {
   for (const childNode of safeArticleRoot.childNodes) {
     fragment.append(document.importNode(childNode, true));
   }
+  /** numberedHeadings 把原站依赖图片拼装的章节标题恢复成独立可读标题。 */
+  for (const paragraph of fragment.querySelectorAll("p")) {
+    const text = (paragraph.textContent || "").replace(/\s+/g, " ").trim();
+    const meaningfulChildren = Array.from(paragraph.children).filter(
+      (child) => child.tagName.toLowerCase() !== "br",
+    );
+    if (
+      meaningfulChildren.length === 1
+      && meaningfulChildren[0].tagName.toLowerCase() === "strong"
+      && /^(?:[一二三四五六七八九十]+[.、．]|\d+(?:\.\d+)+\s)/.test(text)
+    ) {
+      paragraph.classList.add("article-section-heading");
+    }
+  }
   /** imageSourceCounts 用于区分反复出现的装饰条与只出现一次的正常纵向信息图。 */
   const imageSourceCounts = new Map();
   for (const image of fragment.querySelectorAll("img")) {
@@ -4814,7 +4836,7 @@ function createArticleOriginalContent(article) {
     /** remoteSource 是服务端已清洗过的公开图片地址。 */
     const remoteSource = image.getAttribute("src") || "";
     image.addEventListener("load", () => {
-      removeRepeatedDecorativeArticleImage(image, imageSourceCounts.get(remoteSource) || 0);
+      removeDecorativeArticleImage(image, imageSourceCounts.get(remoteSource) || 0);
     }, { once: true });
     if (/^https?:\/\//i.test(remoteSource)) {
       setArticleImageSource(image, remoteSource);
