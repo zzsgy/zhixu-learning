@@ -691,7 +691,8 @@ function renderLibraryCompositionChart(composition) {
   }, ...visibleFolders];
   columns.classList.toggle("is-expanded", applicationState.activityShowSecondaryFolders);
   columns.style.setProperty("--activity-library-column-count", String(chartItems.length));
-  for (const item of chartItems) {
+  /** createLibraryColumn 把一条目录统计转换为统一的柱状项。 */
+  const createLibraryColumn = (item) => {
     const column = document.createElement("div");
     column.className = `activity-library-column is-level-${Number(item.level) || 0}`;
     column.title = `${item.name}：${Number(item.itemCount) || 0}`;
@@ -711,7 +712,33 @@ function renderLibraryCompositionChart(composition) {
     label.append(createTextElement("small", "", item.level === 2 ? "二级" : item.level === 1 ? "一级" : "论文"));
     label.append(createTextElement("strong", "", item.name));
     column.append(value, track, label);
-    columns.append(column);
+    return column;
+  };
+  if (applicationState.activityShowSecondaryFolders) {
+    /** groups 按一级目录切开连续柱子，让二级目录的归属在图上直接可见。 */
+    const groups = [];
+    for (const item of chartItems) {
+      if (Number(item.level) !== 2 || groups.length === 0) {
+        groups.push({ name: item.name, level: Number(item.level) || 0, items: [item] });
+      } else {
+        groups.at(-1).items.push(item);
+      }
+    }
+    groups.forEach((group, groupIndex) => {
+      const groupElement = document.createElement("div");
+      groupElement.className = `activity-library-group is-group-${groupIndex % 2 ? "even" : "odd"}`;
+      groupElement.style.setProperty("--activity-library-group-count", String(group.items.length));
+      group.items.forEach((item) => groupElement.append(createLibraryColumn(item)));
+      const groupLabel = createTextElement(
+        "span",
+        "activity-library-group-label",
+        group.level === 0 ? "论文库 · 独立统计" : `${group.name} · 一级目录`,
+      );
+      groupElement.append(groupLabel);
+      columns.append(groupElement);
+    });
+  } else {
+    chartItems.forEach((item) => columns.append(createLibraryColumn(item)));
   }
   plot.append(scale, columns);
   dom.activityLibraryChart.append(summary, legend, plot);
