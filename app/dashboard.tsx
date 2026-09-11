@@ -18,10 +18,28 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 type Domain = "AI" | "BIO" | "DB";
 
 /** 主导航页面。 */
-type ViewName = "today" | "library" | "articles" | "deep" | "sync";
+type ViewName =
+  | "today"
+  | "search"
+  | "library"
+  | "articles"
+  | "collections"
+  | "deep"
+  | "sync";
 
 /** 外部文章允许使用的一级领域。 */
 type ArticleDomain = Domain | "OTHER";
+
+/** 个人知识管理支持的目标类型。 */
+type KnowledgeTargetType = "card" | "article";
+
+/** 个人知识管理支持的学习状态。 */
+type KnowledgeStatus =
+  | "inbox"
+  | "organizing"
+  | "learning"
+  | "mastered"
+  | "archived";
 
 /** 云端卡片结构。 */
 type Card = {
@@ -91,6 +109,74 @@ type Article = {
   createdAt: string;
   /** 最近重新解析时间。 */
   updatedAt: string;
+};
+
+/** 卡片或文章的个人学习状态。 */
+type KnowledgeState = {
+  /** 状态记录 ID。 */
+  id: string;
+  /** 当前用户 ID。 */
+  userId: string;
+  /** card 或 article。 */
+  targetType: KnowledgeTargetType;
+  /** 卡片或文章稳定 ID。 */
+  targetId: string;
+  /** 当前学习状态。 */
+  status: KnowledgeStatus;
+  /** 最近更新时间。 */
+  updatedAt: string;
+};
+
+/** 带可选原文引用的个人批注。 */
+type Annotation = {
+  /** 批注稳定 ID。 */
+  id: string;
+  /** 当前用户 ID。 */
+  userId: string;
+  /** card 或 article。 */
+  targetType: KnowledgeTargetType;
+  /** 卡片或文章稳定 ID。 */
+  targetId: string;
+  /** 可选原文引用。 */
+  quoteText: string | null;
+  /** 用户自己的批注正文。 */
+  noteText: string;
+  /** 创建时间。 */
+  createdAt: string;
+  /** 最近更新时间。 */
+  updatedAt: string;
+};
+
+/** 用户创建的知识专题。 */
+type KnowledgeCollection = {
+  /** 专题稳定 ID。 */
+  id: string;
+  /** 当前用户 ID。 */
+  userId: string;
+  /** 专题名称。 */
+  name: string;
+  /** 专题说明。 */
+  description: string;
+  /** 创建时间。 */
+  createdAt: string;
+  /** 最近更新时间。 */
+  updatedAt: string;
+};
+
+/** 专题与卡片、文章之间的归属关系。 */
+type CollectionItem = {
+  /** 关系记录 ID。 */
+  id: string;
+  /** 当前用户 ID。 */
+  userId: string;
+  /** 所属专题 ID。 */
+  collectionId: string;
+  /** card 或 article。 */
+  targetType: KnowledgeTargetType;
+  /** 卡片或文章稳定 ID。 */
+  targetId: string;
+  /** 加入专题时间。 */
+  createdAt: string;
 };
 
 /** 阅读进度结构。 */
@@ -196,6 +282,14 @@ type BootstrapData = {
   cards: Card[];
   /** 当前账号保存的外部文章。 */
   articles: Article[];
+  /** 卡片与文章的个人学习状态。 */
+  knowledgeStates: KnowledgeState[];
+  /** 个人批注。 */
+  annotations: Annotation[];
+  /** 个人专题。 */
+  collections: KnowledgeCollection[];
+  /** 专题成员关系。 */
+  collectionItems: CollectionItem[];
   /** 阅读进度。 */
   progress: Progress[];
   /** 收藏。 */
@@ -231,6 +325,28 @@ type ImportDraft = {
   content: string;
 };
 
+/** 全局搜索返回的统一知识结果。 */
+type GlobalSearchResult = {
+  /** card、article、deep 或 annotation。 */
+  kind: "card" | "article" | "deep" | "annotation";
+  /** 搜索结果稳定键。 */
+  id: string;
+  /** 打开详情页时使用的目标类型。 */
+  targetType: KnowledgeTargetType;
+  /** 打开详情页时使用的目标 ID。 */
+  targetId: string;
+  /** 搜索结果标题。 */
+  title: string;
+  /** 搜索结果摘要或命中文本。 */
+  excerpt: string;
+  /** 领域中文标签。 */
+  domainLabel: string;
+  /** 当前个人学习状态。 */
+  status: KnowledgeStatus;
+  /** 简单相关性分数，用于客户端排序。 */
+  score: number;
+};
+
 /** IndexedDB 数据库名。 */
 const CACHE_DATABASE_NAME = "zhixu-offline-cache";
 /** IndexedDB 对象仓库名。 */
@@ -248,8 +364,10 @@ const NAV_ITEMS: Array<{
   hint: string;
 }> = [
   { id: "today", label: "今日卡片", hint: "TODAY" },
+  { id: "search", label: "全局搜索", hint: "SEARCH" },
   { id: "library", label: "知识库", hint: "LIBRARY" },
   { id: "articles", label: "文章库", hint: "ARTICLES" },
+  { id: "collections", label: "我的专题", hint: "TOPICS" },
   { id: "deep", label: "深度阅读", hint: "DEEP" },
   { id: "sync", label: "同步与导出", hint: "SYNC" },
 ];
@@ -276,6 +394,23 @@ const ARTICLE_DOMAIN_LABELS: Record<ArticleDomain, string> = {
   OTHER: "其他",
 };
 
+/** 个人学习状态的中文名称。 */
+const KNOWLEDGE_STATUS_LABELS: Record<KnowledgeStatus, string> = {
+  inbox: "收件箱",
+  organizing: "待整理",
+  learning: "学习中",
+  mastered: "已掌握",
+  archived: "已归档",
+};
+
+/** 全局搜索结果类型的中文名称。 */
+const SEARCH_KIND_LABELS: Record<GlobalSearchResult["kind"], string> = {
+  card: "知识卡片",
+  article: "收藏文章",
+  deep: "深度内容",
+  annotation: "个人批注",
+};
+
 /** 安全解析 JSON 字符串数组。 */
 function parseStringArray(value: string | null): string[] {
   if (!value) return [];
@@ -295,6 +430,14 @@ function normalizeBootstrapData(data: BootstrapData): BootstrapData {
   return {
     ...data,
     articles: Array.isArray(data.articles) ? data.articles : [],
+    knowledgeStates: Array.isArray(data.knowledgeStates)
+      ? data.knowledgeStates
+      : [],
+    annotations: Array.isArray(data.annotations) ? data.annotations : [],
+    collections: Array.isArray(data.collections) ? data.collections : [],
+    collectionItems: Array.isArray(data.collectionItems)
+      ? data.collectionItems
+      : [],
   };
 }
 
@@ -309,6 +452,38 @@ function formatTime(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+/** 从命中位置附近截取一段适合搜索结果展示的正文。 */
+function createSearchExcerpt(value: string, query: string): string {
+  /** normalizedValue 是移除多余空白后的可读文本。 */
+  const normalizedValue = value.replace(/\s+/g, " ").trim();
+  /** matchIndex 是忽略大小写后的首次命中位置。 */
+  const matchIndex = normalizedValue.toLowerCase().indexOf(query.toLowerCase());
+  /** start 是保留命中词前方上下文后的截取起点。 */
+  const start = Math.max(0, matchIndex >= 0 ? matchIndex - 55 : 0);
+  /** excerpt 是最多 180 字的结果摘要。 */
+  const excerpt = normalizedValue.slice(start, start + 180);
+  return `${start > 0 ? "…" : ""}${excerpt}${start + 180 < normalizedValue.length ? "…" : ""}`;
+}
+
+/** 根据标题与正文中的命中位置计算轻量客户端相关性。 */
+function calculateSearchScore(
+  title: string,
+  body: string,
+  query: string,
+): number {
+  /** normalizedTitle 是忽略大小写后的标题。 */
+  const normalizedTitle = title.toLowerCase();
+  /** normalizedBody 是忽略大小写后的正文。 */
+  const normalizedBody = body.toLowerCase();
+  /** normalizedQuery 是忽略大小写后的搜索词。 */
+  const normalizedQuery = query.toLowerCase();
+  if (normalizedTitle === normalizedQuery) return 100;
+  if (normalizedTitle.startsWith(normalizedQuery)) return 80;
+  if (normalizedTitle.includes(normalizedQuery)) return 60;
+  if (normalizedBody.includes(normalizedQuery)) return 20;
+  return 0;
 }
 
 /** 打开浏览器离线缓存数据库。 */
@@ -423,6 +598,50 @@ function snapshotToMarkdown(data: BootstrapData): string {
   const favoriteIds = new Set(data.favorites.map((item) => item.cardId));
   /** deepByCard 用于把深度内容附在对应卡片后。 */
   const deepByCard = new Map(data.deepDives.map((item) => [item.cardId, item]));
+  /** stateByTarget 用于标记卡片和文章的个人学习状态。 */
+  const stateByTarget = new Map(
+    data.knowledgeStates.map((item) => [
+      `${item.targetType}:${item.targetId}`,
+      item.status,
+    ]),
+  );
+  /** collectionNameById 用于把专题 ID 转换为可读名称。 */
+  const collectionNameById = new Map(
+    data.collections.map((collection) => [collection.id, collection.name]),
+  );
+  /** annotationMarkdown 为指定知识目标生成个人批注段落。 */
+  const annotationMarkdown = (
+    targetType: KnowledgeTargetType,
+    targetId: string,
+  ): string => {
+    /** targetAnnotations 是当前知识目标的全部个人批注。 */
+    const targetAnnotations = data.annotations.filter(
+      (item) =>
+        item.targetType === targetType && item.targetId === targetId,
+    );
+    if (!targetAnnotations.length) return "";
+    return [
+      "\n### 个人批注",
+      "",
+      ...targetAnnotations.flatMap((annotation) => [
+        annotation.quoteText ? `> ${annotation.quoteText}` : "",
+        annotation.noteText,
+        "",
+      ]),
+    ].join("\n");
+  };
+  /** collectionNames 为指定知识目标返回所属专题名称。 */
+  const collectionNames = (
+    targetType: KnowledgeTargetType,
+    targetId: string,
+  ): string[] =>
+    data.collectionItems
+      .filter(
+        (item) =>
+          item.targetType === targetType && item.targetId === targetId,
+      )
+      .map((item) => collectionNameById.get(item.collectionId))
+      .filter((name): name is string => Boolean(name));
   /** sections 是逐卡片生成的 Markdown 段落。 */
   const sections = data.cards.map((card) => {
     /** flow 是当前卡片流程步骤。 */
@@ -431,12 +650,24 @@ function snapshotToMarkdown(data: BootstrapData): string {
     const sources = parseStringArray(card.sourcesJson);
     /** deepDive 是当前卡片已保存的深度内容。 */
     const deepDive = deepByCard.get(card.id);
+    /** status 是当前卡片的个人学习状态。 */
+    const status =
+      stateByTarget.get(`card:${card.id}`) ??
+      (data.progress.some(
+        (item) => item.cardId === card.id && item.status === "completed",
+      )
+        ? "mastered"
+        : "inbox");
+    /** topics 是当前卡片所属专题名称。 */
+    const topics = collectionNames("card", card.id);
     return [
       `## ${card.title}`,
       "",
       `- 领域：${DOMAIN_LABELS[card.domain]}`,
       `- 系列：${card.series} · L${card.level}`,
       `- 收藏：${favoriteIds.has(card.id) ? "是" : "否"}`,
+      `- 状态：${KNOWLEDGE_STATUS_LABELS[status]}`,
+      topics.length ? `- 专题：${topics.join("、")}` : "",
       "",
       card.content,
       card.formula ? `\n**公式**：${card.formula}` : "",
@@ -445,6 +676,7 @@ function snapshotToMarkdown(data: BootstrapData): string {
       deepDive
         ? `\n### 深度内容：${deepDive.title}\n\n${deepDive.content}`
         : "",
+      annotationMarkdown("card", card.id),
       "",
     ].join("\n");
   });
@@ -452,17 +684,44 @@ function snapshotToMarkdown(data: BootstrapData): string {
   const articleSections = data.articles.map((article) => {
     /** tags 是当前文章的主题标签。 */
     const tags = parseStringArray(article.tagsJson);
+    /** status 是当前文章的个人学习状态。 */
+    const status = stateByTarget.get(`article:${article.id}`) ?? "inbox";
+    /** topics 是当前文章所属专题名称。 */
+    const topics = collectionNames("article", article.id);
     return [
       `## ${article.title}`,
       "",
       `- 领域：${ARTICLE_DOMAIN_LABELS[article.domain]}`,
       `- 作者：${article.author || "未标注"}`,
       `- 原文：${article.url}`,
+      `- 状态：${KNOWLEDGE_STATUS_LABELS[status]}`,
       tags.length ? `- 标签：${tags.join("、")}` : "",
+      topics.length ? `- 专题：${topics.join("、")}` : "",
       "",
       `> ${article.summary}`,
       "",
       article.contentText,
+      annotationMarkdown("article", article.id),
+      "",
+    ].join("\n");
+  });
+  /** collectionSections 是所有个人专题及其成员标题。 */
+  const collectionSections = data.collections.map((collection) => {
+    /** itemTitles 是当前专题中全部卡片和文章标题。 */
+    const itemTitles = data.collectionItems
+      .filter((item) => item.collectionId === collection.id)
+      .map((item) =>
+        item.targetType === "card"
+          ? data.cards.find((card) => card.id === item.targetId)?.title
+          : data.articles.find((article) => article.id === item.targetId)?.title,
+      )
+      .filter((title): title is string => Boolean(title));
+    return [
+      `## ${collection.name}`,
+      "",
+      collection.description,
+      "",
+      ...itemTitles.map((title) => `- ${title}`),
       "",
     ].join("\n");
   });
@@ -476,6 +735,9 @@ function snapshotToMarkdown(data: BootstrapData): string {
     "# 文章库",
     "",
     ...articleSections,
+    "# 我的专题",
+    "",
+    ...collectionSections,
   ].join("\n");
 }
 
@@ -628,6 +890,198 @@ function CardTile({
   );
 }
 
+/** 详情页中的个人知识整理面板。 */
+function KnowledgeWorkbench({
+  status,
+  annotations,
+  collections,
+  collectionIds,
+  offline,
+  busyAction,
+  onStatusChange,
+  onAddAnnotation,
+  onDeleteAnnotation,
+  onToggleCollection,
+}: {
+  /** 当前知识目标的个人学习状态。 */
+  status: KnowledgeStatus;
+  /** 当前知识目标的全部个人批注。 */
+  annotations: Annotation[];
+  /** 当前用户建立的全部专题。 */
+  collections: KnowledgeCollection[];
+  /** 当前知识目标已经加入的专题 ID 集合。 */
+  collectionIds: Set<string>;
+  /** 是否正在使用只读离线快照。 */
+  offline: boolean;
+  /** 当前正在执行的异步动作。 */
+  busyAction: string | null;
+  /** 修改当前知识目标的学习状态。 */
+  onStatusChange: (status: KnowledgeStatus) => void;
+  /** 新增一条个人批注并返回是否保存成功。 */
+  onAddAnnotation: (noteText: string, quoteText: string | null) => Promise<boolean>;
+  /** 删除一条个人批注。 */
+  onDeleteAnnotation: (annotationId: string) => void;
+  /** 把当前知识目标加入专题或从专题移除。 */
+  onToggleCollection: (collectionId: string, active: boolean) => void;
+}): React.ReactNode {
+  /** noteText 是尚未保存的个人批注草稿。 */
+  const [noteText, setNoteText] = useState("");
+  /** quoteText 是从当前正文选取的引用草稿。 */
+  const [quoteText, setQuoteText] = useState<string | null>(null);
+
+  /** 读取当前页面选中的正文并作为批注引用。 */
+  function captureSelection(): void {
+    /** selectedText 是浏览器当前选区中的纯文本。 */
+    const selectedText = window.getSelection()?.toString().trim() ?? "";
+    setQuoteText(selectedText ? selectedText.slice(0, 1000) : null);
+  }
+
+  /** 保存批注，成功后清空本地草稿。 */
+  async function submitAnnotation(): Promise<void> {
+    /** normalizedNote 是移除首尾空白后的批注正文。 */
+    const normalizedNote = noteText.trim();
+    if (!normalizedNote) return;
+    /** saved 表示云端是否成功创建本条批注。 */
+    const saved = await onAddAnnotation(normalizedNote, quoteText);
+    if (saved) {
+      setNoteText("");
+      setQuoteText(null);
+    }
+  }
+
+  return (
+    <section className="knowledge-workbench">
+      <div className="workbench-heading">
+        <div>
+          <p className="eyebrow">MY KNOWLEDGE LAYER</p>
+          <h3>把阅读变成自己的知识</h3>
+        </div>
+        <label className="status-control">
+          <span>当前状态</span>
+          <select
+            disabled={offline || busyAction === "state"}
+            onChange={(event) =>
+              onStatusChange(event.target.value as KnowledgeStatus)
+            }
+            value={status}
+          >
+            {(Object.keys(KNOWLEDGE_STATUS_LABELS) as KnowledgeStatus[]).map(
+              (statusOption) => (
+                <option key={statusOption} value={statusOption}>
+                  {KNOWLEDGE_STATUS_LABELS[statusOption]}
+                </option>
+              ),
+            )}
+          </select>
+        </label>
+      </div>
+
+      <div className="workbench-grid">
+        <div className="annotation-editor">
+          <div className="workbench-subheading">
+            <strong>个人批注</strong>
+            <button
+              disabled={offline}
+              onClick={captureSelection}
+              type="button"
+            >
+              引用当前选中文字
+            </button>
+          </div>
+          {quoteText ? (
+            <blockquote>
+              {quoteText}
+              <button
+                aria-label="移除引用"
+                onClick={() => setQuoteText(null)}
+                type="button"
+              >
+                ×
+              </button>
+            </blockquote>
+          ) : null}
+          <textarea
+            disabled={offline}
+            maxLength={4000}
+            onChange={(event) => setNoteText(event.target.value)}
+            placeholder="记录你的理解、疑问、实验经验或下一步行动……"
+            value={noteText}
+          />
+          <div className="annotation-editor-footer">
+            <span>{noteText.length.toLocaleString("zh-CN")} / 4000</span>
+            <button
+              className="secondary-button"
+              disabled={
+                offline ||
+                busyAction === "annotation" ||
+                !noteText.trim()
+              }
+              onClick={() => void submitAnnotation()}
+              type="button"
+            >
+              {busyAction === "annotation" ? "正在保存…" : "保存批注"}
+            </button>
+          </div>
+        </div>
+
+        <div className="collection-picker">
+          <div className="workbench-subheading">
+            <strong>所属专题</strong>
+            <span>{collectionIds.size} 个</span>
+          </div>
+          {collections.length ? (
+            <div className="collection-chip-list">
+              {collections.map((collection) => {
+                /** active 表示当前知识目标是否属于本专题。 */
+                const active = collectionIds.has(collection.id);
+                return (
+                  <button
+                    className={active ? "is-active" : ""}
+                    disabled={offline || busyAction === "collection-item"}
+                    key={collection.id}
+                    onClick={() => onToggleCollection(collection.id, !active)}
+                    type="button"
+                  >
+                    <span>{active ? "✓" : "+"}</span>
+                    {collection.name}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="muted">先到“我的专题”中创建一个专题。</p>
+          )}
+        </div>
+      </div>
+
+      {annotations.length ? (
+        <div className="annotation-list">
+          {annotations.map((annotation) => (
+            <article key={annotation.id}>
+              <div>
+                <span>{formatTime(annotation.createdAt)}</span>
+                <button
+                  disabled={offline || busyAction === "annotation-delete"}
+                  onClick={() => onDeleteAnnotation(annotation.id)}
+                  type="button"
+                >
+                  删除
+                </button>
+              </div>
+              {annotation.quoteText ? (
+                <blockquote>{annotation.quoteText}</blockquote>
+              ) : null}
+              <p>{annotation.noteText}</p>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="workbench-empty">还没有个人批注。选中正文后可以连同原文一起记录。</p>
+      )}
+    </section>
+  );
+}
+
 /** 站内卡片详情页。 */
 function Reader({
   card,
@@ -640,6 +1094,7 @@ function Reader({
   onComplete,
   onGenerateDeep,
   onAsk,
+  managementPanel,
 }: {
   /** 当前卡片。 */
   card: Card;
@@ -661,6 +1116,8 @@ function Reader({
   onGenerateDeep: () => void;
   /** 提交追问。 */
   onAsk: (question: string) => void;
+  /** 状态、批注与专题管理面板。 */
+  managementPanel: React.ReactNode;
 }): React.ReactNode {
   /** question 是当前输入框内容。 */
   const [question, setQuestion] = useState("");
@@ -813,6 +1270,8 @@ function Reader({
               ))}
             </section>
           ) : null}
+
+          {managementPanel}
         </div>
 
         <footer className="reader-footer">
@@ -882,11 +1341,14 @@ function ArticleTile({
 function ArticleDetail({
   article,
   onClose,
+  managementPanel,
 }: {
   /** 当前阅读的文章。 */
   article: Article;
   /** 返回文章列表。 */
   onClose: () => void;
+  /** 状态、批注与专题管理面板。 */
+  managementPanel: React.ReactNode;
 }): React.ReactNode {
   /** tags 是从数据库 JSON 恢复的主题标签。 */
   const tags = parseStringArray(article.tagsJson);
@@ -949,6 +1411,8 @@ function ArticleDetail({
           回到 {sourceHost}
         </a>
       </footer>
+
+      {managementPanel}
     </article>
   );
 }
@@ -969,6 +1433,16 @@ export function Dashboard(): React.ReactNode {
   const [domainFilter, setDomainFilter] = useState<Domain | "ALL">("ALL");
   /** searchText 是知识库搜索词。 */
   const [searchText, setSearchText] = useState("");
+  /** globalSearchText 是跨卡片、文章、深度内容和批注的搜索词。 */
+  const [globalSearchText, setGlobalSearchText] = useState("");
+  /** collectionName 是新建专题的名称草稿。 */
+  const [collectionName, setCollectionName] = useState("");
+  /** collectionDescription 是新建专题的说明草稿。 */
+  const [collectionDescription, setCollectionDescription] = useState("");
+  /** activeCollectionId 是专题页当前展开的专题。 */
+  const [activeCollectionId, setActiveCollectionId] = useState<string | null>(
+    null,
+  );
   /** loading 表示首次数据加载中。 */
   const [loading, setLoading] = useState(true);
   /** unauthorized 表示生产环境尚未登录。 */
@@ -1064,15 +1538,162 @@ export function Dashboard(): React.ReactNode {
     [data],
   );
   /** completedIds 是已读卡片 ID 集合。 */
-  const completedIds = useMemo(
+  const completedIds = useMemo(() => {
+    /** result 先兼容 Android 使用的旧进度记录。 */
+    const result = new Set(
+      data?.progress
+        .filter((item) => item.status === "completed")
+        .map((item) => item.cardId) ?? [],
+    );
+    for (const state of data?.knowledgeStates ?? []) {
+      if (state.targetType !== "card") continue;
+      if (state.status === "mastered") result.add(state.targetId);
+      else result.delete(state.targetId);
+    }
+    return result;
+  }, [data]);
+  /** knowledgeStateMap 按“目标类型:目标 ID”索引个人学习状态。 */
+  const knowledgeStateMap = useMemo(
     () =>
-      new Set(
-        data?.progress
-          .filter((item) => item.status === "completed")
-          .map((item) => item.cardId) ?? [],
+      new Map(
+        data?.knowledgeStates.map((item) => [
+          `${item.targetType}:${item.targetId}`,
+          item.status,
+        ]) ?? [],
       ),
     [data],
   );
+  /** collectionItemsByTarget 按知识目标索引其所属专题 ID。 */
+  const collectionItemsByTarget = useMemo(() => {
+    /** result 收集每个知识目标对应的专题 ID 集合。 */
+    const result = new Map<string, Set<string>>();
+    for (const item of data?.collectionItems ?? []) {
+      /** targetKey 是 card:ID 或 article:ID。 */
+      const targetKey = `${item.targetType}:${item.targetId}`;
+      /** collectionIds 是当前目标已经加入的专题集合。 */
+      const collectionIds = result.get(targetKey) ?? new Set<string>();
+      collectionIds.add(item.collectionId);
+      result.set(targetKey, collectionIds);
+    }
+    return result;
+  }, [data]);
+  /** activeCollection 是专题页当前展开的专题记录。 */
+  const activeCollection = useMemo(
+    () =>
+      data?.collections.find((collection) => collection.id === activeCollectionId) ??
+      data?.collections[0] ??
+      null,
+    [activeCollectionId, data],
+  );
+  /** globalSearchResults 是跨全部知识类型的相关性排序结果。 */
+  const globalSearchResults = useMemo<GlobalSearchResult[]>(() => {
+    /** query 是移除首尾空白后的搜索词。 */
+    const query = globalSearchText.trim();
+    if (!data || !query) return [];
+    /** results 收集卡片、文章、深度内容和个人批注的统一结果。 */
+    const results: GlobalSearchResult[] = [];
+
+    for (const card of data.cards) {
+      /** body 是卡片摘要、正文与系列名称的合并搜索文本。 */
+      const body = `${card.summary} ${card.content} ${card.series}`;
+      /** score 是当前卡片的简单相关性分数。 */
+      const score = calculateSearchScore(card.title, body, query);
+      if (score > 0) {
+        results.push({
+          kind: "card",
+          id: `card:${card.id}`,
+          targetType: "card",
+          targetId: card.id,
+          title: card.title,
+          excerpt: createSearchExcerpt(body, query),
+          domainLabel: DOMAIN_LABELS[card.domain],
+          status:
+            knowledgeStateMap.get(`card:${card.id}`) ??
+            (completedIds.has(card.id) ? "mastered" : "inbox"),
+          score,
+        });
+      }
+    }
+
+    for (const article of data.articles) {
+      /** body 是文章简介与纯文本正文的合并搜索文本。 */
+      const body = `${article.summary} ${article.contentText}`;
+      /** score 是当前文章的简单相关性分数。 */
+      const score = calculateSearchScore(article.title, body, query);
+      if (score > 0) {
+        results.push({
+          kind: "article",
+          id: `article:${article.id}`,
+          targetType: "article",
+          targetId: article.id,
+          title: article.title,
+          excerpt: createSearchExcerpt(body, query),
+          domainLabel: ARTICLE_DOMAIN_LABELS[article.domain],
+          status: knowledgeStateMap.get(`article:${article.id}`) ?? "inbox",
+          score,
+        });
+      }
+    }
+
+    for (const deepDive of data.deepDives) {
+      /** card 是当前深度内容对应的知识卡片。 */
+      const card = data.cards.find((item) => item.id === deepDive.cardId);
+      if (!card) continue;
+      /** score 是当前深度内容的简单相关性分数。 */
+      const score = calculateSearchScore(deepDive.title, deepDive.content, query);
+      if (score > 0) {
+        results.push({
+          kind: "deep",
+          id: `deep:${deepDive.id}`,
+          targetType: "card",
+          targetId: card.id,
+          title: deepDive.title,
+          excerpt: createSearchExcerpt(deepDive.content, query),
+          domainLabel: `${DOMAIN_LABELS[card.domain]} · 深度内容`,
+          status:
+            knowledgeStateMap.get(`card:${card.id}`) ??
+            (completedIds.has(card.id) ? "mastered" : "learning"),
+          score: score + 5,
+        });
+      }
+    }
+
+    for (const annotation of data.annotations) {
+      /** targetTitle 是批注对应卡片或文章的标题。 */
+      const targetTitle =
+        annotation.targetType === "card"
+          ? data.cards.find((item) => item.id === annotation.targetId)?.title
+          : data.articles.find((item) => item.id === annotation.targetId)?.title;
+      if (!targetTitle) continue;
+      /** body 是原文引用与个人批注正文的合并搜索文本。 */
+      const body = `${annotation.quoteText ?? ""} ${annotation.noteText}`;
+      /** score 是当前批注的简单相关性分数。 */
+      const score = calculateSearchScore(targetTitle, body, query);
+      if (score > 0) {
+        results.push({
+          kind: "annotation",
+          id: `annotation:${annotation.id}`,
+          targetType: annotation.targetType,
+          targetId: annotation.targetId,
+          title: `我的批注 · ${targetTitle}`,
+          excerpt: createSearchExcerpt(body, query),
+          domainLabel: "个人理解",
+          status:
+            knowledgeStateMap.get(
+              `${annotation.targetType}:${annotation.targetId}`,
+            ) ?? "organizing",
+          score: score + 10,
+        });
+      }
+    }
+
+    return results.sort((left, right) => right.score - left.score).slice(0, 80);
+  }, [
+    completedIds,
+    data,
+    globalSearchText,
+    knowledgeStateMap,
+  ]);
   /** filteredCards 是知识库筛选结果。 */
   const filteredCards = useMemo(() => {
     /** normalizedSearch 是大小写无关搜索词。 */
@@ -1117,6 +1738,241 @@ export function Dashboard(): React.ReactNode {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  /** 打开统一搜索结果对应的卡片或文章详情页。 */
+  function openKnowledgeTarget(
+    targetType: KnowledgeTargetType,
+    targetId: string,
+  ): void {
+    if (targetType === "card") openCard(targetId);
+    else openArticle(targetId);
+  }
+
+  /** 返回目标的显式知识状态，缺失时使用兼容旧进度的默认状态。 */
+  function statusForTarget(
+    targetType: KnowledgeTargetType,
+    targetId: string,
+  ): KnowledgeStatus {
+    /** explicitStatus 是知识状态表中保存的当前值。 */
+    const explicitStatus = knowledgeStateMap.get(`${targetType}:${targetId}`);
+    if (explicitStatus) return explicitStatus;
+    if (targetType === "card" && completedIds.has(targetId)) return "mastered";
+    return "inbox";
+  }
+
+  /** 保存卡片或文章的个人学习状态。 */
+  async function persistKnowledgeStatus(
+    targetType: KnowledgeTargetType,
+    targetId: string,
+    status: KnowledgeStatus,
+  ): Promise<void> {
+    if (!data || offline) return;
+    setBusyAction("state");
+    try {
+      /** response 是知识状态表保存后的最终记录。 */
+      const response = await requestJson<{ state: KnowledgeState }>(
+        "/api/knowledge/state",
+        {
+          method: "POST",
+          body: JSON.stringify({ targetType, targetId, status }),
+        },
+      );
+      /** nextStates 替换同一知识目标的旧状态。 */
+      const nextStates = [
+        response.state,
+        ...data.knowledgeStates.filter(
+          (item) =>
+            item.targetType !== targetType || item.targetId !== targetId,
+        ),
+      ];
+      /** nextData 是立即反映状态变化的账号快照。 */
+      let nextData: BootstrapData = {
+        ...data,
+        knowledgeStates: nextStates,
+      };
+
+      if (targetType === "card" && status === "mastered") {
+        /** progressResponse 兼容 Android 当前使用的卡片完成状态。 */
+        const progressResponse = await requestJson<{ progress: Progress }>(
+          "/api/progress",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              cardId: targetId,
+              status: "completed",
+              readingSeconds: 300,
+            }),
+          },
+        );
+        nextData = {
+          ...nextData,
+          progress: [
+            progressResponse.progress,
+            ...data.progress.filter((item) => item.cardId !== targetId),
+          ],
+        };
+      }
+
+      setData(nextData);
+      await writeOfflineSnapshot(nextData);
+      setNotice(`已更新为“${KNOWLEDGE_STATUS_LABELS[status]}”。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "知识状态保存失败。");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  /** 新增当前卡片或文章的个人批注。 */
+  async function addAnnotation(
+    targetType: KnowledgeTargetType,
+    targetId: string,
+    noteText: string,
+    quoteText: string | null,
+  ): Promise<boolean> {
+    if (!data || offline) return false;
+    setBusyAction("annotation");
+    try {
+      /** response 是数据库新建的个人批注。 */
+      const response = await requestJson<{ annotation: Annotation }>(
+        "/api/annotations",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            targetType,
+            targetId,
+            noteText,
+            quoteText,
+          }),
+        },
+      );
+      /** nextData 是加入新批注后的账号快照。 */
+      const nextData = {
+        ...data,
+        annotations: [response.annotation, ...data.annotations],
+      };
+      setData(nextData);
+      await writeOfflineSnapshot(nextData);
+      setNotice("个人批注已保存并同步。");
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "批注保存失败。");
+      return false;
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  /** 删除当前账号拥有的一条个人批注。 */
+  async function removeAnnotation(annotationId: string): Promise<void> {
+    if (!data || offline) return;
+    setBusyAction("annotation-delete");
+    try {
+      await requestJson<{ deleted: boolean }>(
+        `/api/annotations?id=${encodeURIComponent(annotationId)}`,
+        { method: "DELETE" },
+      );
+      /** nextData 是移除目标批注后的账号快照。 */
+      const nextData = {
+        ...data,
+        annotations: data.annotations.filter((item) => item.id !== annotationId),
+      };
+      setData(nextData);
+      await writeOfflineSnapshot(nextData);
+      setNotice("批注已删除。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "批注删除失败。");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  /** 新建一个个人知识专题。 */
+  async function createCollection(): Promise<void> {
+    if (!data || offline || !collectionName.trim()) return;
+    setBusyAction("collection");
+    try {
+      /** response 是数据库新建或更新后的专题。 */
+      const response = await requestJson<{ collection: KnowledgeCollection }>(
+        "/api/collections",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: collectionName,
+            description: collectionDescription,
+          }),
+        },
+      );
+      /** nextCollections 替换同名或同 ID 专题，并把最新专题放到首位。 */
+      const nextCollections = [
+        response.collection,
+        ...data.collections.filter(
+          (item) =>
+            item.id !== response.collection.id &&
+            item.name !== response.collection.name,
+        ),
+      ];
+      /** nextData 是立即反映专题变化的账号快照。 */
+      const nextData = { ...data, collections: nextCollections };
+      setData(nextData);
+      await writeOfflineSnapshot(nextData);
+      setActiveCollectionId(response.collection.id);
+      setCollectionName("");
+      setCollectionDescription("");
+      setNotice("专题已创建，可以从卡片或文章详情页加入内容。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "专题创建失败。");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  /** 把知识目标加入专题，或从专题中移除。 */
+  async function toggleKnowledgeCollection(
+    collectionId: string,
+    targetType: KnowledgeTargetType,
+    targetId: string,
+    active: boolean,
+  ): Promise<void> {
+    if (!data || offline) return;
+    setBusyAction("collection-item");
+    try {
+      /** response 是数据库保存后的专题成员状态。 */
+      const response = await requestJson<{
+        active: boolean;
+        item: CollectionItem | null;
+      }>("/api/collections/items", {
+        method: "POST",
+        body: JSON.stringify({
+          collectionId,
+          targetType,
+          targetId,
+          active,
+        }),
+      });
+      /** remainingItems 移除同一专题与目标的旧关系。 */
+      const remainingItems = data.collectionItems.filter(
+        (item) =>
+          item.collectionId !== collectionId ||
+          item.targetType !== targetType ||
+          item.targetId !== targetId,
+      );
+      /** nextItems 在加入专题时附加服务端返回的正式关系记录。 */
+      const nextItems =
+        response.active && response.item
+          ? [response.item, ...remainingItems]
+          : remainingItems;
+      /** nextData 是立即反映专题关系变化的账号快照。 */
+      const nextData = { ...data, collectionItems: nextItems };
+      setData(nextData);
+      await writeOfflineSnapshot(nextData);
+      setNotice(response.active ? "已加入专题。" : "已从专题移除。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "专题关系保存失败。");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   /** 在本地状态中乐观切换收藏，并同步到云端。 */
   async function toggleFavorite(cardId: string): Promise<void> {
     if (!data || offline) return;
@@ -1138,31 +1994,6 @@ export function Dashboard(): React.ReactNode {
     } catch (error) {
       setData(previousData);
       setNotice(error instanceof Error ? error.message : "收藏同步失败。");
-    }
-  }
-
-  /** 把卡片标记为完成。 */
-  async function markCompleted(cardId: string): Promise<void> {
-    if (!data || offline) return;
-    try {
-      /** response 是数据库保存后的进度。 */
-      const response = await requestJson<{ progress: Progress }>("/api/progress", {
-        method: "POST",
-        body: JSON.stringify({
-          cardId,
-          status: "completed",
-          readingSeconds: 300,
-        }),
-      });
-      /** nextProgress 替换同一卡片的旧状态。 */
-      const nextProgress = [
-        ...data.progress.filter((item) => item.cardId !== cardId),
-        response.progress,
-      ];
-      setData({ ...data, progress: nextProgress });
-      setNotice("已标记掌握，进度会同步到手机。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "进度同步失败。");
     }
   }
 
@@ -1391,9 +2222,16 @@ export function Dashboard(): React.ReactNode {
   /** 导出完整 JSON，适合备份和程序迁移。 */
   function exportJson(): void {
     if (!data) return;
+    /** backup 是带格式版本和导出时间的完整可迁移快照。 */
+    const backup = {
+      format: "zhixu-knowledge-backup",
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      data,
+    };
     downloadFile(
       `zhixu-backup-${new Date().toISOString().slice(0, 10)}.json`,
-      JSON.stringify(data, null, 2),
+      JSON.stringify(backup, null, 2),
       "application/json;charset=utf-8",
     );
   }
@@ -1405,6 +2243,49 @@ export function Dashboard(): React.ReactNode {
       `zhixu-notes-${new Date().toISOString().slice(0, 10)}.md`,
       snapshotToMarkdown(data),
       "text/markdown;charset=utf-8",
+    );
+  }
+
+  /** 为指定卡片或文章建立统一的个人知识整理面板。 */
+  function renderKnowledgeWorkbench(
+    targetType: KnowledgeTargetType,
+    targetId: string,
+  ): React.ReactNode {
+    /** targetAnnotations 是当前知识目标的全部个人批注。 */
+    const targetAnnotations = data?.annotations.filter(
+      (item) =>
+        item.targetType === targetType && item.targetId === targetId,
+    ) ?? [];
+    /** targetCollectionIds 是当前知识目标已经加入的专题集合。 */
+    const targetCollectionIds =
+      collectionItemsByTarget.get(`${targetType}:${targetId}`) ??
+      new Set<string>();
+    return (
+      <KnowledgeWorkbench
+        annotations={targetAnnotations}
+        busyAction={busyAction}
+        collectionIds={targetCollectionIds}
+        collections={data?.collections ?? []}
+        offline={offline}
+        onAddAnnotation={(noteText, quoteText) =>
+          addAnnotation(targetType, targetId, noteText, quoteText)
+        }
+        onDeleteAnnotation={(annotationId) =>
+          void removeAnnotation(annotationId)
+        }
+        onStatusChange={(status) =>
+          void persistKnowledgeStatus(targetType, targetId, status)
+        }
+        onToggleCollection={(collectionId, active) =>
+          void toggleKnowledgeCollection(
+            collectionId,
+            targetType,
+            targetId,
+            active,
+          )
+        }
+        status={statusForTarget(targetType, targetId)}
+      />
     );
   }
 
@@ -1504,12 +2385,22 @@ export function Dashboard(): React.ReactNode {
             messages={data.aiMessages.filter((item) => item.cardId === selectedCard.id)}
             onAsk={(question) => void askAi(selectedCard.id, question)}
             onClose={closeDetailPage}
-            onComplete={() => void markCompleted(selectedCard.id)}
+            onComplete={() =>
+              void persistKnowledgeStatus("card", selectedCard.id, "mastered")
+            }
             onFavorite={() => void toggleFavorite(selectedCard.id)}
             onGenerateDeep={() => void generateDeepDive(selectedCard.id)}
+            managementPanel={renderKnowledgeWorkbench("card", selectedCard.id)}
           />
         ) : selectedArticle ? (
-          <ArticleDetail article={selectedArticle} onClose={closeDetailPage} />
+          <ArticleDetail
+            article={selectedArticle}
+            managementPanel={renderKnowledgeWorkbench(
+              "article",
+              selectedArticle.id,
+            )}
+            onClose={closeDetailPage}
+          />
         ) : null}
 
         {!selectedCard && !selectedArticle && activeView === "today" ? (
@@ -1566,6 +2457,89 @@ export function Dashboard(): React.ReactNode {
               </div>
             </section>
           </>
+        ) : null}
+
+        {!selectedCard && !selectedArticle && activeView === "search" ? (
+          <section className="global-search-page">
+            <div className="global-search-hero">
+              <div>
+                <p className="eyebrow">SEARCH EVERYTHING</p>
+                <h2>从你的全部知识中，找到真正需要的那一段。</h2>
+                <p>
+                  一次搜索卡片、文章、深度内容与个人批注。搜索完全基于当前账号数据，
+                  离线快照也可以使用。
+                </p>
+              </div>
+              <label>
+                <span>全局搜索</span>
+                <input
+                  autoFocus
+                  onChange={(event) => setGlobalSearchText(event.target.value)}
+                  placeholder="例如：CIP 湍流、Agent 状态机、MVCC……"
+                  value={globalSearchText}
+                />
+              </label>
+            </div>
+
+            <div className="search-summary-row">
+              <span>
+                {!globalSearchText.trim()
+                  ? "输入关键词开始搜索"
+                  : `找到 ${globalSearchResults.length} 条相关内容`}
+              </span>
+              <small>标题命中优先，其次是正文与个人批注</small>
+            </div>
+
+            {globalSearchResults.length ? (
+              <div className="global-search-results">
+                {globalSearchResults.map((result) => (
+                  <button
+                    className="global-search-result"
+                    key={result.id}
+                    onClick={() =>
+                      openKnowledgeTarget(result.targetType, result.targetId)
+                    }
+                    type="button"
+                  >
+                    <div className="search-result-meta">
+                      <span>{SEARCH_KIND_LABELS[result.kind]}</span>
+                      <span>{result.domainLabel}</span>
+                      <span>{KNOWLEDGE_STATUS_LABELS[result.status]}</span>
+                    </div>
+                    <h3>{result.title}</h3>
+                    <p>{result.excerpt}</p>
+                    <strong>
+                      打开详情 <Icon name="arrow" />
+                    </strong>
+                  </button>
+                ))}
+              </div>
+            ) : globalSearchText.trim() ? (
+              <div className="empty-state">
+                <span>搜</span>
+                <h3>暂时没有匹配内容</h3>
+                <p>可以缩短关键词，或换用技术术语和英文缩写。</p>
+              </div>
+            ) : (
+              <div className="search-guide-grid">
+                <article>
+                  <span>01</span>
+                  <strong>跨内容搜索</strong>
+                  <p>同时检索卡片、收藏文章和深度内容。</p>
+                </article>
+                <article>
+                  <span>02</span>
+                  <strong>找回个人理解</strong>
+                  <p>你写下的批注也会成为可搜索知识。</p>
+                </article>
+                <article>
+                  <span>03</span>
+                  <strong>离线可用</strong>
+                  <p>断网时仍能搜索最近一次同步的本地快照。</p>
+                </article>
+              </div>
+            )}
+          </section>
         ) : null}
 
         {!selectedCard && !selectedArticle && activeView === "library" ? (
@@ -1668,6 +2642,184 @@ export function Dashboard(): React.ReactNode {
                 <span>文</span>
                 <h3>文章库还是空的</h3>
                 <p>把一篇公开文章链接粘贴到上方，即可开始整理。</p>
+              </div>
+            )}
+          </section>
+        ) : null}
+
+        {!selectedCard && !selectedArticle && activeView === "collections" ? (
+          <section className="collections-page">
+            <div className="collection-create-panel">
+              <div>
+                <p className="eyebrow">KNOWLEDGE TOPICS</p>
+                <h2>用专题组织项目、问题与长期研究方向。</h2>
+                <p>
+                  一张卡片或一篇文章可以同时属于多个专题。专题关系会随账号同步，
+                  并进入本地备份。
+                </p>
+              </div>
+              <div className="collection-create-form">
+                <label>
+                  <span>专题名称</span>
+                  <input
+                    maxLength={48}
+                    onChange={(event) => setCollectionName(event.target.value)}
+                    placeholder="例如：发酵罐放大与验证"
+                    value={collectionName}
+                  />
+                </label>
+                <label>
+                  <span>专题说明</span>
+                  <textarea
+                    maxLength={300}
+                    onChange={(event) =>
+                      setCollectionDescription(event.target.value)
+                    }
+                    placeholder="记录这个专题要解决的问题或最终目标。"
+                    value={collectionDescription}
+                  />
+                </label>
+                <button
+                  className="primary-button"
+                  disabled={
+                    offline ||
+                    busyAction === "collection" ||
+                    !collectionName.trim()
+                  }
+                  onClick={() => void createCollection()}
+                  type="button"
+                >
+                  {busyAction === "collection" ? "正在创建…" : "创建专题"}
+                </button>
+              </div>
+            </div>
+
+            {data.collections.length ? (
+              <div className="collection-workspace">
+                <aside className="collection-list">
+                  {data.collections.map((collection) => {
+                    /** itemCount 是当前专题中的知识目标数量。 */
+                    const itemCount = data.collectionItems.filter(
+                      (item) => item.collectionId === collection.id,
+                    ).length;
+                    /** selected 表示专题是否正在右侧展开。 */
+                    const selected = activeCollection?.id === collection.id;
+                    return (
+                      <button
+                        className={selected ? "is-active" : ""}
+                        key={collection.id}
+                        onClick={() => setActiveCollectionId(collection.id)}
+                        type="button"
+                      >
+                        <span>{String(itemCount).padStart(2, "0")}</span>
+                        <div>
+                          <strong>{collection.name}</strong>
+                          <small>{collection.description || "暂无专题说明"}</small>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </aside>
+
+                {activeCollection ? (
+                  <div className="collection-detail">
+                    <header>
+                      <div>
+                        <p className="eyebrow">ACTIVE TOPIC</p>
+                        <h2>{activeCollection.name}</h2>
+                        <p>{activeCollection.description || "暂无专题说明。"}</p>
+                      </div>
+                      <span>
+                        {
+                          data.collectionItems.filter(
+                            (item) => item.collectionId === activeCollection.id,
+                          ).length
+                        }{" "}
+                        条知识
+                      </span>
+                    </header>
+
+                    <div className="collection-detail-items">
+                      {data.collectionItems
+                        .filter(
+                          (item) => item.collectionId === activeCollection.id,
+                        )
+                        .map((item) => {
+                          /** card 是专题成员对应的可选卡片。 */
+                          const card =
+                            item.targetType === "card"
+                              ? data.cards.find(
+                                  (candidate) => candidate.id === item.targetId,
+                                )
+                              : undefined;
+                          /** article 是专题成员对应的可选文章。 */
+                          const article =
+                            item.targetType === "article"
+                              ? data.articles.find(
+                                  (candidate) => candidate.id === item.targetId,
+                                )
+                              : undefined;
+                          /** title 是当前专题成员的可读标题。 */
+                          const title = card?.title ?? article?.title;
+                          /** summary 是当前专题成员的简要说明。 */
+                          const summary = card?.summary ?? article?.summary;
+                          if (!title || !summary) return null;
+                          return (
+                            <article key={item.id}>
+                              <button
+                                onClick={() =>
+                                  openKnowledgeTarget(
+                                    item.targetType,
+                                    item.targetId,
+                                  )
+                                }
+                                type="button"
+                              >
+                                <span>
+                                  {item.targetType === "card" ? "知识卡片" : "收藏文章"}
+                                </span>
+                                <h3>{title}</h3>
+                                <p>{summary}</p>
+                              </button>
+                              <button
+                                className="collection-remove-button"
+                                disabled={
+                                  offline || busyAction === "collection-item"
+                                }
+                                onClick={() =>
+                                  void toggleKnowledgeCollection(
+                                    activeCollection.id,
+                                    item.targetType,
+                                    item.targetId,
+                                    false,
+                                  )
+                                }
+                                type="button"
+                              >
+                                移出专题
+                              </button>
+                            </article>
+                          );
+                        })}
+                    </div>
+
+                    {data.collectionItems.every(
+                      (item) => item.collectionId !== activeCollection.id,
+                    ) ? (
+                      <div className="empty-state collection-empty-state">
+                        <span>集</span>
+                        <h3>这个专题还是空的</h3>
+                        <p>打开任意卡片或文章，在个人知识面板中把它加入本专题。</p>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <span>题</span>
+                <h3>先建立第一个专题</h3>
+                <p>专题适合组织长期研究方向、工作问题和项目资料。</p>
               </div>
             )}
           </section>
@@ -1937,7 +3089,8 @@ export function Dashboard(): React.ReactNode {
               <p className="eyebrow">LOCAL EXPORT</p>
               <h2>保存到你的电脑</h2>
               <p>
-                JSON 适合完整备份与迁移，Markdown 适合在 Obsidian、VS Code 或任意文本编辑器中长期阅读。
+                JSON 会完整保存卡片、文章、状态、批注、专题与同步数据；
+                Markdown 适合在 Obsidian、VS Code 或任意文本编辑器中长期阅读。
               </p>
               <div className="export-actions">
                 <button className="secondary-button" onClick={exportJson} type="button">

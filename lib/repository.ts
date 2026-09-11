@@ -8,11 +8,15 @@ import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
   aiMessages,
+  annotations,
   articles,
   cards,
+  collectionItems,
+  collections,
   deepDives,
   deviceTokens,
   favorites,
+  knowledgeStates,
   progress,
   settings,
 } from "@/db/schema";
@@ -35,6 +39,14 @@ export type BootstrapData = {
   cards: Array<typeof cards.$inferSelect>;
   /** 当前账号保存的外部文章。 */
   articles: Array<typeof articles.$inferSelect>;
+  /** 卡片与文章的个人学习状态。 */
+  knowledgeStates: Array<typeof knowledgeStates.$inferSelect>;
+  /** 当前账号保存的个人批注。 */
+  annotations: Array<typeof annotations.$inferSelect>;
+  /** 当前账号建立的专题集合。 */
+  collections: Array<typeof collections.$inferSelect>;
+  /** 专题与卡片、文章之间的归属关系。 */
+  collectionItems: Array<typeof collectionItems.$inferSelect>;
   /** 阅读进度。 */
   progress: Array<typeof progress.$inferSelect>;
   /** 收藏记录。 */
@@ -125,6 +137,10 @@ export async function loadBootstrapData(
   const [
     visibleCards,
     userArticles,
+    userKnowledgeStates,
+    userAnnotations,
+    userCollections,
+    userCollectionItems,
     userProgress,
     userFavorites,
     userDeepDives,
@@ -143,6 +159,26 @@ export async function loadBootstrapData(
       .from(articles)
       .where(eq(articles.userId, user.id))
       .orderBy(desc(articles.updatedAt)),
+    db
+      .select()
+      .from(knowledgeStates)
+      .where(eq(knowledgeStates.userId, user.id))
+      .orderBy(desc(knowledgeStates.updatedAt)),
+    db
+      .select()
+      .from(annotations)
+      .where(eq(annotations.userId, user.id))
+      .orderBy(desc(annotations.createdAt)),
+    db
+      .select()
+      .from(collections)
+      .where(eq(collections.userId, user.id))
+      .orderBy(desc(collections.updatedAt)),
+    db
+      .select()
+      .from(collectionItems)
+      .where(eq(collectionItems.userId, user.id))
+      .orderBy(desc(collectionItems.createdAt)),
     db
       .select()
       .from(progress)
@@ -182,6 +218,10 @@ export async function loadBootstrapData(
     user,
     cards: visibleCards,
     articles: userArticles,
+    knowledgeStates: userKnowledgeStates,
+    annotations: userAnnotations,
+    collections: userCollections,
+    collectionItems: userCollectionItems,
     progress: userProgress,
     favorites: userFavorites,
     deepDives: userDeepDives,
@@ -279,6 +319,331 @@ export async function saveArticle(input: {
   const row = rows[0];
   if (!row) throw new Error("文章保存失败，请稍后重试。");
   return row;
+}
+
+/** 个人知识管理支持的目标类型。 */
+export type KnowledgeTargetType = "card" | "article";
+
+/** 个人知识管理支持的学习状态。 */
+export type KnowledgeStatus =
+  | "inbox"
+  | "organizing"
+  | "learning"
+  | "mastered"
+  | "archived";
+
+/** 确认当前用户有权读取并管理指定知识目标。 */
+async function assertKnowledgeTargetAccess(input: {
+  /** 当前用户 ID。 */
+  userId: string;
+  /** card 或 article。 */
+  targetType: KnowledgeTargetType;
+  /** 目标稳定 ID。 */
+  targetId: string;
+}): Promise<void> {
+  /** db 是 D1 的 Drizzle 客户端。 */
+  const db = getDb();
+  if (input.targetType === "card") {
+    /** matches 是当前用户可见的公共卡片或私有卡片。 */
+    const matches = await db
+      .select({ id: cards.id })
+      .from(cards)
+      .where(
+        and(
+          eq(cards.id, input.targetId),
+          or(isNull(cards.ownerUserId), eq(cards.ownerUserId, input.userId)),
+        ),
+      )
+      .limit(1);
+    if (!matches[0]) throw new Error("找不到这张卡片，或当前账号无权修改。");
+    return;
+  }
+
+  /** matches 是当前用户拥有的目标文章。 */
+  const matches = await db
+    .select({ id: articles.id })
+    .from(articles)
+    .where(
+      and(
+        eq(articles.id, input.targetId),
+        eq(articles.userId, input.userId),
+      ),
+    )
+    .limit(1);
+  if (!matches[0]) throw new Error("找不到这篇文章，或当前账号无权修改。");
+}
+
+/** 保存卡片或文章在个人学习流程中的状态。 */
+export async function saveKnowledgeState(input: {
+  /** 当前用户 ID。 */
+  userId: string;
+  /** card 或 article。 */
+  targetType: KnowledgeTargetType;
+  /** 目标稳定 ID。 */
+  targetId: string;
+  /** 新的个人学习状态。 */
+  status: KnowledgeStatus;
+}): Promise<typeof knowledgeStates.$inferSelect> {
+  await assertKnowledgeTargetAccess(input);
+  /** db 是 D1 的 Drizzle 客户端。 */
+  const db = getDb();
+  /** now 是跨端同步使用的更新时间。 */
+  const now = new Date().toISOString();
+  /** recordId 对同一用户和知识目标保持稳定。 */
+  const recordId = `state_${input.userId}_${input.targetType}_${input.targetId}`;
+
+  await db
+    .insert(knowledgeStates)
+    .values({
+      id: recordId,
+      userId: input.userId,
+      targetType: input.targetType,
+      targetId: input.targetId,
+      status: input.status,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [
+        knowledgeStates.userId,
+        knowledgeStates.targetType,
+        knowledgeStates.targetId,
+      ],
+      set: { status: input.status, updatedAt: now },
+    });
+
+  /** rows 返回刚刚保存的知识状态。 */
+  const rows = await db
+    .select()
+    .from(knowledgeStates)
+    .where(
+      and(
+        eq(knowledgeStates.userId, input.userId),
+        eq(knowledgeStates.targetType, input.targetType),
+        eq(knowledgeStates.targetId, input.targetId),
+      ),
+    )
+    .limit(1);
+  /** row 缺失表示状态写入后没有成功返回记录。 */
+  const row = rows[0];
+  if (!row) throw new Error("知识状态保存失败，请稍后重试。");
+  return row;
+}
+
+/** 新增一条带可选原文引用的个人批注。 */
+export async function createAnnotation(input: {
+  /** 当前用户 ID。 */
+  userId: string;
+  /** card 或 article。 */
+  targetType: KnowledgeTargetType;
+  /** 目标稳定 ID。 */
+  targetId: string;
+  /** 可选的原文引用。 */
+  quoteText: string | null;
+  /** 用户自己的批注正文。 */
+  noteText: string;
+}): Promise<typeof annotations.$inferSelect> {
+  await assertKnowledgeTargetAccess(input);
+  /** normalizedNote 是移除首尾空白后的批注正文。 */
+  const normalizedNote = input.noteText.trim();
+  if (!normalizedNote) throw new Error("批注内容不能为空。");
+  if (normalizedNote.length > 4000) throw new Error("单条批注不能超过 4000 字。");
+
+  /** normalizedQuote 是限制长度后的可选原文引用。 */
+  const normalizedQuote = input.quoteText?.trim().slice(0, 1000) || null;
+  /** db 是 D1 的 Drizzle 客户端。 */
+  const db = getDb();
+  /** now 是批注创建与同步使用的统一时间。 */
+  const now = new Date().toISOString();
+  /** annotationId 是本条批注的不可预测稳定 ID。 */
+  const annotationId = `annotation_${crypto.randomUUID()}`;
+  await db.insert(annotations).values({
+    id: annotationId,
+    userId: input.userId,
+    targetType: input.targetType,
+    targetId: input.targetId,
+    quoteText: normalizedQuote,
+    noteText: normalizedNote,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  /** rows 返回刚刚创建的批注。 */
+  const rows = await db
+    .select()
+    .from(annotations)
+    .where(
+      and(
+        eq(annotations.id, annotationId),
+        eq(annotations.userId, input.userId),
+      ),
+    )
+    .limit(1);
+  /** row 缺失表示批注写入后没有成功返回记录。 */
+  const row = rows[0];
+  if (!row) throw new Error("批注保存失败，请稍后重试。");
+  return row;
+}
+
+/** 删除当前用户拥有的一条个人批注。 */
+export async function deleteAnnotation(input: {
+  /** 当前用户 ID。 */
+  userId: string;
+  /** 待删除批注 ID。 */
+  annotationId: string;
+}): Promise<{ deleted: boolean }> {
+  /** db 是 D1 的 Drizzle 客户端。 */
+  const db = getDb();
+  await db
+    .delete(annotations)
+    .where(
+      and(
+        eq(annotations.id, input.annotationId),
+        eq(annotations.userId, input.userId),
+      ),
+    );
+  return { deleted: true };
+}
+
+/** 创建专题；同名专题已存在时更新说明并返回原记录。 */
+export async function saveCollection(input: {
+  /** 当前用户 ID。 */
+  userId: string;
+  /** 专题名称。 */
+  name: string;
+  /** 可选专题说明。 */
+  description: string;
+}): Promise<typeof collections.$inferSelect> {
+  /** normalizedName 是移除首尾空白后的专题名称。 */
+  const normalizedName = input.name.trim();
+  /** normalizedDescription 是移除首尾空白后的专题说明。 */
+  const normalizedDescription = input.description.trim();
+  if (!normalizedName) throw new Error("专题名称不能为空。");
+  if (normalizedName.length > 48) throw new Error("专题名称不能超过 48 字。");
+  if (normalizedDescription.length > 300) {
+    throw new Error("专题说明不能超过 300 字。");
+  }
+
+  /** db 是 D1 的 Drizzle 客户端。 */
+  const db = getDb();
+  /** now 是专题创建与更新使用的统一时间。 */
+  const now = new Date().toISOString();
+  await db
+    .insert(collections)
+    .values({
+      id: `collection_${crypto.randomUUID()}`,
+      userId: input.userId,
+      name: normalizedName,
+      description: normalizedDescription,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [collections.userId, collections.name],
+      set: { description: normalizedDescription, updatedAt: now },
+    });
+
+  /** rows 返回当前用户指定名称的专题。 */
+  const rows = await db
+    .select()
+    .from(collections)
+    .where(
+      and(
+        eq(collections.userId, input.userId),
+        eq(collections.name, normalizedName),
+      ),
+    )
+    .limit(1);
+  /** row 缺失表示专题写入后没有成功返回记录。 */
+  const row = rows[0];
+  if (!row) throw new Error("专题保存失败，请稍后重试。");
+  return row;
+}
+
+/** 把知识目标加入专题，或从专题中移除。 */
+export async function toggleCollectionItem(input: {
+  /** 当前用户 ID。 */
+  userId: string;
+  /** 目标专题 ID。 */
+  collectionId: string;
+  /** card 或 article。 */
+  targetType: KnowledgeTargetType;
+  /** 目标稳定 ID。 */
+  targetId: string;
+  /** true 表示加入，false 表示移除。 */
+  active: boolean;
+}): Promise<{
+  active: boolean;
+  item: typeof collectionItems.$inferSelect | null;
+}> {
+  /** db 是 D1 的 Drizzle 客户端。 */
+  const db = getDb();
+  /** ownedCollections 用于确认专题确实属于当前用户。 */
+  const ownedCollections = await db
+    .select({ id: collections.id })
+    .from(collections)
+    .where(
+      and(
+        eq(collections.id, input.collectionId),
+        eq(collections.userId, input.userId),
+      ),
+    )
+    .limit(1);
+  if (!ownedCollections[0]) throw new Error("找不到这个专题，或当前账号无权修改。");
+  await assertKnowledgeTargetAccess(input);
+
+  if (!input.active) {
+    await db
+      .delete(collectionItems)
+      .where(
+        and(
+          eq(collectionItems.userId, input.userId),
+          eq(collectionItems.collectionId, input.collectionId),
+          eq(collectionItems.targetType, input.targetType),
+          eq(collectionItems.targetId, input.targetId),
+        ),
+      );
+    await db
+      .update(collections)
+      .set({ updatedAt: new Date().toISOString() })
+      .where(eq(collections.id, input.collectionId));
+    return { active: false, item: null };
+  }
+
+  /** now 是加入专题与刷新专题排序使用的时间。 */
+  const now = new Date().toISOString();
+  await db
+    .insert(collectionItems)
+    .values({
+      id: `collection_item_${crypto.randomUUID()}`,
+      userId: input.userId,
+      collectionId: input.collectionId,
+      targetType: input.targetType,
+      targetId: input.targetId,
+      createdAt: now,
+    })
+    .onConflictDoNothing();
+  await db
+    .update(collections)
+    .set({ updatedAt: now })
+    .where(eq(collections.id, input.collectionId));
+
+  /** rows 返回专题中对应知识目标的关系记录。 */
+  const rows = await db
+    .select()
+    .from(collectionItems)
+    .where(
+      and(
+        eq(collectionItems.userId, input.userId),
+        eq(collectionItems.collectionId, input.collectionId),
+        eq(collectionItems.targetType, input.targetType),
+        eq(collectionItems.targetId, input.targetId),
+      ),
+    )
+    .limit(1);
+  /** row 缺失表示专题关系没有成功建立。 */
+  const row = rows[0];
+  if (!row) throw new Error("加入专题失败，请稍后重试。");
+  return { active: true, item: row };
 }
 
 /** 把卡片标记为阅读中或已完成，并合并累计阅读时长。 */

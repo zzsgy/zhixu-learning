@@ -52,7 +52,9 @@ body {
 
 /* 表单和按钮继承全局字体。 */
 button,
-input {
+input,
+select,
+textarea {
   color: inherit;
   font: inherit;
 }
@@ -1987,6 +1989,604 @@ a {
   font-weight: 750;
 }
 
+/* 全局搜索页面。 */
+.global-search-page,
+.collections-page {
+  padding: 34px 0 72px;
+}
+
+/* 全局搜索头部。 */
+.global-search-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(360px, 0.95fr);
+  border: 1px solid #34403c;
+  background: var(--ink);
+  color: #fff;
+}
+
+/* 全局搜索头部两列。 */
+.global-search-hero > div,
+.global-search-hero > label {
+  min-height: 280px;
+  padding: clamp(34px, 5vw, 68px);
+}
+
+/* 全局搜索说明标题。 */
+.global-search-hero h2,
+.collection-create-panel h2 {
+  max-width: 720px;
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: clamp(40px, 5.1vw, 72px);
+  font-weight: 600;
+  line-height: 1.05;
+}
+
+/* 全局搜索说明正文。 */
+.global-search-hero > div > p:last-child,
+.collection-create-panel > div:first-child > p:last-child {
+  max-width: 700px;
+  margin: 26px 0 0;
+  color: #bdd0ca;
+  line-height: 1.8;
+}
+
+/* 全局搜索输入区域。 */
+.global-search-hero > label {
+  display: flex;
+  justify-content: center;
+  flex-direction: column;
+  gap: 18px;
+  border-left: 1px solid #34403c;
+  background: #1c2825;
+}
+
+/* 全局搜索输入标题。 */
+.global-search-hero > label > span {
+  color: #bcd2cc;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+}
+
+/* 全局搜索输入框。 */
+.global-search-hero input {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid #71807a;
+  outline: 0;
+  background: transparent;
+  color: #fff;
+  font-family: var(--font-serif);
+  font-size: clamp(22px, 2.6vw, 36px);
+  padding: 14px 0;
+}
+
+/* 全局搜索输入占位文字。 */
+.global-search-hero input::placeholder {
+  color: #7b8984;
+}
+
+/* 搜索结果摘要栏。 */
+.search-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid var(--line-dark);
+  border-top: 0;
+  background: var(--paper-raised);
+  padding: 18px 24px;
+}
+
+/* 搜索结果摘要辅助文字。 */
+.search-summary-row small {
+  color: var(--ink-soft);
+}
+
+/* 全局搜索结果列表。 */
+.global-search-results {
+  border: 1px solid var(--line-dark);
+  border-top: 0;
+}
+
+/* 单条全局搜索结果。 */
+.global-search-result {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) 130px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: rgba(251, 250, 246, 0.82);
+  cursor: pointer;
+  padding: 26px 30px;
+  text-align: left;
+}
+
+/* 最后一条搜索结果不重复显示分隔线。 */
+.global-search-result:last-child {
+  border-bottom: 0;
+}
+
+/* 搜索结果悬停状态。 */
+.global-search-result:hover {
+  background: #fff;
+}
+
+/* 搜索结果元信息。 */
+.search-result-meta {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+/* 搜索结果标题。 */
+.global-search-result h3 {
+  margin: 0 0 10px;
+  font-family: var(--font-serif);
+  font-size: 25px;
+}
+
+/* 搜索结果摘要。 */
+.global-search-result p {
+  max-width: 900px;
+  margin: 0;
+  color: var(--ink-soft);
+  line-height: 1.75;
+}
+
+/* 搜索结果打开提示。 */
+.global-search-result > strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  grid-column: 2;
+  grid-row: 2 / 4;
+  font-size: 13px;
+}
+
+/* 搜索起始引导。 */
+.search-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border: 1px solid var(--line-dark);
+  border-top: 0;
+}
+
+/* 单个搜索能力说明。 */
+.search-guide-grid article {
+  min-height: 190px;
+  border-right: 1px solid var(--line);
+  background: rgba(251, 250, 246, 0.72);
+  padding: 30px;
+}
+
+/* 最后一个搜索能力说明。 */
+.search-guide-grid article:last-child {
+  border-right: 0;
+}
+
+/* 搜索能力编号。 */
+.search-guide-grid span {
+  color: var(--blue);
+  font-family: var(--font-mono);
+}
+
+/* 搜索能力标题。 */
+.search-guide-grid strong {
+  display: block;
+  margin: 30px 0 8px;
+  font-family: var(--font-serif);
+  font-size: 22px;
+}
+
+/* 搜索能力说明。 */
+.search-guide-grid p {
+  margin: 0;
+  color: var(--ink-soft);
+  line-height: 1.7;
+}
+
+/* 详情页个人知识整理面板。 */
+.knowledge-workbench {
+  margin-top: 56px;
+  border: 1px solid var(--line-dark);
+  background: #eef0e9;
+  padding: clamp(24px, 4vw, 46px);
+}
+
+/* 知识整理面板标题栏。 */
+.workbench-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 30px;
+}
+
+/* 知识整理面板主标题。 */
+.workbench-heading h3 {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: clamp(30px, 3vw, 44px);
+}
+
+/* 学习状态选择器。 */
+.status-control {
+  display: flex;
+  min-width: 180px;
+  flex-direction: column;
+  gap: 7px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+/* 学习状态下拉框。 */
+.status-control select {
+  min-height: 44px;
+  border: 1px solid var(--line-dark);
+  border-radius: 0;
+  background: var(--paper-raised);
+  padding: 0 12px;
+}
+
+/* 知识整理面板双栏。 */
+.workbench-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(250px, 0.6fr);
+  gap: 24px;
+}
+
+/* 批注编辑器与专题选择器。 */
+.annotation-editor,
+.collection-picker {
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+  padding: 22px;
+}
+
+/* 知识整理面板分区标题。 */
+.workbench-subheading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+/* 批注引用按钮。 */
+.workbench-subheading button,
+.annotation-list article > div button {
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+}
+
+/* 待保存和已保存的原文引用。 */
+.annotation-editor blockquote,
+.annotation-list blockquote {
+  position: relative;
+  margin: 0 0 14px;
+  border-left: 3px solid var(--cyan);
+  background: #e7eeeb;
+  color: #46534f;
+  padding: 14px 36px 14px 16px;
+  line-height: 1.7;
+}
+
+/* 待保存引用的移除按钮。 */
+.annotation-editor blockquote button {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* 批注输入框。 */
+.annotation-editor textarea {
+  width: 100%;
+  min-height: 150px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  outline: 0;
+  background: #fff;
+  padding: 16px;
+  line-height: 1.75;
+}
+
+/* 批注编辑器底部。 */
+.annotation-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 12px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+/* 专题选择按钮列表。 */
+.collection-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+/* 单个专题选择按钮。 */
+.collection-chip-list button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line-dark);
+  background: transparent;
+  cursor: pointer;
+  padding: 9px 11px;
+  font-size: 12px;
+}
+
+/* 已加入专题的按钮。 */
+.collection-chip-list button.is-active {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: #fff;
+}
+
+/* 已保存批注列表。 */
+.annotation-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 22px;
+}
+
+/* 单条已保存批注。 */
+.annotation-list article {
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+  padding: 18px 20px;
+}
+
+/* 单条批注工具栏。 */
+.annotation-list article > div {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+/* 单条批注正文。 */
+.annotation-list article > p {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.75;
+}
+
+/* 没有个人批注时的提示。 */
+.workbench-empty {
+  margin: 22px 0 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+/* 专题创建区域。 */
+.collection-create-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(350px, 0.9fr);
+  border: 1px solid #34403c;
+  background: var(--ink);
+  color: #fff;
+}
+
+/* 专题创建区域两列。 */
+.collection-create-panel > div {
+  min-height: 330px;
+  padding: clamp(34px, 5vw, 66px);
+}
+
+/* 专题创建表单。 */
+.collection-create-form {
+  display: flex;
+  justify-content: center;
+  flex-direction: column;
+  gap: 18px;
+  border-left: 1px solid #34403c;
+  background: #1c2825;
+}
+
+/* 专题创建字段。 */
+.collection-create-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #bcd2cc;
+  font-size: 12px;
+}
+
+/* 专题创建输入框。 */
+.collection-create-form input,
+.collection-create-form textarea {
+  width: 100%;
+  border: 1px solid #53615c;
+  border-radius: 0;
+  outline: 0;
+  background: #15201d;
+  color: #fff;
+  padding: 14px;
+}
+
+/* 专题说明输入框。 */
+.collection-create-form textarea {
+  min-height: 95px;
+  resize: vertical;
+}
+
+/* 专题工作区。 */
+.collection-workspace {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  min-height: 460px;
+  border: 1px solid var(--line-dark);
+  border-top: 0;
+  background: var(--paper-raised);
+}
+
+/* 专题列表。 */
+.collection-list {
+  border-right: 1px solid var(--line-dark);
+}
+
+/* 单个专题导航项。 */
+.collection-list > button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 38px 1fr;
+  gap: 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  cursor: pointer;
+  padding: 20px;
+  text-align: left;
+}
+
+/* 当前展开专题。 */
+.collection-list > button.is-active {
+  background: var(--ink);
+  color: #fff;
+}
+
+/* 专题数量编号。 */
+.collection-list > button > span {
+  color: var(--amber);
+  font-family: var(--font-mono);
+}
+
+/* 专题名称。 */
+.collection-list strong {
+  display: block;
+  margin-bottom: 5px;
+}
+
+/* 专题说明。 */
+.collection-list small {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--ink-soft);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.5;
+}
+
+/* 当前专题中的说明在深色背景上改为浅色。 */
+.collection-list > button.is-active small {
+  color: #adbbb6;
+}
+
+/* 专题详情。 */
+.collection-detail {
+  padding: 34px;
+}
+
+/* 专题详情标题栏。 */
+.collection-detail > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 28px;
+}
+
+/* 专题详情标题。 */
+.collection-detail h2 {
+  margin: 0 0 8px;
+  font-family: var(--font-serif);
+  font-size: 38px;
+}
+
+/* 专题详情说明。 */
+.collection-detail header p:last-child {
+  margin: 0;
+  color: var(--ink-soft);
+}
+
+/* 专题详情数量。 */
+.collection-detail > header > span {
+  border: 1px solid var(--line-dark);
+  padding: 10px 12px;
+  white-space: nowrap;
+}
+
+/* 专题成员列表。 */
+.collection-detail-items {
+  display: grid;
+  gap: 12px;
+}
+
+/* 单个专题成员。 */
+.collection-detail-items article {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+/* 专题成员正文按钮。 */
+.collection-detail-items article > button:first-child {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 22px;
+  text-align: left;
+}
+
+/* 专题成员类型。 */
+.collection-detail-items article > button:first-child > span {
+  color: var(--blue);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+/* 专题成员标题。 */
+.collection-detail-items h3 {
+  margin: 8px 0;
+  font-family: var(--font-serif);
+  font-size: 23px;
+}
+
+/* 专题成员摘要。 */
+.collection-detail-items p {
+  margin: 0;
+  color: var(--ink-soft);
+  line-height: 1.65;
+}
+
+/* 移出专题按钮。 */
+.collection-remove-button {
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--red);
+  cursor: pointer;
+  padding: 0 18px;
+}
+
+/* 空专题提示。 */
+.collection-empty-state {
+  border: 0;
+}
+
 /* 中等屏幕布局。 */
 @media (max-width: 1120px) {
   :root {
@@ -2004,6 +2604,10 @@ a {
 
   .card-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .collection-workspace {
+    grid-template-columns: 250px minmax(0, 1fr);
   }
 }
 
@@ -2097,6 +2701,44 @@ a {
 
   .article-reading-layout {
     padding: 34px 24px 58px;
+  }
+
+  .global-search-hero,
+  .collection-create-panel,
+  .workbench-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .global-search-hero > label,
+  .collection-create-form {
+    min-height: auto;
+    border-top: 1px solid #34403c;
+    border-left: 0;
+  }
+
+  .search-guide-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .search-guide-grid article {
+    min-height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .search-guide-grid article:last-child {
+    border-bottom: 0;
+  }
+
+  .collection-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .collection-list {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    border-right: 0;
+    border-bottom: 1px solid var(--line-dark);
   }
 
   .import-card,
@@ -2237,6 +2879,68 @@ a {
 
   .article-prose {
     font-size: 16px;
+  }
+
+  .global-search-hero > div,
+  .global-search-hero > label,
+  .collection-create-panel > div {
+    min-height: auto;
+    padding: 30px 22px;
+  }
+
+  .global-search-hero h2,
+  .collection-create-panel h2 {
+    font-size: 40px;
+  }
+
+  .search-summary-row,
+  .workbench-heading,
+  .collection-detail > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .global-search-result {
+    grid-template-columns: 1fr;
+    padding: 22px;
+  }
+
+  .global-search-result > strong {
+    justify-content: flex-start;
+    grid-column: 1;
+    grid-row: auto;
+    margin-top: 16px;
+  }
+
+  .knowledge-workbench {
+    padding: 20px;
+  }
+
+  .status-control {
+    width: 100%;
+  }
+
+  .annotation-editor-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .collection-list {
+    grid-template-columns: 1fr;
+  }
+
+  .collection-detail {
+    padding: 24px 18px;
+  }
+
+  .collection-detail-items article {
+    grid-template-columns: 1fr;
+  }
+
+  .collection-remove-button {
+    min-height: 44px;
+    border-top: 1px solid var(--line);
+    border-left: 0;
   }
 
   .card-grid {
