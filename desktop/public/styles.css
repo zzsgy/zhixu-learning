@@ -2265,7 +2265,15 @@ body.has-reading-toc .floating-reader-back {
   line-height: 1.45;
   text-align: center;
 }
-.article-prose img { display: block; max-width: 100%; height: auto; margin: 34px auto; }
+.article-prose img {
+  display: block;
+  max-width: 100%;
+  max-height: min(78vh, 900px);
+  width: auto;
+  height: auto;
+  margin: 34px auto;
+  object-fit: contain;
+}
 .article-prose blockquote { margin: 30px 0; border-left: 5px solid var(--cyan); background: var(--quote-bg); padding: 20px 26px; color: var(--ink); }
 .article-prose pre { overflow-x: auto; border: 1px solid #394440; background: #17201e; color: #ecf2ee; padding: 22px; font-family: var(--mono); font-size: 14px; line-height: 1.7; }
 .article-prose code { font-family: var(--mono); font-size: .88em; }

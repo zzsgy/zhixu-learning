@@ -601,6 +601,80 @@ export function normalizePreformattedCodeLines(root) {
   return normalizedCount;
 }
 
+/** promotionalArticleTextPattern 只匹配明确的关注、扫码和商务推广话术。 */
+const promotionalArticleTextPattern = /(?:还不点击蓝字|点击蓝字|关注我们|关注我[，,、\s]*不迷路|长按(?:识别|扫描)|扫码(?:关注|加入)|扫描(?:下方)?二维码|知识星球|咨询和合作|商务合作|公众号(?:二维码|[：:])|一键三连)/i;
+
+/**
+ * 删除正文外围常见的公众号关注卡、二维码和商务合作块。
+ *
+ * 只向上合并文字很短、图片很少、且不含长正文段落的容器，避免因为正文偶然提到
+ * “公众号”而误删整节知识内容。
+ *
+ * @param {Element} root 待清理的文章根节点。
+ * @returns {number} 删除的推广块数量。
+ */
+export function removeArticlePromotionBlocks(root) {
+  /** candidates 收集最外层、但仍满足紧凑推广块约束的节点。 */
+  const candidates = [];
+  for (const marker of Array.from(root.querySelectorAll("p, h1, h2, h3, h4, blockquote, figcaption"))) {
+    const markerText = String(marker.textContent || "").replace(/\s+/g, " ").trim();
+    if (!promotionalArticleTextPattern.test(markerText)) continue;
+    let candidate = marker;
+    let ancestor = marker.parentElement;
+    while (ancestor && ancestor !== root && ancestor.matches("section, div, figure")) {
+      const ancestorText = String(ancestor.textContent || "").replace(/\s+/g, " ").trim();
+      const imageCount = ancestor.querySelectorAll("img, image").length;
+      const containsLongBodyParagraph = Array.from(ancestor.querySelectorAll("p")).some((paragraph) => {
+        const paragraphText = String(paragraph.textContent || "").replace(/\s+/g, " ").trim();
+        return paragraphText.length > 220 && !promotionalArticleTextPattern.test(paragraphText);
+      });
+      if (ancestorText.length > 360 || imageCount > 6 || containsLongBodyParagraph) break;
+      candidate = ancestor;
+      ancestor = ancestor.parentElement;
+    }
+    candidates.push(candidate);
+  }
+  /** 先删除层级较浅的候选，避免同一推广块被重复计数。 */
+  candidates.sort((left, right) => {
+    const depth = (element) => {
+      let value = 0;
+      for (let parent = element.parentElement; parent && parent !== root; parent = parent.parentElement) value += 1;
+      return value;
+    };
+    return depth(left) - depth(right);
+  });
+  let removedCount = 0;
+  for (const candidate of candidates) {
+    if (!candidate.parentElement || !root.contains(candidate)) continue;
+    candidate.remove();
+    removedCount += 1;
+  }
+  return removedCount;
+}
+
+/**
+ * 从不可信图片属性中读取唯一允许保留的显示宽度。
+ *
+ * @param {Array<{name: string, value: string}>} attributes 原始属性列表。
+ * @returns {{ unit: "px" | "%", value: number } | null} 安全宽度提示。
+ */
+function readSafeImageDisplayWidth(attributes) {
+  const readAttribute = (name) => attributes.find((attribute) => attribute.name.toLowerCase() === name)?.value || "";
+  const widthAttribute = readAttribute("width").trim();
+  const widthMatch = widthAttribute.match(/^(\d+(?:\.\d+)?)\s*(px|%)?$/i);
+  if (widthMatch) {
+    const unit = widthMatch[2]?.toLowerCase() === "%" ? "%" : "px";
+    const maximum = unit === "%" ? 100 : 1600;
+    return { unit, value: Math.min(maximum, Math.max(1, Number(widthMatch[1]))) };
+  }
+  const styleAttribute = readAttribute("style");
+  const styleMatch = styleAttribute.match(/(?:^|;)\s*width\s*:\s*(\d+(?:\.\d+)?)\s*(px|%)(?:\s*!important)?\s*(?:;|$)/i);
+  if (!styleMatch) return null;
+  const unit = styleMatch[2].toLowerCase();
+  const maximum = unit === "%" ? 100 : 1600;
+  return { unit, value: Math.min(maximum, Math.max(1, Number(styleMatch[1]))) };
+}
+
 export function sanitizeArticleHtml(rawHtml, baseUrl) {
   /** parsedDocument 是专门用于清洗的隔离文档。 */
   const { document: parsedDocument } = parseHTML(
@@ -609,6 +683,8 @@ export function sanitizeArticleHtml(rawHtml, baseUrl) {
   /** root 是正文根节点。 */
   const root = parsedDocument.querySelector("article");
   if (!root) return { html: "", text: "" };
+  /** 推广块在原始容器层级仍完整时清理，避免样式移除后把关注素材展开成正文大图。 */
+  removeArticlePromotionBlocks(root);
   /** elements 是修改 DOM 前复制的元素列表。 */
   const elements = Array.from(root.querySelectorAll("*"));
   for (const element of elements) {
@@ -657,10 +733,18 @@ export function sanitizeArticleHtml(rawHtml, baseUrl) {
       const altText =
         originalAttributes.find((attribute) => attribute.name === "alt")?.value ??
         "";
+      /** displayWidth 仅保留数值宽度，不保留源站任意样式。 */
+      const displayWidth = readSafeImageDisplayWidth(originalAttributes);
       element.setAttribute("src", safeSource);
       element.setAttribute("alt", altText);
       element.setAttribute("loading", "lazy");
       element.setAttribute("referrerpolicy", "no-referrer");
+      if (displayWidth?.unit === "px") {
+        element.setAttribute("data-zhixu-display-width", String(displayWidth.value));
+      }
+      if (displayWidth?.unit === "%") {
+        element.setAttribute("data-zhixu-display-width-percent", String(displayWidth.value));
+      }
     }
     if (tagName === "td" || tagName === "th") {
       for (const attributeName of ["colspan", "rowspan"]) {

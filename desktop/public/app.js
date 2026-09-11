@@ -4776,6 +4776,52 @@ function removeDecorativeArticleImage(image, sourceCount) {
   }
 }
 
+/** articlePromotionTextPattern 与服务端清洗规则一致，用于兼容已经入库的旧文章。 */
+const articlePromotionTextPattern = /(?:还不点击蓝字|点击蓝字|关注我们|关注我[，,、\s]*不迷路|长按(?:识别|扫描)|扫码(?:关注|加入)|扫描(?:下方)?二维码|知识星球|咨询和合作|商务合作|公众号(?:二维码|[：:])|一键三连)/i;
+
+/**
+ * 清理旧文章中遗留的紧凑推广块，防止关注动图、二维码或商务卡片占据正文。
+ *
+ * @param {Element} root 隔离文章根节点。
+ * @returns {number} 删除数量。
+ */
+function removeLegacyArticlePromotionBlocks(root) {
+  const candidates = [];
+  for (const marker of root.querySelectorAll("p, h1, h2, h3, h4, blockquote, figcaption")) {
+    const markerText = (marker.textContent || "").replace(/\s+/g, " ").trim();
+    if (!articlePromotionTextPattern.test(markerText)) continue;
+    let candidate = marker;
+    let ancestor = marker.parentElement;
+    while (ancestor && ancestor !== root && ancestor.matches("section, div, figure")) {
+      const ancestorText = (ancestor.textContent || "").replace(/\s+/g, " ").trim();
+      const imageCount = ancestor.querySelectorAll("img").length;
+      const containsLongBodyParagraph = Array.from(ancestor.querySelectorAll("p")).some((paragraph) => {
+        const paragraphText = (paragraph.textContent || "").replace(/\s+/g, " ").trim();
+        return paragraphText.length > 220 && !articlePromotionTextPattern.test(paragraphText);
+      });
+      if (ancestorText.length > 360 || imageCount > 6 || containsLongBodyParagraph) break;
+      candidate = ancestor;
+      ancestor = ancestor.parentElement;
+    }
+    candidates.push(candidate);
+  }
+  candidates.sort((left, right) => {
+    const depth = (element) => {
+      let value = 0;
+      for (let parent = element.parentElement; parent && parent !== root; parent = parent.parentElement) value += 1;
+      return value;
+    };
+    return depth(left) - depth(right);
+  });
+  let removedCount = 0;
+  for (const candidate of candidates) {
+    if (!candidate.parentElement || !root.contains(candidate)) continue;
+    candidate.remove();
+    removedCount += 1;
+  }
+  return removedCount;
+}
+
 function createArticleOriginalContent(article) {
   /** parsedContent 是从服务端白名单 HTML 创建的隔离文档。 */
   const parsedContent = new DOMParser().parseFromString(
@@ -4790,6 +4836,8 @@ function createArticleOriginalContent(article) {
     fragment.append(createTextElement("p", "", article.contentText));
     return fragment;
   }
+  /** 旧记录在阅读时同样经过推广块识别，无需用户重新导入。 */
+  removeLegacyArticlePromotionBlocks(safeArticleRoot);
   /** emptyListItems 是旧文章记录中遗留的无文字、无媒体空项目。 */
   const emptyListItems = Array.from(safeArticleRoot.querySelectorAll("li")).filter(
     (listItem) =>
@@ -4835,6 +4883,16 @@ function createArticleOriginalContent(article) {
   for (const image of fragment.querySelectorAll("img")) {
     /** remoteSource 是服务端已清洗过的公开图片地址。 */
     const remoteSource = image.getAttribute("src") || "";
+    /** 新记录的安全宽度提示恢复源站有意使用的小图尺寸，但绝不恢复任意样式。 */
+    const displayWidth = Number(image.dataset.zhixuDisplayWidth);
+    const displayWidthPercent = Number(image.dataset.zhixuDisplayWidthPercent);
+    if (Number.isFinite(displayWidth) && displayWidth > 0) {
+      image.style.width = `${Math.min(displayWidth, 1040)}px`;
+    } else if (Number.isFinite(displayWidthPercent) && displayWidthPercent > 0) {
+      image.style.width = `${Math.min(displayWidthPercent, 100)}%`;
+    }
+    image.removeAttribute("data-zhixu-display-width");
+    image.removeAttribute("data-zhixu-display-width-percent");
     image.addEventListener("load", () => {
       removeDecorativeArticleImage(image, imageSourceCounts.get(remoteSource) || 0);
     }, { once: true });

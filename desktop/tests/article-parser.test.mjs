@@ -154,6 +154,22 @@ test("把富文本拆开的相邻代码节点恢复为保留缩进的多行预�
   assert.match(result.text, /business\/\n├── index\.md\n│\s+└── meta\//);
 });
 
+test("导入时删除紧凑推广块并只保留图片的安全显示宽度", () => {
+  const result = sanitizeArticleHtml(
+    `<section><img src="/banner.jpg"><p><strong>还不点击蓝字</strong></p>
+       <p><strong>关注我们</strong></p><img src="/huge-question.gif"></section>
+     <p>这是需要完整保留的正文知识内容。</p>
+     <img src="/diagram.png" width="320" style="width: 320px; position: fixed" onerror="alert(1)">
+     <img src="/icon.png" style="width: 24%; transform: scale(20)">`,
+    new URL("https://example.com/articles/current"),
+  );
+  assert.doesNotMatch(result.html, /点击蓝字|关注我们|huge-question|banner\.jpg/);
+  assert.match(result.html, /这是需要完整保留的正文知识内容/);
+  assert.match(result.html, /data-zhixu-display-width="320"/);
+  assert.match(result.html, /data-zhixu-display-width-percent="24"/);
+  assert.doesNotMatch(result.html, /position|transform|onerror/);
+});
+
 /**
  * 验证 Fetch 顶层通用异常可以追溯到底层 socket 错误。
  */
