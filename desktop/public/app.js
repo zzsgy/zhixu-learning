@@ -4783,7 +4783,7 @@ function removeDecorativeArticleImage(image, sourceCount, relativeWidthPercent =
     emptyParent
     && emptyParent.matches("section, div, p")
     && !emptyParent.id
-    && !emptyParent.className
+    && Array.from(emptyParent.classList).every((className) => className.startsWith("article-source-"))
     && !(emptyParent.textContent || "").trim()
     && !emptyParent.querySelector("img, video, iframe, table, pre, code")
   ) {

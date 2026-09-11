@@ -194,6 +194,7 @@ export async function fetchExternalResource(url, options, resourceLabel) {
 /** allowedTags 是清洗后可以保留的正文 HTML 标签。 */
 const allowedTags = new Set([
   "article",
+  "div",
   "section",
   "p",
   "h1",
@@ -206,6 +207,7 @@ const allowedTags = new Set([
   "ul",
   "ol",
   "li",
+  "span",
   "strong",
   "em",
   "b",
@@ -601,6 +603,192 @@ export function normalizePreformattedCodeLines(root) {
   return normalizedCount;
 }
 
+/**
+ * 把内联样式拆成只读属性表；结果只用于生成知序自有语义类，不会原样写回。
+ *
+ * @param {string} sourceStyle 来源节点的 style 文本。
+ * @returns {Map<string, string>} 小写属性名与原始属性值。
+ */
+function readArticleStyleProperties(sourceStyle) {
+  const properties = new Map();
+  for (const declaration of String(sourceStyle || "").split(";")) {
+    const separatorIndex = declaration.indexOf(":");
+    if (separatorIndex <= 0) continue;
+    const name = declaration.slice(0, separatorIndex).trim().toLowerCase();
+    const value = declaration.slice(separatorIndex + 1).trim();
+    if (name && value) properties.set(name, value);
+  }
+  return properties;
+}
+
+/**
+ * 解析仅由数字构成的十六进制或 RGB(A) 颜色，拒绝 URL、变量和 CSS 表达式。
+ *
+ * @param {string} sourceColor 来源颜色。
+ * @returns {{ css: string, red: number, green: number, blue: number } | null} 安全颜色。
+ */
+function parseSafeArticleColor(sourceColor) {
+  const value = String(sourceColor || "").trim().toLowerCase();
+  const shortHex = value.match(/^#([0-9a-f]{3})$/i);
+  const longHex = value.match(/^#([0-9a-f]{6})$/i);
+  let channels = null;
+  if (shortHex) {
+    channels = Array.from(shortHex[1], (digit) => Number.parseInt(`${digit}${digit}`, 16));
+  } else if (longHex) {
+    channels = [0, 2, 4].map((index) => Number.parseInt(longHex[1].slice(index, index + 2), 16));
+  } else {
+    const rgb = value.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*(?:0(?:\.\d+)?|1(?:\.0+)?))?\s*\)$/i);
+    if (rgb) channels = rgb.slice(1, 4).map((channel) => Math.min(255, Number(channel)));
+  }
+  if (!channels) return null;
+  const [red, green, blue] = channels;
+  return { css: `rgb(${red}, ${green}, ${blue})`, red, green, blue };
+}
+
+/** @param {{red:number,green:number,blue:number}} color @returns {boolean} */
+function isChromaticArticleColor(color) {
+  return Math.max(color.red, color.green, color.blue) - Math.min(color.red, color.green, color.blue) >= 28;
+}
+
+/** @param {{red:number,green:number,blue:number}} color @returns {boolean} */
+function isNearWhiteArticleColor(color) {
+  return color.red >= 235 && color.green >= 235 && color.blue >= 235;
+}
+
+/**
+ * 读取样式中的第一个安全颜色，兼容简单 background 和 border 简写。
+ *
+ * @param {Map<string,string>} properties 样式属性表。
+ * @param {string[]} names 候选属性名。
+ * @returns {{ css: string, red: number, green: number, blue: number } | null} 安全颜色。
+ */
+function readFirstArticleColor(properties, names) {
+  for (const name of names) {
+    const rawValue = properties.get(name) || "";
+    const directColor = parseSafeArticleColor(rawValue);
+    if (directColor) return directColor;
+    const colorToken = rawValue.match(/#[0-9a-f]{3,6}|rgba?\([^)]*\)/i)?.[0];
+    const shorthandColor = parseSafeArticleColor(colorToken || "");
+    if (shorthandColor) return shorthandColor;
+  }
+  return null;
+}
+
+/**
+ * 判断一组样式属性是否声明了非零像素尺寸。
+ *
+ * @param {Map<string,string>} properties 样式属性表。
+ * @param {string[]} names 候选属性名。
+ * @returns {boolean} 是否存在非零尺寸。
+ */
+function hasVisibleArticleLength(properties, names) {
+  return names.some((name) => {
+    const value = properties.get(name) || "";
+    return /(?:^|\s)-?(?:0*[1-9]\d*(?:\.\d+)?|0*\.\d*[1-9]\d*)px(?:\s|$)/i.test(value);
+  });
+}
+
+/**
+ * 修正富文本编辑器把普通长段落错误输出为 H1-H4 的情况。
+ *
+ * @param {Element} root 原始正文根节点。
+ * @returns {number} 降级为正文段落的节点数。
+ */
+export function normalizeMisusedArticleHeadings(root) {
+  let normalizedCount = 0;
+  for (const heading of Array.from(root.querySelectorAll("h1, h2, h3, h4"))) {
+    const text = String(heading.textContent || "").replace(/\s+/g, " ").trim();
+    const explicitFontSizes = [heading, ...Array.from(heading.querySelectorAll("*"))]
+      .map((element) => {
+        const properties = readArticleStyleProperties(element.getAttribute("style") || "");
+        const match = (properties.get("font-size") || "").match(/^(\d+(?:\.\d+)?)px$/i);
+        return match ? Number(match[1]) : null;
+      })
+      .filter((value) => Number.isFinite(value));
+    const smallestFontSize = explicitFontSizes.length ? Math.min(...explicitFontSizes) : null;
+    const sentenceCount = (text.match(/[。！？!?；;]/g) || []).length;
+    const isBodySizedLongText = smallestFontSize !== null && smallestFontSize <= 18 && text.length >= 48;
+    const isParagraphShapedHeading = text.length >= 100 && sentenceCount >= 2;
+    if (!isBodySizedLongText && !isParagraphShapedHeading) continue;
+    const paragraph = heading.ownerDocument.createElement("p");
+    for (const attribute of Array.from(heading.attributes)) {
+      paragraph.setAttribute(attribute.name, attribute.value);
+    }
+    paragraph.append(...Array.from(heading.childNodes));
+    heading.replaceWith(paragraph);
+    normalizedCount += 1;
+  }
+  return normalizedCount;
+}
+
+/**
+ * 从来源内联样式生成有限的、主题兼容的知序展示语义。
+ *
+ * @param {Element} element 已移除所有来源属性的安全节点。
+ * @param {Array<{name:string,value:string}>} originalAttributes 来源属性快照。
+ * @returns {void}
+ */
+function applySafeArticlePresentation(element, originalAttributes) {
+  const sourceStyle = originalAttributes.find((attribute) => attribute.name.toLowerCase() === "style")?.value || "";
+  if (!sourceStyle) return;
+  const properties = readArticleStyleProperties(sourceStyle);
+  const classes = [];
+  const customProperties = [];
+  const tagName = element.tagName.toLowerCase();
+  const isContainer = ["article", "div", "section", "blockquote", "figure"].includes(tagName);
+  const compactText = String(element.textContent || "").replace(/\s+/g, " ").trim();
+  const imageCount = element.querySelectorAll("img, image").length;
+  const backgroundColor = readFirstArticleColor(properties, ["background-color", "background"]);
+  if (isContainer && backgroundColor) {
+    if (isChromaticArticleColor(backgroundColor)) {
+      classes.push(compactText.length <= 60 && imageCount === 0 ? "article-source-label" : "article-source-surface");
+      customProperties.push(`--article-source-background:${backgroundColor.css}`);
+    } else if (isNearWhiteArticleColor(backgroundColor)) {
+      classes.push("article-source-surface", "article-source-surface-neutral");
+    }
+  }
+  const borderColor = readFirstArticleColor(properties, ["border-color", "border"]);
+  const hasBorder = hasVisibleArticleLength(properties, ["border-width", "border", "border-top", "border-right", "border-bottom", "border-left"]);
+  if (isContainer && hasBorder) {
+    classes.push("article-source-frame");
+    if (borderColor && isChromaticArticleColor(borderColor)) {
+      customProperties.push(`--article-source-border:${borderColor.css}`);
+    }
+  }
+  if (isContainer && hasVisibleArticleLength(properties, ["padding", "padding-top", "padding-right", "padding-bottom", "padding-left"])) {
+    classes.push("article-source-padded");
+  }
+  if (isContainer && hasVisibleArticleLength(properties, ["border-radius"])) {
+    classes.push("article-source-rounded");
+  }
+  if (isContainer && properties.get("display")?.toLowerCase() === "flex") {
+    classes.push("article-source-row");
+    const justifyContent = properties.get("justify-content")?.toLowerCase();
+    if (["center", "flex-end", "space-between", "space-around"].includes(justifyContent)) {
+      classes.push(`article-source-justify-${justifyContent.replace("flex-", "")}`);
+    }
+    const alignItems = properties.get("align-items")?.toLowerCase();
+    if (["center", "flex-start", "flex-end", "stretch"].includes(alignItems)) {
+      classes.push(`article-source-align-${alignItems.replace("flex-", "")}`);
+    }
+  }
+  const textAlign = properties.get("text-align")?.toLowerCase();
+  if (["center", "right", "left"].includes(textAlign)) classes.push(`article-source-text-${textAlign}`);
+  const textColor = readFirstArticleColor(properties, ["color"]);
+  if (textColor && isChromaticArticleColor(textColor)) {
+    classes.push("article-source-accent-text");
+    customProperties.push(`--article-source-color:${textColor.css}`);
+  } else if (textColor && isNearWhiteArticleColor(textColor)) {
+    classes.push("article-source-inverse-text");
+  }
+  const fontSize = Number((properties.get("font-size") || "").match(/^(\d+(?:\.\d+)?)px$/i)?.[1]);
+  if (Number.isFinite(fontSize) && fontSize > 0 && fontSize <= 16) classes.push("article-source-small-text");
+  const fontWeight = properties.get("font-weight")?.toLowerCase() || "";
+  if (fontWeight === "bold" || Number(fontWeight) >= 600) classes.push("article-source-strong");
+  if (classes.length) element.setAttribute("class", Array.from(new Set(classes)).join(" "));
+  if (customProperties.length) element.setAttribute("style", `${customProperties.join(";")};`);
+}
+
 /** promotionalArticleTextPattern 只匹配明确的关注、扫码和商务推广话术。 */
 const promotionalArticleTextPattern = /(?:还不点击蓝字|点击蓝字|关注我们|关注我[，,、\s]*不迷路|长按(?:识别|扫描)|扫码(?:关注|加入)|扫描(?:下方)?二维码|知识星球|咨询和合作|商务合作|公众号(?:二维码|[：:])|一键三连)/i;
 
@@ -683,6 +871,8 @@ export function sanitizeArticleHtml(rawHtml, baseUrl) {
   /** root 是正文根节点。 */
   const root = parsedDocument.querySelector("article");
   if (!root) return { html: "", text: "" };
+  /** 先纠正来源编辑器的错误标题语义，避免普通正文被阅读页放成巨型标题。 */
+  normalizeMisusedArticleHeadings(root);
   /** 推广块在原始容器层级仍完整时清理，避免样式移除后把关注素材展开成正文大图。 */
   removeArticlePromotionBlocks(root);
   /** elements 是修改 DOM 前复制的元素列表。 */
@@ -708,6 +898,8 @@ export function sanitizeArticleHtml(rawHtml, baseUrl) {
     for (const attribute of originalAttributes) {
       element.removeAttribute(attribute.name);
     }
+    /** 安全展示语义在来源属性清空后重新生成，不会把任意 CSS 带入阅读页。 */
+    applySafeArticlePresentation(element, originalAttributes);
     if (tagName === "a") {
       /** safeHref 是经过协议白名单处理的链接。 */
       const safeHref = resolveSafeUrl(

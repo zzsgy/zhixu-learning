@@ -16,6 +16,7 @@ import {
   mergeArticleImagesByBlockPosition,
   normalizeLegacyHtmlImages,
   normalizeArticleMath,
+  normalizeMisusedArticleHeadings,
   parseAndClassifyCapturedArticle,
   persistEmbeddedArticleImages,
   readNetworkErrorCode,
@@ -169,6 +170,40 @@ test("导入时删除紧凑推广块并只保留图片的安全显示宽度", ()
   assert.match(result.html, /data-zhixu-relative-width-percent="24"/);
   assert.doesNotMatch(result.html, /data-zhixu-display-width-percent/);
   assert.doesNotMatch(result.html, /position|transform|onerror/);
+});
+
+test("把来源卡片和强调色转换为安全展示语义并纠正伪标题", () => {
+  const result = sanitizeArticleHtml(
+    `<section style="background-color: rgb(101, 202, 141); padding: 15px; border-radius: 10px; position: fixed">
+       <section style="background-color: rgb(254, 254, 254); padding: 15px">
+         <p style="text-align: center"><img src="/hero.jpg"></p><p><strong>卡片正文</strong></p>
+       </section>
+     </section>
+     <section style="display:flex;justify-content:center;align-items:center">
+       <section style="border-width:1px;border-style:solid;border-color:#488cfa;padding:8px 12px"><p><strong>07</strong></p></section>
+       <section style="background-color:#488cfa;padding:6px 15px;color:#fefefe"><p><strong>吸附层析</strong></p></section>
+     </section>
+     <h1 style="font-weight:bold"><span style="font-size:14px;color:rgb(255,76,0)">指混合物随流动相通过固定相时，由于吸附剂对不同物质的不同吸附力，而使混合物分离的方法。它是各种层析技术中应用最早的一类，至今仍广泛应用。</span></h1>`,
+    new URL("https://example.com/article"),
+  );
+  assert.match(result.html, /class="[^"]*article-source-surface[^"]*article-source-rounded/);
+  assert.match(result.html, /--article-source-background:rgb\(101, 202, 141\)/);
+  assert.match(result.html, /article-source-surface-neutral/);
+  assert.match(result.html, /article-source-row article-source-justify-center article-source-align-center/);
+  assert.match(result.html, /article-source-frame/);
+  assert.match(result.html, /article-source-label/);
+  assert.match(result.html, /article-source-accent-text article-source-small-text/);
+  assert.doesNotMatch(result.html, /<h1/);
+  assert.doesNotMatch(result.html, /position:\s*fixed/);
+});
+
+test("保留正常短标题并只降级正文形状的错误标题", () => {
+  const { document } = parseHTML(`<article><h2>正常章节标题</h2><h1><span style="font-size:14px">${"普通正文句子。".repeat(12)}</span></h1></article>`);
+  const root = document.querySelector("article");
+  assert.equal(normalizeMisusedArticleHeadings(root), 1);
+  assert.equal(root.querySelectorAll("h2").length, 1);
+  assert.equal(root.querySelectorAll("h1").length, 0);
+  assert.equal(root.querySelectorAll("p").length, 1);
 });
 
 /**
