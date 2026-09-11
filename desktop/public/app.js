@@ -2489,8 +2489,7 @@ function enhanceReadingSemantics(readingSurface) {
     const language = inferReadingCodeLanguage(sourceCode);
     const shell = document.createElement("section");
     shell.className = "reading-code-shell";
-    const toolbar = document.createElement("header");
-    toolbar.className = "reading-code-toolbar";
+    shell.dataset.language = language.toLowerCase();
     const copyButton = createTextElement("button", "reading-code-copy", "复制");
     copyButton.type = "button";
     copyButton.setAttribute("aria-label", `复制 ${language} 代码`);
@@ -2503,9 +2502,8 @@ function enhanceReadingSemantics(readingSurface) {
         showToast("复制失败，请选中代码后手动复制。");
       }
     });
-    toolbar.append(createTextElement("span", "reading-code-language", language), copyButton);
     preElement.before(shell);
-    shell.append(toolbar, preElement);
+    shell.append(preElement, copyButton);
     if (codeElement !== preElement) highlightReadingCode(codeElement, sourceCode);
   }
 

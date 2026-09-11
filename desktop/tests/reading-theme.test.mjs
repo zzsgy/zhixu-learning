@@ -38,11 +38,14 @@ test("三类阅读正文统一增强代码块、行内代码和特殊提示字�
   assert.match(script, /normalizeReadingPreformattedLines\(preElement\)/);
   assert.match(script, /inferReadingCodeLanguage/);
   assert.match(script, /navigator\.clipboard\.writeText\(sourceCode\)/);
+  assert.match(script, /shell\.append\(preElement, copyButton\)/);
   assert.match(script, /\["example", \/\^\(\?:示例\|示意片段/);
   assert.match(script, /enhanceReadingSemantics\(dom\.readerContent\)/);
   assert.match(script, /enhanceReadingSemantics\(dom\.articleReaderContent\)/);
   assert.match(script, /enhanceReadingSemantics\(dom\.paperReaderContent\)/);
   assert.match(styles, /\.reading-code-shell/);
+  assert.match(styles, /width: min\(100%, 920px\)/);
+  assert.match(styles, /\.reading-code-shell:hover \.reading-code-copy/);
   assert.match(styles, /\.reading-surface :not\(pre\) > code/);
   assert.match(styles, /\.reading-callout\.is-warning/);
 });

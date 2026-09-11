@@ -3206,26 +3206,38 @@ body.has-reading-toc .floating-reader-back {
 
 /* 阅读语义组件：代码始终使用等宽字体，提示字段继承各阅读主题的纸张和文字变量。 */
 .reading-code-shell {
+  position: relative;
+  width: min(100%, 920px);
   overflow: hidden;
-  margin: 32px 0;
-  border: 1px solid var(--reading-code-border);
-  border-radius: 14px;
+  margin: 38px auto;
+  border: 1px solid color-mix(in srgb, var(--reading-code-border) 84%, #b6ad98);
+  border-radius: 15px;
   background: var(--reading-code-bg);
-  box-shadow: 0 14px 34px color-mix(in srgb, #000 18%, transparent);
+  box-shadow: none;
   color: var(--reading-code-ink);
 }
-.reading-code-toolbar {
-  display: flex;
-  min-height: 42px;
-  align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid color-mix(in srgb, var(--reading-code-border) 72%, transparent);
-  background: var(--reading-code-panel);
-  padding: 0 14px 0 18px;
+.reading-code-copy {
+  position: absolute;
+  z-index: 1;
+  top: 12px;
+  right: 14px;
+  border: 1px solid color-mix(in srgb, var(--reading-code-border) 86%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--reading-code-bg) 88%, transparent);
+  color: var(--reading-code-muted);
+  cursor: pointer;
+  opacity: 0;
+  padding: 6px 10px;
+  pointer-events: none;
+  font-family: var(--sans);
+  font-size: 10px;
+  transform: translateY(-2px);
+  transition: opacity .16s ease, border-color .16s ease, color .16s ease, transform .16s ease;
 }
-.reading-code-language { color: var(--reading-code-muted); font-family: var(--mono); font-size: 10px; font-weight: 750; letter-spacing: .12em; }
-.reading-code-copy { border: 1px solid color-mix(in srgb, var(--reading-code-border) 72%, transparent); border-radius: 6px; background: transparent; color: var(--reading-code-muted); cursor: pointer; padding: 6px 10px; font-family: var(--sans); font-size: 10px; }
+.reading-code-shell:hover .reading-code-copy,
+.reading-code-shell:focus-within .reading-code-copy { opacity: 1; pointer-events: auto; transform: translateY(0); }
 .reading-code-copy:hover { border-color: var(--cyan-strong); color: var(--reading-code-ink); }
+@media (hover: none) { .reading-code-copy { opacity: .82; pointer-events: auto; transform: none; } }
 .reading-code-shell pre,
 .article-prose .reading-code-shell pre,
 .paper-prose .reading-code-shell pre,
@@ -3236,11 +3248,13 @@ body.has-reading-toc .floating-reader-back {
   border-radius: 0;
   background: var(--reading-code-bg);
   color: var(--reading-code-ink);
-  padding: 24px 28px 26px;
+  padding: 30px 31px 32px;
   tab-size: 2;
   font-family: var(--mono);
-  font-size: clamp(13px, calc(var(--reading-font-size) * .78), 16px);
-  line-height: 1.75;
+  font-size: clamp(13px, calc(var(--reading-font-size) * .82), 16px);
+  font-weight: 450;
+  letter-spacing: 0;
+  line-height: 1.72;
 }
 .reading-code-shell code { color: inherit; font-family: inherit; font-size: inherit; }
 .code-token.is-comment { color: #7f938a; font-style: italic; }
