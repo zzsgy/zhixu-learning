@@ -2456,6 +2456,128 @@ body.has-reading-toc .floating-reader-back {
   text-align: left;
 }
 .paper-prose th { background: var(--quote-bg); }
+.paper-prose .paper-caption {
+  margin: 30px 0 10px;
+  color: var(--ink-soft);
+  font-family: var(--sans);
+  font-size: .76em;
+  font-weight: 650;
+  line-height: 1.55;
+  text-align: left;
+}
+.paper-prose .paper-page-continuation {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0;
+  color: var(--ink-soft);
+  font-family: var(--sans);
+  font-size: .68em;
+  letter-spacing: .08em;
+  text-align: center;
+}
+.paper-prose .paper-page-continuation::before,
+.paper-prose .paper-page-continuation::after {
+  height: 1px;
+  flex: 1;
+  background: var(--line);
+  content: "";
+}
+.paper-table-scroll {
+  width: 100%;
+  margin: 10px 0 34px;
+  overflow-x: auto;
+  border: 1px solid var(--line-dark);
+  border-radius: 8px;
+  background: var(--paper-raised);
+}
+.paper-prose .paper-table-scroll table {
+  width: 100%;
+  margin: 0;
+  border: 0;
+}
+.paper-prose .paper-table-scroll.is-dense table { min-width: 760px; }
+.paper-prose .paper-table-scroll :is(th, td) {
+  vertical-align: top;
+  border-width: 0 1px 1px 0;
+  line-height: 1.48;
+}
+.paper-prose .paper-table-scroll tr:last-child > :is(th, td) { border-bottom: 0; }
+.paper-prose .paper-table-scroll tr > :is(th, td):last-child { border-right: 0; }
+.paper-prose .paper-table-heading-row > td,
+.paper-prose .paper-table-heading-row > th {
+  background: var(--quote-bg);
+  font-weight: 700;
+}
+.paper-prose .paper-transcript-table {
+  font-family: var(--mono);
+  font-size: clamp(11px, calc(var(--reading-font-size) * .68), 13px);
+}
+.paper-prose .paper-transcript-table p {
+  margin: 0 0 .55em;
+  text-align: left;
+}
+.paper-prose pre.paper-transcript-pre {
+  overflow: visible;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: .82em;
+  line-height: 1.5;
+}
+.paper-prompt-transcript {
+  margin: 18px 0 34px;
+  overflow: hidden;
+  border: 1px solid var(--line-dark);
+  border-radius: 8px;
+  background: var(--paper-raised);
+}
+.paper-prompt-row {
+  display: grid;
+  grid-template-columns: minmax(78px, 112px) minmax(0, 1fr);
+  border-bottom: 1px solid var(--line);
+}
+.paper-prompt-row:last-child { border-bottom: 0; }
+.paper-prose .paper-prompt-row > * {
+  margin: 0;
+  padding: 11px 14px;
+  text-align: left;
+}
+.paper-prose .paper-prompt-label {
+  border-right: 1px solid var(--line);
+  background: var(--quote-bg);
+  font-family: var(--sans);
+  font-size: .72em;
+  font-weight: 750;
+  line-height: 1.5;
+}
+.paper-prose .paper-prompt-value {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: .78em;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.paper-prose .paper-transcript-line {
+  margin: 0 0 .55em;
+  border-left: 3px solid var(--line-dark);
+  padding-left: 9px;
+  text-align: left;
+}
+.paper-prose :is(.paper-prompt-row, .paper-transcript-line).is-thought { border-left-color: #b493ef; }
+.paper-prose :is(.paper-prompt-row, .paper-transcript-line).is-action { border-left-color: var(--cyan-strong); }
+.paper-prose :is(.paper-prompt-row, .paper-transcript-line).is-observation { border-left-color: var(--blue); }
+.paper-prose :is(.paper-prompt-row, .paper-transcript-line).is-answer { border-left-color: #54a87f; }
+@media (max-width: 720px) {
+  .paper-prompt-row { grid-template-columns: 1fr; }
+  .paper-prose .paper-prompt-label { border-right: 0; border-bottom: 1px solid var(--line); }
+}
 
 /* 本地存储说明页。 */
 .storage-hero { border-bottom: 1px solid var(--line-dark); padding: 44px 0 36px; }

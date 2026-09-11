@@ -42,12 +42,17 @@ export function analyzePaperHtmlStructure(sourceHtml) {
   if (!root) {
     return {
       imageCount: 0,
+      uniqueImageCount: 0,
       tableCount: 0,
       headingCount: 0,
       formulaCount: 0,
       semanticSubscriptCount: 0,
       semanticSuperscriptCount: 0,
       declaredFigureCount: 0,
+      figureCaptionCount: 0,
+      imageFigureCount: 0,
+      tableFigureCount: 0,
+      emptyFigureCount: 0,
     };
   }
   /** citationSuperscripts 不属于数学公式，不纳入公式完整性门禁。 */
@@ -62,19 +67,135 @@ export function analyzePaperHtmlStructure(sourceHtml) {
   const semanticSubscriptCount = root.querySelectorAll("sub").length;
   const latexCount = (html.match(latexPattern) || []).length;
   const figureCaptions = root.querySelectorAll("figcaption").length;
+  const figures = Array.from(root.querySelectorAll("figure"));
+  const images = Array.from(root.querySelectorAll("img"));
+  const uniqueImageSources = new Set(
+    images.map((image) => String(image.getAttribute("src") || "").trim()).filter(Boolean),
+  );
+  const ownsElement = (figure, selector) => Array.from(figure.querySelectorAll(selector))
+    .some((element) => element.closest("figure") === figure);
+  const imageFigureCount = figures.filter((figure) => ownsElement(figure, "img")).length;
+  const tableFigureCount = figures.filter((figure) => ownsElement(figure, "table")).length;
+  const emptyFigureCount = figures.filter((figure) => (
+    Array.from(figure.querySelectorAll("figcaption")).some((caption) => caption.closest("figure") === figure)
+    && !ownsElement(figure, "img, table")
+  )).length;
   const declaredFigures = new Set(
     Array.from(root.textContent?.matchAll(/\b(?:fig(?:ure)?\.?)[\s\u00a0]*(\d+[a-z]?)/gi) || [],
       (match) => match[1].toLowerCase()),
   );
   return {
-    imageCount: root.querySelectorAll("img").length,
+    imageCount: images.length,
+    uniqueImageCount: uniqueImageSources.size,
     tableCount: root.querySelectorAll("table").length,
     headingCount: root.querySelectorAll("h1,h2,h3,h4,h5,h6").length,
     formulaCount: latexCount + semanticSubscriptCount + semanticSuperscriptCount,
     semanticSubscriptCount,
     semanticSuperscriptCount,
     declaredFigureCount: figureCaptions > 0 ? figureCaptions : declaredFigures.size,
+    figureCaptionCount: figureCaptions,
+    imageFigureCount,
+    tableFigureCount,
+    emptyFigureCount,
   };
+}
+
+/** @param {string} caption @returns {string} */
+function readFigureLabel(caption) {
+  return String(caption || "").replace(/\s+/g, " ").trim()
+    .match(/^(?:figure|fig\.?|图)\s*(\d+[a-z]?)/i)?.[1]?.toLowerCase() || "";
+}
+
+/**
+ * 根据图号把来源论文图补到译文题注前。新翻译通常已由媒体锚点保留图片；本函数
+ * 也能修复旧译文，且只复制来源中已安全清洗的 HTTPS 图片。
+ *
+ * @param {string} sourceHtml 论文英文安全 HTML。
+ * @param {string} translatedHtml 论文中文语义 HTML。
+ * @returns {string} 补齐图片后的译文 HTML。
+ */
+export function restorePaperFiguresByCaption(sourceHtml, translatedHtml) {
+  const { document: sourceDocument } = parseHTML(`<main>${String(sourceHtml || "")}</main>`);
+  const { document: translatedDocument } = parseHTML(`<main>${String(translatedHtml || "")}</main>`);
+  const sourceRoot = sourceDocument.querySelector("main");
+  const translatedRoot = translatedDocument.querySelector("main");
+  if (!sourceRoot || !translatedRoot) return String(translatedHtml || "");
+  const existingSources = new Set(Array.from(translatedRoot.querySelectorAll("img"), (image) => image.getAttribute("src") || ""));
+  const translatedCaptions = new Map();
+  for (const candidate of Array.from(translatedRoot.querySelectorAll("p, figcaption"))) {
+    const label = readFigureLabel(candidate.textContent || "");
+    if (label && !translatedCaptions.has(label)) translatedCaptions.set(label, candidate);
+  }
+  for (const figure of Array.from(sourceRoot.querySelectorAll("figure"))) {
+    const caption = figure.querySelector("figcaption");
+    const label = readFigureLabel(caption?.textContent || "");
+    const targetCaption = translatedCaptions.get(label);
+    if (!label || !targetCaption) continue;
+    for (const image of Array.from(figure.querySelectorAll("img"))) {
+      const source = image.getAttribute("src") || "";
+      if (!/^https:\/\//i.test(source) || existingSources.has(source)) continue;
+      const safeImage = translatedDocument.createElement("img");
+      safeImage.setAttribute("src", source);
+      const alternativeText = image.getAttribute("alt") || caption?.textContent || `Figure ${label}`;
+      safeImage.setAttribute("alt", String(alternativeText).replace(/\s+/g, " ").trim().slice(0, 500));
+      targetCaption.before(safeImage);
+      existingSources.add(source);
+    }
+  }
+  return translatedRoot.innerHTML.trim();
+}
+
+/**
+ * 规范论文译文中由 MathML 后备层造成的相邻重复上下标，并约束表格跨列属性。
+ *
+ * @param {string} translatedHtml 论文中文语义 HTML。
+ * @returns {string} 规范后的安全语义 HTML。
+ */
+export function normalizePaperTranslationHtml(translatedHtml) {
+  const { document } = parseHTML(`<main>${String(translatedHtml || "")}</main>`);
+  const root = document.querySelector("main");
+  if (!root) return "";
+  for (const script of Array.from(root.querySelectorAll("sup, sub"))) {
+    let sibling = script.nextElementSibling;
+    while (
+      sibling
+      && sibling.tagName === script.tagName
+      && String(sibling.textContent || "").trim() === String(script.textContent || "").trim()
+    ) {
+      const duplicate = sibling;
+      sibling = sibling.nextElementSibling;
+      duplicate.remove();
+    }
+  }
+  for (const cell of Array.from(root.querySelectorAll("td, th"))) {
+    for (const attributeName of ["colspan", "rowspan"]) {
+      const value = Number(cell.getAttribute(attributeName));
+      if (Number.isInteger(value) && value >= 1 && value <= 20) {
+        cell.setAttribute(attributeName, String(value));
+      } else {
+        cell.removeAttribute(attributeName);
+      }
+    }
+  }
+  for (const table of Array.from(root.querySelectorAll("table"))) {
+    const rows = Array.from(table.querySelectorAll("tr"));
+    for (let index = 0; index < rows.length - 1; index += 1) {
+      const cells = Array.from(rows[index].children).filter((element) => /^(TD|TH)$/.test(element.tagName));
+      const nextCells = Array.from(rows[index + 1].children).filter((element) => /^(TD|TH)$/.test(element.tagName));
+      if (cells.length === 1 && nextCells.length > 1 && !cells[0].hasAttribute("colspan")) {
+        cells[0].setAttribute("colspan", String(Math.min(20, nextCells.length)));
+      }
+    }
+  }
+  for (const image of Array.from(root.querySelectorAll("img"))) {
+    const source = image.getAttribute("src") || "";
+    if (!/^https:\/\//i.test(source)) {
+      image.remove();
+      continue;
+    }
+    image.setAttribute("src", source);
+  }
+  return root.innerHTML.trim();
 }
 
 /**
@@ -88,8 +209,11 @@ export function validatePaperTranslationStructure(source, translatedHtml) {
   const expected = source && typeof source === "object" ? source : {};
   const translation = analyzePaperHtmlStructure(translatedHtml);
   const missing = [];
+  const expectedImageField = Object.hasOwn(expected, "uniqueImageCount")
+    ? "uniqueImageCount"
+    : "imageCount";
   for (const [field, label] of [
-    ["imageCount", "图片"],
+    [expectedImageField, "图片"],
     ["tableCount", "表格"],
     ["formulaCount", "公式结构"],
     ["semanticSubscriptCount", "下标结构"],

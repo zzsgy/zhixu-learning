@@ -24,6 +24,8 @@ import {
 import {
   analyzePaperHtmlStructure,
   createPaperHtmlFromPlainText,
+  normalizePaperTranslationHtml,
+  restorePaperFiguresByCaption,
   validatePaperTranslationStructure,
 } from "./paper-structure.mjs";
 
@@ -38,7 +40,7 @@ const workerEnabled = process.env.ZHIXU_DISABLE_CODEX_WORKER !== "1";
 /** configuredModel 是可选的 Codex 模型覆盖项；留空时沿用 CLI 默认模型。 */
 const configuredModel = String(process.env.ZHIXU_CODEX_MODEL || "").trim();
 /** translationFormatVersion 使旧纯文本结果不会绕过新增图文结构规则。 */
-const translationFormatVersion = 4;
+const translationFormatVersion = 5;
 /** usageRetryDelayMilliseconds 在 Codex 用量恢复前低频重试，避免整队误报失败。 */
 const usageRetryDelayMilliseconds = Math.max(
   60_000,
@@ -228,7 +230,9 @@ function createTranslationPrompt(sectionIndex, sectionCount) {
     "不得只写摘要，不得省略方法、实验、结论和附录；公式、模型名、缩写、表格数值及必要英文术语必须保留。",
     "所有 ZHIXU_MEDIA_000001 和 ZHIXU_MATH_000001 形式的图片、公式锚点必须各保留一次、字符完全不变，并保持在相邻正文和图注之间的原位置。",
     "参考文献条目可以保留英文。不要编造原文没有的信息。",
-    "translatedHtml 只允许使用 h2、h3、h4、p、ul、ol、li、blockquote、pre、code、table、thead、tbody、tr、th、td、strong、em、sub、sup、br 标签，不能添加属性。",
+    "必须保留来源的标题层级和图表/提示轨迹结构；问题、答案、思考、动作、观察、图题、表题和跨页提示不得提升为章节标题。",
+    "来源已有 table、pre、换行、colspan 或 rowspan 时必须继续保留，不得把表格或提示轨迹压平成连续普通段落。",
+    "translatedHtml 只允许使用 h2、h3、h4、p、ul、ol、li、blockquote、pre、code、table、thead、tbody、tr、th、td、strong、em、sub、sup、br 标签；只有 td/th 可以保留数值为 1 到 20 的 colspan、rowspan 属性，不能添加其它属性。",
     "输出必须严格符合给定 JSON Schema，不要在 JSON 之外添加说明。",
   ].join("\n");
 }
@@ -428,10 +432,13 @@ async function translatePaper(paper) {
       sections.length,
     ));
   }
-  const translatedHtml = restoreArticleTranslationMedia(
+  const restoredHtml = restoreArticleTranslationMedia(
     outputs.map((output) => output.translatedHtml).join("\n"),
     prepared.media,
     prepared.formulas,
+  );
+  const translatedHtml = normalizePaperTranslationHtml(
+    restorePaperFiguresByCaption(sourceHtml, restoredHtml),
   );
   const sourceStructure = paper.sourceStructure && Object.keys(paper.sourceStructure).length > 0
     ? paper.sourceStructure

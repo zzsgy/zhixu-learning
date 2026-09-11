@@ -5,6 +5,7 @@
  */
 import renderMathInElement from "/vendor/katex/contrib/auto-render.mjs";
 import { getProjectPage } from "./project-index.js";
+import { normalizePaperReadingLayout } from "./paper-layout.js";
 
 /** applicationState 保存当前筛选、文档列表和已打开文档。 */
 const applicationState = {
@@ -2508,7 +2509,11 @@ function normalizeReadingPreformattedLines(preElement) {
 function enhanceReadingSemantics(readingSurface) {
   if (!readingSurface) return;
   for (const preElement of readingSurface.querySelectorAll("pre")) {
-    if (preElement.closest(".reading-code-shell") || preElement.classList.contains("readable-plain-fallback")) continue;
+    if (
+      preElement.closest(".reading-code-shell")
+      || preElement.classList.contains("readable-plain-fallback")
+      || preElement.classList.contains("paper-transcript-pre")
+    ) continue;
     normalizeReadingPreformattedLines(preElement);
     const codeElement = preElement.querySelector("code") || preElement;
     const sourceCode = codeElement.textContent || "";
@@ -7509,7 +7514,17 @@ function createSafePaperTranslation(translatedHtml) {
     const safeParent = allowedTags.has(sourceElement.tagName)
       ? document.createElement(sourceElement.tagName.toLowerCase())
       : targetNode;
-    if (safeParent !== targetNode) targetNode.append(safeParent);
+    if (safeParent !== targetNode) {
+      if (["TD", "TH"].includes(sourceElement.tagName)) {
+        for (const attributeName of ["colspan", "rowspan"]) {
+          const span = Number(sourceElement.getAttribute(attributeName));
+          if (Number.isInteger(span) && span >= 1 && span <= 20) {
+            safeParent.setAttribute(attributeName, String(span));
+          }
+        }
+      }
+      targetNode.append(safeParent);
+    }
     for (const childNode of sourceElement.childNodes) {
       copySafeNode(childNode, safeParent);
     }
@@ -7626,6 +7641,7 @@ function schedulePaperTranslationPolling(paperId) {
         dom.paperReaderContent.replaceChildren(
           createSafePaperTranslation(paper.fullTranslationHtml),
         );
+        normalizePaperReadingLayout(dom.paperReaderContent);
         enhanceReadingSemantics(dom.paperReaderContent);
         renderReadingMath(dom.paperReaderContent);
         await initializeReadingWorkspace("paper", paper.id, dom.paperReaderContent);
@@ -7715,6 +7731,7 @@ async function openPaper(paperId, options = {}) {
       dom.paperReaderContent.append(
         createSafePaperTranslation(paper.fullTranslationHtml),
       );
+      normalizePaperReadingLayout(dom.paperReaderContent);
       renderReadingMath(dom.paperReaderContent);
     } else if (paper.sourceType === "mli") {
       dom.paperReadingStatus.textContent =

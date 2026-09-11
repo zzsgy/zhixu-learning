@@ -976,10 +976,11 @@ export function sanitizeArticleHtml(rawHtml, baseUrl) {
 }
 
 /**
- * 将旧网页误用的 HTML <image> 元素规范化为标准 <img>。
+ * 将旧网页误用的 HTML <image> 与安全的图片型 <object> 规范化为标准 <img>。
  *
  * SVG 内部的 <image> 具有不同语义，必须保持原状并由后续 SVG 清理规则处理；
- * 这里只兼容正文 HTML 中带 src 的非标准图片标签。
+ * arXiv HTML 使用 `<object type="image/svg+xml">` 承载论文正文图，若直接删除会
+ * 造成图片缺失。图片型 object 改为 img 后仍由本地图片代理下载、清洗和隔离。
  *
  * @param {Document} document 待交给 Readability 的网页文档。
  * @returns {number} 完成规范化的图片数量。
@@ -997,7 +998,24 @@ export function normalizeLegacyHtmlImages(document) {
     }
     legacyImage.replaceWith(standardImage);
   }
-  return legacyImages.length;
+  /** objectImages 只接受明确声明为常见图片 MIME 的 object，拒绝 HTML/PDF/插件对象。 */
+  const objectImages = Array.from(document.querySelectorAll("object[data]"))
+    .filter((element) => /^image\/(?:svg\+xml|png|jpe?g|gif|webp|avif)$/i.test(element.getAttribute("type") || ""));
+  for (const objectImage of objectImages) {
+    const standardImage = document.createElement("img");
+    standardImage.setAttribute("src", objectImage.getAttribute("data") || "");
+    for (const attributeName of ["width", "height"]) {
+      const attributeValue = objectImage.getAttribute(attributeName);
+      if (attributeValue !== null) standardImage.setAttribute(attributeName, attributeValue);
+    }
+    const figureCaption = objectImage.closest("figure")?.querySelector("figcaption")?.textContent || "";
+    const alternativeText = objectImage.getAttribute("aria-label")
+      || objectImage.getAttribute("title")
+      || String(figureCaption).replace(/\s+/g, " ").trim();
+    if (alternativeText) standardImage.setAttribute("alt", alternativeText.slice(0, 500));
+    objectImage.replaceWith(standardImage);
+  }
+  return legacyImages.length + objectImages.length;
 }
 
 /**

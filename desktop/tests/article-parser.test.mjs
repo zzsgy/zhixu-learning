@@ -93,17 +93,22 @@ test("解析浏览器已加载网页并执行同一安全清洗", async () => {
 /**
  * 验证旧博客误用的 HTML image 标签会在 Readability 前变成标准图片。
  */
-test("规范化旧式 HTML image 标签且不改写 SVG image", () => {
-  /** document 同时包含正文旧式图片和具有独立语义的 SVG 图片。 */
+test("规范化旧式 HTML image 和安全图片 object 且不改写 SVG image", () => {
+  /** document 同时包含正文旧式图片、arXiv 图片 object 和具有独立语义的 SVG 图片。 */
   const { document } = parseHTML(`
     <main>
       <image src="/images/diagram.png" alt="架构图"></image>
+      <figure><object type="image/svg+xml" data="paper/figure-1.svg" width="548"></object><figcaption>Figure 1: ReAct workflow.</figcaption></figure>
+      <object type="text/html" data="/unsafe.html"></object>
       <svg><image src="/images/vector-layer.png"></image></svg>
     </main>
   `);
-  assert.equal(normalizeLegacyHtmlImages(document), 1);
+  assert.equal(normalizeLegacyHtmlImages(document), 2);
   assert.equal(document.querySelectorAll("main > img").length, 1);
   assert.equal(document.querySelector("main > img")?.getAttribute("src"), "/images/diagram.png");
+  assert.equal(document.querySelector("figure img")?.getAttribute("src"), "paper/figure-1.svg");
+  assert.match(document.querySelector("figure img")?.getAttribute("alt") || "", /Figure 1/);
+  assert.equal(document.querySelectorAll('object[type="text/html"]').length, 1);
   assert.equal(document.querySelectorAll("svg image").length, 1);
 });
 

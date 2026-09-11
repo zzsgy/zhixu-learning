@@ -34,6 +34,16 @@ const paperDownloadTimeoutMilliseconds = 45_000;
 const extractionPromises = new Map();
 
 /**
+ * 判断结构化论文来源是否真的保留了题注对应的图表资产。
+ *
+ * @param {Record<string, number>} structure 论文结构清单。
+ * @returns {boolean} 是否存在只有题注、没有图片或表格的空图。
+ */
+function hasMissingPaperFigureAssets(structure) {
+  return Math.max(0, Number(structure?.emptyFigureCount) || 0) > 0;
+}
+
+/**
  * 删除出版商推荐卡片等没有图注、没有替代文字的装饰图，保留论文正文图。
  *
  * @param {string} sourceHtml 已经过文章安全清洗的 HTML。
@@ -256,6 +266,7 @@ export async function preparePaperFullText(paperId, dependencies = {}) {
         if (
           sourceText.length >= minimumComparableLength
           && (sourceStructure.imageCount > 0 || sourceStructure.headingCount >= 2)
+          && !hasMissingPaperFigureAssets(sourceStructure)
         ) {
           const wordCount = sourceText.split(/\s+/).filter(Boolean).length;
           return updatePaperSourceText(paperId, {
@@ -320,7 +331,8 @@ export async function preparePaperFullText(paperId, dependencies = {}) {
             sourceStructure: (() => {
               const structure = analyzePaperHtmlStructure(sourceHtml);
               const complete = Boolean(normalizedSource.html)
-                && (structure.imageCount > 0 || structure.headingCount >= 2);
+                && (structure.imageCount > 0 || structure.headingCount >= 2)
+                && !hasMissingPaperFigureAssets(structure);
               return {
                 ...structure,
                 sourceKind: complete ? "publisher_html" : "publisher_text",
