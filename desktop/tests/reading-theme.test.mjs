@@ -32,6 +32,13 @@ test("沉浸夜读使用本地霞鹜文楷并把目录移到右侧", () => {
   assert.doesNotMatch(fontStyles, /https?:\/\//);
 });
 
+test("沉浸夜读中的 PDF 文档使用居中单列正文和顶部信息条", () => {
+  assert.match(styles, /\.reader:not\(\.is-word-reader\) \.reader-layout \{[\s\S]*max-width: 1400px;[\s\S]*grid-template-columns: minmax\(0, 1fr\);[\s\S]*margin: 0 auto;/);
+  assert.match(styles, /\.reader:not\(\.is-word-reader\) \.reader-aside \{[\s\S]*grid-row: 1;[\s\S]*width: min\(1120px, 100%\);[\s\S]*grid-template-columns: minmax\(190px, 240px\) minmax\(0, 1fr\) auto;/);
+  assert.match(styles, /\.reader:not\(\.is-word-reader\) \.reader-article \{ grid-row: 2; \}/);
+  assert.match(styles, /\.reader-article > :is\(\.eyebrow, h1, \.reader-summary\)/);
+});
+
 test("三类阅读正文统一增强代码块、行内代码和特殊提示字段", () => {
   assert.match(script, /function enhanceReadingSemantics\(readingSurface\)/);
   assert.match(script, /function normalizeReadingPreformattedLines\(preElement\)/);

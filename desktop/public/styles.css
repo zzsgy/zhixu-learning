@@ -3373,6 +3373,44 @@ mark.reading-highlight.is-focused { box-shadow: 0 0 0 3px var(--amber); }
 :root[data-reading-theme="immersive"] .article-reading-page,
 :root[data-reading-theme="immersive"] .paper-reading-page,
 :root[data-reading-theme="immersive"] .reader-layout { max-width: 1120px; }
+/* PDF/纯文本详情不再让固定信息栏挤占正文；信息栏改为正文上方的紧凑横条。 */
+:root[data-reading-theme="immersive"] .reader:not(.is-word-reader) .reader-layout {
+  width: 100%;
+  max-width: 1400px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 34px;
+  margin: 0 auto;
+}
+:root[data-reading-theme="immersive"] .reader:not(.is-word-reader) .reader-article { grid-row: 2; }
+:root[data-reading-theme="immersive"] .reader:not(.is-word-reader) .reader-aside {
+  position: static;
+  grid-row: 1;
+  display: grid;
+  width: min(1120px, 100%);
+  grid-template-columns: minmax(190px, 240px) minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 28px;
+  margin: 0 auto;
+  border-color: var(--line);
+  box-shadow: none;
+  padding: 20px 24px;
+}
+:root[data-reading-theme="immersive"] .reader:not(.is-word-reader) .reader-aside dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+}
+:root[data-reading-theme="immersive"] .reader:not(.is-word-reader) .reader-aside dl div {
+  min-height: 64px;
+  border-top: 0;
+  border-left: 1px solid var(--line);
+  padding: 3px 16px;
+}
+:root[data-reading-theme="immersive"] .reader:not(.is-word-reader) .reader-article > :is(.eyebrow, h1, .reader-summary) {
+  width: min(1120px, 100%);
+  margin-right: auto;
+  margin-left: auto;
+}
 :root[data-reading-theme="immersive"] .article-reading-page h1,
 :root[data-reading-theme="immersive"] .paper-reading-page h1,
 :root[data-reading-theme="immersive"] .reader-article > h1 { color: #e0ddd7; font-family: var(--sans); font-weight: 700; letter-spacing: -.035em; }
@@ -3583,6 +3621,12 @@ mark.reading-highlight.is-focused { box-shadow: 0 0 0 3px var(--amber); }
   .paper-reminder-shell > footer { align-items: stretch; flex-direction: column; }
   .paper-reminder-shell > footer .secondary-button { width: 100%; }
   .reader-aside { position: static; }
+  :root[data-reading-theme="immersive"] .reader:not(.is-word-reader) .reader-aside {
+    grid-template-columns: 1fr;
+  }
+  :root[data-reading-theme="immersive"] .reader:not(.is-word-reader) .reader-aside dl {
+    grid-template-columns: 1fr 1fr;
+  }
   .reader.is-word-reader .reader-aside {
     grid-template-columns: 1fr;
   }
