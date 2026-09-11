@@ -7556,7 +7556,7 @@ async function renderPaperTranslationStatus(paper) {
     statusText = "这篇论文尚未取得可翻译全文，请返回论文库重新导入 PDF。";
   } else if (paper.fullTranslationStatus === "ready") {
     statusText = paper.fullTranslationFidelity === "degraded"
-      ? `以下中文阅读版已完成，但原始来源无法完整提供图文结构：${paper.fullTranslationFidelityMessage || "部分图片、公式或表格只能在英文 PDF 中核对。"}`
+      ? `以下中文阅读版已完成，但图文结构校验未完全通过：${paper.fullTranslationFidelityMessage || "部分图片、公式或表格仍需在英文 PDF 中核对。"}`
       : "以下全文中文阅读版由 Codex 根据英文论文生成；图片、公式、表格和章节结构已通过完整性校验，重要结论仍可通过右上角英文 PDF 交叉核对。";
   } else if (paper.fullTranslationStatus === "processing") {
     statusText = "Codex 正在后台翻译这篇论文。你可以离开本页，完成后再次打开即可阅读中文全文。";

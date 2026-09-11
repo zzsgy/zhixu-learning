@@ -75,6 +75,7 @@ test("三类阅读正文统一增强代码块、行内代码和特殊提示字�
   assert.match(script, /enhanceReadingSemantics\(dom\.paperReaderContent\)/);
   assert.match(script, /normalizePaperReadingLayout\(dom\.paperReaderContent\)/);
   assert.match(script, /paper-transcript-pre/);
+  assert.match(script, /图文结构校验未完全通过/);
   assert.match(styles, /\.reading-code-shell/);
   assert.match(styles, /width: min\(100%, 920px\)/);
   assert.match(styles, /\.reading-code-shell:hover \.reading-code-copy/);
