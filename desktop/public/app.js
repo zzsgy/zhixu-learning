@@ -4740,6 +4740,34 @@ function setArticleImageSource(image, remoteSource) {
   }, { once: true });
 }
 
+/**
+ * 移除公众号正文中依赖原站布局的重复竖长装饰条，并向上清理空白包装层。
+ * 单张纵向信息图不会命中，避免误删正常流程图和长截图。
+ *
+ * @param {HTMLImageElement} image 已完成解码的正文图片。
+ * @param {number} sourceCount 同一原始地址在文章中的出现次数。
+ * @returns {void}
+ */
+function removeRepeatedDecorativeArticleImage(image, sourceCount) {
+  if (sourceCount < 2 || image.naturalWidth <= 0 || image.naturalHeight <= 0) return;
+  const aspectRatio = image.naturalHeight / image.naturalWidth;
+  if (image.naturalWidth > 400 || image.naturalHeight < 1200 || aspectRatio < 4) return;
+  let parent = image.parentElement;
+  image.remove();
+  while (
+    parent
+    && parent.matches("section, div, p")
+    && !parent.id
+    && !parent.className
+    && !(parent.textContent || "").trim()
+    && !parent.querySelector("img, video, iframe, table, pre, code")
+  ) {
+    const nextParent = parent.parentElement;
+    parent.remove();
+    parent = nextParent;
+  }
+}
+
 function createArticleOriginalContent(article) {
   /** parsedContent 是从服务端白名单 HTML 创建的隔离文档。 */
   const parsedContent = new DOMParser().parseFromString(
@@ -4766,9 +4794,28 @@ function createArticleOriginalContent(article) {
     (list) => !list.querySelector("li"),
   );
   for (const emptyList of emptyLists) emptyList.remove();
-  for (const image of safeArticleRoot.querySelectorAll("img")) {
+  /** emptyBlocks 去掉源站只用于撑开版面的嵌套 br 包装，避免清洗样式后留下巨幅空段。 */
+  const emptyBlocks = Array.from(safeArticleRoot.querySelectorAll("section, div, p")).reverse();
+  for (const block of emptyBlocks) {
+    if ((block.textContent || "").trim()) continue;
+    if (block.querySelector("img, video, iframe, table, pre, code")) continue;
+    block.remove();
+  }
+  for (const childNode of safeArticleRoot.childNodes) {
+    fragment.append(document.importNode(childNode, true));
+  }
+  /** imageSourceCounts 用于区分反复出现的装饰条与只出现一次的正常纵向信息图。 */
+  const imageSourceCounts = new Map();
+  for (const image of fragment.querySelectorAll("img")) {
+    const source = image.getAttribute("src") || "";
+    imageSourceCounts.set(source, (imageSourceCounts.get(source) || 0) + 1);
+  }
+  for (const image of fragment.querySelectorAll("img")) {
     /** remoteSource 是服务端已清洗过的公开图片地址。 */
     const remoteSource = image.getAttribute("src") || "";
+    image.addEventListener("load", () => {
+      removeRepeatedDecorativeArticleImage(image, imageSourceCounts.get(remoteSource) || 0);
+    }, { once: true });
     if (/^https?:\/\//i.test(remoteSource)) {
       setArticleImageSource(image, remoteSource);
       image.removeAttribute("referrerpolicy");
@@ -4777,9 +4824,6 @@ function createArticleOriginalContent(article) {
     image.setAttribute("loading", "eager");
     /** decoding 允许浏览器异步解码长文章中的图片。 */
     image.setAttribute("decoding", "async");
-  }
-  for (const childNode of safeArticleRoot.childNodes) {
-    fragment.append(document.importNode(childNode, true));
   }
   return fragment;
 }
@@ -4907,6 +4951,11 @@ function renderArticleReadingMode() {
     requestedMode === "original" ? "" : article.title;
   dom.articleReaderTitle.textContent =
     requestedMode === "original" ? article.title : article.translatedTitle || article.title;
+  /** 超长标题降低字号，避免公众号标题在宽屏首屏形成三到五行的视觉墙。 */
+  dom.articleReaderTitle.classList.toggle(
+    "is-long-title",
+    [...dom.articleReaderTitle.textContent].length >= 34,
+  );
   dom.articleReaderSummary.textContent =
     requestedMode === "original"
       ? article.summary

@@ -2230,6 +2230,7 @@ body.has-reading-toc .floating-reader-back {
 .article-reading-page { width: min(1280px, 100%); margin: 0 auto; padding: 72px 0 100px; }
 .article-reading-page > header { border-bottom: 1px solid var(--line-dark); padding-bottom: 42px; }
 .article-reading-page h1 { margin: 18px 0 24px; font-family: var(--serif); font-size: clamp(44px, 5.5vw, 78px); font-weight: 590; letter-spacing: -.055em; line-height: 1.18; }
+.article-reading-page h1.is-long-title { font-size: clamp(32px, 3.6vw, 54px); letter-spacing: -.035em; line-height: 1.3; }
 .article-reading-page > header > p:last-child { max-width: 850px; margin: 0; color: var(--ink-soft); font-size: 18px; line-height: 1.9; }
 .article-reader-original-title { margin: -10px 0 20px; color: var(--ink-soft); font-family: var(--serif); font-size: 18px; font-style: italic; line-height: 1.6; }
 .article-translation-tools { display: flex; align-items: center; gap: 10px; }

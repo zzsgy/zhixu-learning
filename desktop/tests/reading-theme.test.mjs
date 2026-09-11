@@ -39,6 +39,15 @@ test("沉浸夜读中的 PDF 文档使用居中单列正文和顶部信息条", 
   assert.match(styles, /\.reader-article > :is\(\.eyebrow, h1, \.reader-summary\)/);
 });
 
+test("超长文章标题和重复竖长装饰图不会破坏阅读页比例", () => {
+  assert.match(script, /function removeRepeatedDecorativeArticleImage\(image, sourceCount\)/);
+  assert.match(script, /sourceCount < 2/);
+  assert.match(script, /image\.naturalWidth > 400 \|\| image\.naturalHeight < 1200 \|\| aspectRatio < 4/);
+  assert.match(script, /safeArticleRoot\.querySelectorAll\("section, div, p"\)\)\.reverse\(\)/);
+  assert.match(script, /classList\.toggle\([\s\S]*"is-long-title"[\s\S]*length >= 34/);
+  assert.match(styles, /\.article-reading-page h1\.is-long-title \{ font-size: clamp\(32px, 3\.6vw, 54px\)/);
+});
+
 test("三类阅读正文统一增强代码块、行内代码和特殊提示字段", () => {
   assert.match(script, /function enhanceReadingSemantics\(readingSurface\)/);
   assert.match(script, /function normalizeReadingPreformattedLines\(preElement\)/);
