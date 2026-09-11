@@ -732,7 +732,7 @@ function renderLibraryCompositionChart(composition) {
       const groupLabel = createTextElement(
         "span",
         "activity-library-group-label",
-        group.level === 0 ? "论文库 · 独立统计" : `${group.name} · 一级目录`,
+        group.level === 0 ? "论文库 · 独立统计" : group.name,
       );
       groupElement.append(groupLabel);
       columns.append(groupElement);

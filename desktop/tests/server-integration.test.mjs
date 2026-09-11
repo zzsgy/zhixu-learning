@@ -41,7 +41,7 @@ test("学习统计默认首页并展示资料库目录层级", () => {
   assert.match(applicationSource, /points\.length <= 31 \? 1/);
   assert.match(applicationSource, /classList\.toggle\("is-expanded"/);
   assert.match(applicationSource, /activity-library-group-label/);
-  assert.match(applicationSource, /group\.level === 0 \? "论文库 · 独立统计" : `\$\{group\.name\} · 一级目录`/);
+  assert.match(applicationSource, /group\.level === 0 \? "论文库 · 独立统计" : group\.name/);
   assert.match(applicationSource, /function renderGitHubStatistics\(statistics\)/);
   assert.match(applicationSource, /function analyzeGitHubProject\(\)/);
   assert.doesNotMatch(applicationSource, /renderImportActivityChart/);
