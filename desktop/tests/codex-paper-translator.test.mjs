@@ -153,6 +153,9 @@ process.exit(0);
     assert.equal(databaseModule.getPaperById(usagePaper.id).fullTranslationStatus, "pending");
     assert.equal(workerModule.getCodexPaperTranslationWorkerStatus().status, "waiting");
     await workerModule.triggerCodexPaperTranslationWorker();
+    assert.equal(databaseModule.getPaperById(usagePaper.id).fullTranslationStatus, "pending");
+    databaseModule.setCodexTranslationRetryState({ retryAfter: Date.now() - 1, reason: "模拟额度等待到期" });
+    await workerModule.triggerCodexPaperTranslationWorker();
     assert.equal(databaseModule.getPaperById(usagePaper.id).fullTranslationStatus, "ready");
     assert.equal(
       databaseModule.getPaperById(failedPaper.id).fullTranslationStatus,

@@ -28,6 +28,7 @@ import {
   restorePaperFiguresByCaption,
   validatePaperTranslationStructure,
 } from "./paper-structure.mjs";
+import { deferTranslationAvailability, getTranslationRetryWait } from "./codex-translation-retry.mjs";
 
 /** workerRootDirectory 是翻译任务使用的隔离本地目录。 */
 const workerRootDirectory = paperTranslationWorkDirectory;
@@ -41,15 +42,8 @@ const workerEnabled = process.env.ZHIXU_DISABLE_CODEX_WORKER !== "1";
 const configuredModel = String(process.env.ZHIXU_CODEX_MODEL || "").trim();
 /** translationFormatVersion 使旧纯文本结果不会绕过新增图文结构规则。 */
 const translationFormatVersion = 5;
-/** usageRetryDelayMilliseconds 在 Codex 用量恢复前低频重试，避免整队误报失败。 */
-const usageRetryDelayMilliseconds = Math.max(
-  60_000,
-  Number(process.env.ZHIXU_CODEX_USAGE_RETRY_MS) || 30 * 60 * 1000,
-);
 /** activeWorkerPromise 保证服务进程内始终只有一个翻译循环。 */
 let activeWorkerPromise = null;
-/** usageRetryTimer 是用量受限后的单一延迟唤醒计时器。 */
-let usageRetryTimer = null;
 
 /** workerState 是提供给本地页面的后台工作器状态快照。 */
 const workerState = {
@@ -76,7 +70,10 @@ function setWorkerState(patch) {
  * @returns {Record<string, string>} 工作器当前状态。
  */
 export function getCodexPaperTranslationWorkerStatus() {
-  return { ...workerState };
+  const waiting = getTranslationRetryWait();
+  return waiting && !activeWorkerPromise && workerEnabled
+    ? { ...workerState, status: "waiting", message: waiting.reason, retryAfter: waiting.retryAfter }
+    : { ...workerState, retryAfter: waiting?.retryAfter || 0 };
 }
 
 /**
@@ -393,16 +390,6 @@ async function translateSection(jobDirectory, sourceHtml, sectionIndex, sectionC
   throw new Error(`Codex 未生成第 ${sectionIndex + 1} 段有效译文。`);
 }
 
-/** 用量恢复后自动重新唤醒一次队列。 */
-function scheduleUsageLimitRetry() {
-  if (usageRetryTimer) return;
-  usageRetryTimer = setTimeout(() => {
-    usageRetryTimer = null;
-    void triggerCodexPaperTranslationWorker();
-  }, usageRetryDelayMilliseconds);
-  usageRetryTimer.unref();
-}
-
 /**
  * 为单篇论文准备隔离文件并调用 Codex 翻译。
  *
@@ -419,6 +406,12 @@ async function translatePaper(paper) {
   const jobDirectory = prepareJobDirectory(paper, sections, sourceHtml);
   const outputs = [];
   for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
+    const waiting = getTranslationRetryWait();
+    if (waiting) {
+      const error = new Error(waiting.reason);
+      error.code = "CODEX_SHARED_WAIT";
+      throw error;
+    }
     setWorkerState({
       status: "processing",
       message: `正在翻译《${paper.title}》第 ${sectionIndex + 1}/${sections.length} 节。`,
@@ -472,6 +465,11 @@ async function drainTranslationQueue() {
     return;
   }
   while (true) {
+    const waiting = getTranslationRetryWait();
+    if (waiting) {
+      setWorkerState({ status: "waiting", message: waiting.reason });
+      return;
+    }
     if (fs.existsSync(workerPausePath)) {
       setWorkerState({
         status: "paused",
@@ -510,15 +508,17 @@ async function drainTranslationQueue() {
     } catch (error) {
       /** message 是写入论文状态并供页面展示的本地错误。 */
       const message = error instanceof Error ? error.message : "Codex 全文翻译失败。";
-      if (error?.code === "CODEX_USAGE_LIMIT" || isUsageLimitMessage(message)) {
-        deferPaperFullTranslation(String(paper.id), message);
+      const retryState = error?.code === "CODEX_SHARED_WAIT"
+        ? getTranslationRetryWait()
+        : deferTranslationAvailability(error);
+      if (retryState) {
+        deferPaperFullTranslation(String(paper.id), retryState.reason);
         setWorkerState({
           status: "waiting",
-          message,
+          message: retryState.reason,
           currentPaperId: String(paper.id),
           currentPaperTitle: String(paper.title),
         });
-        scheduleUsageLimitRetry();
         return;
       }
       markPaperFullTranslationFailed(String(paper.id), message);
@@ -543,6 +543,11 @@ async function drainTranslationQueue() {
  */
 export function triggerCodexPaperTranslationWorker() {
   if (activeWorkerPromise) return activeWorkerPromise;
+  const waiting = workerEnabled ? getTranslationRetryWait() : null;
+  if (waiting) {
+    setWorkerState({ status: "waiting", message: waiting.reason });
+    return Promise.resolve();
+  }
   activeWorkerPromise = drainTranslationQueue().finally(() => {
     activeWorkerPromise = null;
   });

@@ -137,7 +137,7 @@ export async function refreshMliPaperLibrary() {
       Accept: "text/plain",
       "User-Agent": "ZhixuLocalKnowledge/1.0",
     },
-    signal: AbortSignal.timeout(mliRequestTimeoutMilliseconds),
+    timeoutMs: mliRequestTimeoutMilliseconds,
   }, "李沐精读目录");
   if (!response.ok) {
     throw new Error(`李沐精读目录暂时不可用（${response.status}）。`);

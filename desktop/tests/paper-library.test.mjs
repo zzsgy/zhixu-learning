@@ -270,6 +270,7 @@ test("每周候选经用户确认后进入论文库", async () => {
           throw new Error("下载内容不是有效 PDF。");
         },
         parseSourcePage: async () => ({
+          contentHtml: `<h2>Introduction</h2><p>${"Complete publisher article background and evidence. ".repeat(40)}</p><h2>Methods</h2><p>${"The experimental method and reproducible procedure. ".repeat(40)}</p>`,
           contentText: "Complete publisher article text for translation. ".repeat(80),
         }),
       },

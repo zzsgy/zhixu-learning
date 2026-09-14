@@ -51,7 +51,7 @@ export function parseGitHubRepositoryUrl(rawUrl) {
 
 /** 默认通过知序的环境代理和证书策略发起外部请求。 */
 async function defaultFetcher(url, options, resourceLabel = "GitHub") {
-  return fetchExternalResource(new URL(url), options, resourceLabel);
+  return fetchExternalResource(new URL(url), { timeoutMs: 30_000, ...options }, resourceLabel);
 }
 
 /** 读取 GitHub API JSON；可选请求允许缺失资源或空仓库并返回空值。 */

@@ -10,7 +10,8 @@ import { parseHTML } from "linkedom";
 import { paperDirectory } from "./config.mjs";
 import {
   detectArticleLanguage,
-  fetchExternalResource,
+  fetchPublicResource,
+  readLimitedResponseBytes,
   normalizeArticleMath,
   normalizeLegacyHtmlImages,
   parseAndClassifyArticle,
@@ -25,6 +26,7 @@ import {
   analyzePaperHtmlStructure,
   createPaperHtmlFromPlainText,
 } from "./paper-structure.mjs";
+import { parseArxivIdentity } from "./paper-identity.mjs";
 
 /** maximumPaperPdfBytes 是单篇公开论文 PDF 的最大下载容量。 */
 const maximumPaperPdfBytes = 80 * 1024 * 1024;
@@ -49,7 +51,7 @@ function hasMissingPaperFigureAssets(structure) {
  * @param {string} sourceHtml 已经过文章安全清洗的 HTML。
  * @returns {{ html: string, text: string }} 论文正文结构与对应纯文本。
  */
-function normalizePaperPublisherHtml(sourceHtml) {
+export function normalizePaperPublisherHtml(sourceHtml) {
   const { document } = parseHTML(`<main>${String(sourceHtml || "")}</main>`);
   const root = document.querySelector("main");
   if (!root) return { html: "", text: "" };
@@ -67,6 +69,75 @@ function normalizePaperPublisherHtml(sourceHtml) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return { html: root.innerHTML.trim(), text };
+}
+
+/** 内容范围与图文保真是独立判断：长摘要也不能成为全文。 */
+export function inspectPaperSourceScope({ sourceUrl = "", html = "", text = "" } = {}) {
+  const { document } = parseHTML(`<main>${html}</main>`);
+  const root = document.querySelector("main");
+  const contentText = String(text || root?.textContent || "").trim();
+  if (parseArxivIdentity(sourceUrl) && /\/abs\//i.test(sourceUrl)) {
+    return { contentScope: "abstract_only", scopeEvidence: "arXiv 摘要页不能作为论文全文。" };
+  }
+  let abstractLevel = null;
+  let hasAbstract = false;
+  let substantiveSections = 0;
+  for (const heading of root?.querySelectorAll("h1,h2,h3,h4,h5,h6") || []) {
+    const label = String(heading.textContent || "").trim();
+    const level = Number(heading.tagName.slice(1));
+    if (/^(?:(?:\d+|[ivx]+)[.\s]*)?(?:abstract|summary|摘要|概要)\b/i.test(label) || /^(?:摘要|概要)[：:]?$/.test(label)) {
+      hasAbstract = true;
+      abstractLevel = level;
+      continue;
+    }
+    if (abstractLevel !== null && level > abstractLevel) continue;
+    abstractLevel = null;
+    if (/^(?:references|bibliography|acknowledg|author|funding|related articles|supplementary information|参考文献|致谢|作者|资助)/i.test(label)) continue;
+    const sectionLabel = /^(?:\d+(?:\.\d+)*[.\s]|[ivx]+\.\s)|\b(?:introduction|background|methods?|materials|results?|discussion|conclusions?|experiments?|analysis|theorem|proof|approach|evaluation|implementation|model|architecture)\b|引言|绪论|方法|材料|结果|讨论|结论|实验|分析|模型|实现/i.test(label);
+    if (!sectionLabel) continue;
+    let sectionCharacters = 0;
+    for (let sibling = heading.nextElementSibling; sibling; sibling = sibling.nextElementSibling) {
+      if (/^H[1-6]$/.test(sibling.tagName) && Number(sibling.tagName.slice(1)) <= level) break;
+      sectionCharacters += String(sibling.textContent || "").trim().length;
+    }
+    // 章节包装器的标题可能与正文不同层，但至少要有该章节的正文证据。
+    if (sectionCharacters >= 120) substantiveSections += 1;
+  }
+  if (contentText.length >= 1_000 && substantiveSections >= 2) {
+    return { contentScope: "fulltext", scopeEvidence: `已识别 ${substantiveSections} 个包含正文的非摘要章节。` };
+  }
+  return {
+    contentScope: hasAbstract ? "abstract_only" : "unknown",
+    scopeEvidence: hasAbstract ? "页面只确认取得摘要，尚未确认论文全文。" : "页面缺少可核验的论文正文章节，请导入公开 PDF。",
+  };
+}
+
+/** 普通网页论文与 PDF 后备共用入口，保留清洗过的 HTML 和结构清单。 */
+export function preparePaperWebSource(article, sourceUrl) {
+  const normalized = normalizePaperPublisherHtml(article.contentHtml || article.html);
+  const sourceText = normalized.text || String(article.contentText || article.text || "").trim();
+  const sourceHtml = normalized.html || createPaperHtmlFromPlainText(sourceText);
+  const scope = inspectPaperSourceScope({ sourceUrl, html: sourceHtml, text: sourceText });
+  if (scope.contentScope !== "fulltext") {
+    const error = new Error(scope.scopeEvidence);
+    error.code = scope.contentScope === "abstract_only" ? "PAPER_ABSTRACT_ONLY" : "PAPER_FULLTEXT_UNCONFIRMED";
+    throw error;
+  }
+  const structure = analyzePaperHtmlStructure(sourceHtml);
+  const complete = Boolean(normalized.html) && !hasMissingPaperFigureAssets(structure);
+  return {
+    sourceText,
+    sourceHtml,
+    sourceStructure: {
+      ...structure,
+      ...scope,
+      sourceKind: /\/(?:html)\//i.test(sourceUrl) && /arxiv\.org/i.test(sourceUrl) ? "arxiv_html" : "publisher_html",
+      structureFidelity: complete ? "complete" : "degraded",
+      structureMessage: complete ? "已从公开论文正文章节保留图文语义结构。" : "已取得论文正文，但部分图文结构缺失。",
+    },
+    wordCount: sourceText.split(/\s+/).filter(Boolean).length,
+    sourceLanguage: detectArticleLanguage(sourceText),
+  };
 }
 
 /**
@@ -109,6 +180,8 @@ export async function preparePaperFullTextFromBuffer(paperId, pdfBytes, options 
     const sourceStructure = {
       ...analyzePaperHtmlStructure(sourceHtml),
       sourceKind: "pdf_text",
+      contentScope: "fulltext",
+      scopeEvidence: "已从原始论文 PDF 提取文字层。",
       structureFidelity: "degraded",
       structureMessage: "PDF 文字层未提供可验证的图片与公式结构；译文必须显示降级提示。",
     };
@@ -147,28 +220,22 @@ function validatePaperPdfUrl(rawUrl) {
  * @param {string} pdfUrl 公开 PDF 地址。
  * @returns {Promise<Buffer>} PDF 二进制内容。
  */
-async function downloadPaperPdf(pdfUrl) {
+export async function downloadPaperPdf(pdfUrl, dependencies = {}) {
   /** requestUrl 是已通过协议校验的公开地址。 */
   const requestUrl = validatePaperPdfUrl(pdfUrl);
   /** response 是远程 PDF 响应。 */
-  const response = await fetchExternalResource(requestUrl, {
+  const { response } = await fetchPublicResource(requestUrl.href, {
     headers: {
       Accept: "application/pdf",
       "User-Agent": "ZhixuLocalKnowledge/1.0",
     },
-    redirect: "follow",
-    signal: AbortSignal.timeout(paperDownloadTimeoutMilliseconds),
-  }, "论文 PDF");
+    timeoutMs: paperDownloadTimeoutMilliseconds,
+  }, "论文 PDF", dependencies);
   if (!response.ok) {
     throw new Error(`论文 PDF 下载失败（${response.status}）。`);
   }
   /** declaredLength 是服务器声明的文件容量。 */
-  const declaredLength = Number(response.headers.get("content-length") || 0);
-  if (declaredLength > maximumPaperPdfBytes) {
-    throw new Error("论文 PDF 超过 80 MB，未自动下载。");
-  }
-  /** pdfBytes 是完整 PDF 二进制内容。 */
-  const pdfBytes = Buffer.from(await response.arrayBuffer());
+  const pdfBytes = await readLimitedResponseBytes(response, maximumPaperPdfBytes, "论文 PDF");
   if (
     pdfBytes.length > maximumPaperPdfBytes ||
     pdfBytes.subarray(0, 4).toString("ascii") !== "%PDF"
@@ -187,13 +254,14 @@ async function downloadPaperPdf(pdfUrl) {
 function createStructuredSourceUrls(paper) {
   const urls = [];
   const sourceUrl = String(paper.sourceUrl || "").trim();
-  const arxivMatch = sourceUrl.match(/^https:\/\/arxiv\.org\/abs\/([^?#]+)/i);
-  if (arxivMatch) {
-    urls.push(`https://arxiv.org/html/${arxivMatch[1]}`);
+  const arxivIdentity = parseArxivIdentity(sourceUrl);
+  if (arxivIdentity) {
+    const versionedId = `${arxivIdentity.arxivId}${arxivIdentity.requestedVersion}`;
+    urls.push(`https://arxiv.org/html/${versionedId}`);
     /** 较早论文没有官方 HTML 时，ar5iv 提供由同一 arXiv 源文件生成的结构化后备页。 */
-    urls.push(`https://ar5iv.labs.arxiv.org/html/${arxivMatch[1]}`);
+    urls.push(`https://ar5iv.labs.arxiv.org/html/${versionedId}`);
   }
-  if (/^https:\/\//i.test(sourceUrl) && sourceUrl !== paper.pdfUrl) urls.push(sourceUrl);
+  if (!arxivIdentity && /^https:\/\//i.test(sourceUrl) && sourceUrl !== paper.pdfUrl) urls.push(sourceUrl);
   return [...new Set(urls)];
 }
 
@@ -201,22 +269,20 @@ function createStructuredSourceUrls(paper) {
  * 读取 ar5iv 后备页的论文主体，避免通用 Readability 在旧页面中丢掉主图和公式。
  * 官方 arXiv HTML 已由通用解析器验证，继续使用其正文过滤以排除导航和布局结构。
  */
-async function parseStructuredPaperSource(sourceUrl, parseSourcePage) {
-  if (!/^https:\/\/ar5iv\.labs\.arxiv\.org\/html\//i.test(sourceUrl)) {
+async function parseStructuredPaperSource(sourceUrl, parseSourcePage, useInjectedParser = false) {
+  if (useInjectedParser || !/^https:\/\/ar5iv\.labs\.arxiv\.org\/html\//i.test(sourceUrl)) {
     const article = await parseSourcePage(sourceUrl);
     return { html: article.contentHtml, text: article.contentText };
   }
-  const response = await fetchExternalResource(new URL(sourceUrl), {
+  const { response, finalUrl } = await fetchPublicResource(sourceUrl, {
     headers: {
       Accept: "text/html,application/xhtml+xml",
       "User-Agent": "ZhixuLocalKnowledge/1.0",
     },
-    redirect: "follow",
-    signal: AbortSignal.timeout(paperDownloadTimeoutMilliseconds),
+    timeoutMs: paperDownloadTimeoutMilliseconds,
   }, "论文结构化正文");
   if (!response.ok) throw new Error(`论文结构化正文下载失败（${response.status}）。`);
-  const rawHtml = await response.text();
-  if (rawHtml.length > 8 * 1024 * 1024) throw new Error("论文结构化正文超过 8 MB。");
+  const rawHtml = (await readLimitedResponseBytes(response, 8 * 1024 * 1024, "论文结构化正文")).toString("utf8");
   const { document } = parseHTML(rawHtml);
   normalizeLegacyHtmlImages(document);
   normalizeArticleMath(document);
@@ -224,7 +290,7 @@ async function parseStructuredPaperSource(sourceUrl, parseSourcePage) {
   if (!root) throw new Error("论文结构化页面中没有识别到正文主体。");
   return sanitizeArticleHtml(
     root.innerHTML,
-    new URL(response.url || sourceUrl),
+    finalUrl,
   );
 }
 
@@ -254,11 +320,10 @@ export async function preparePaperFullText(paperId, dependencies = {}) {
         const sourceArticle = await parseStructuredPaperSource(
           structuredSourceUrl,
           parseSourcePage,
+          Boolean(dependencies.parseSourcePage),
         );
-        const normalizedSource = normalizePaperPublisherHtml(sourceArticle.html);
-        const sourceText = normalizedSource.text || String(sourceArticle.text || "").trim();
-        const sourceHtml = normalizedSource.html || createPaperHtmlFromPlainText(sourceText);
-        const sourceStructure = analyzePaperHtmlStructure(sourceHtml);
+        const preparedSource = preparePaperWebSource(sourceArticle, structuredSourceUrl);
+        const { sourceText, sourceStructure } = preparedSource;
         const minimumComparableLength = Math.max(
           5_000,
           Math.floor(String(paper.sourceText || "").length * 0.5),
@@ -268,20 +333,8 @@ export async function preparePaperFullText(paperId, dependencies = {}) {
           && (sourceStructure.imageCount > 0 || sourceStructure.headingCount >= 2)
           && !hasMissingPaperFigureAssets(sourceStructure)
         ) {
-          const wordCount = sourceText.split(/\s+/).filter(Boolean).length;
           return updatePaperSourceText(paperId, {
-            sourceText,
-            sourceHtml,
-            sourceStructure: {
-              ...sourceStructure,
-              sourceKind: structuredSourceUrl.includes("arxiv.org/html/")
-                ? "arxiv_html"
-                : "publisher_html",
-              structureFidelity: "complete",
-              structureMessage: "已从出版商公开正文页保留图文语义结构。",
-            },
-            wordCount,
-            sourceLanguage: detectArticleLanguage(sourceText),
+            ...preparedSource,
             resetTranslation: Boolean(dependencies.resetTranslation ?? dependencies.force),
           });
         }
@@ -313,37 +366,15 @@ export async function preparePaperFullText(paperId, dependencies = {}) {
     } catch (pdfError) {
       if (paper.sourceUrl && paper.sourceUrl !== paper.pdfUrl) {
         try {
+          if (parseArxivIdentity(paper.sourceUrl) && /\/abs\//i.test(paper.sourceUrl)) {
+            throw new Error("arXiv 摘要页不能作为论文全文，请稍后重试 PDF 或导入本地 PDF。");
+          }
           /** sourceArticle 是出版商公开文章页的正文后备来源。 */
           const sourceArticle = await parseSourcePage(paper.sourceUrl);
           /** sourceText 是经过网页正文提取与安全清洗后的论文全文。 */
-          const normalizedSource = normalizePaperPublisherHtml(sourceArticle.contentHtml);
-          const sourceText = normalizedSource.text || String(sourceArticle.contentText || "").trim();
-          /** sourceHtml 保留出版商正文中的图片、表格、上下标和 LaTeX。 */
-          const sourceHtml = normalizedSource.html || createPaperHtmlFromPlainText(sourceText);
-          if (sourceText.length < 1_000) {
-            throw new Error("论文网页中未提取到足够的可读正文。");
-          }
-          /** wordCount 是提供给翻译队列和界面展示的英文词数。 */
-          const wordCount = sourceText.split(/\s+/).filter(Boolean).length;
+          const preparedSource = preparePaperWebSource(sourceArticle, paper.sourceUrl);
           return updatePaperSourceText(paperId, {
-            sourceText,
-            sourceHtml,
-            sourceStructure: (() => {
-              const structure = analyzePaperHtmlStructure(sourceHtml);
-              const complete = Boolean(normalizedSource.html)
-                && (structure.imageCount > 0 || structure.headingCount >= 2)
-                && !hasMissingPaperFigureAssets(structure);
-              return {
-                ...structure,
-                sourceKind: complete ? "publisher_html" : "publisher_text",
-                structureFidelity: complete ? "complete" : "degraded",
-                structureMessage: complete
-                  ? "已从出版商公开正文页保留图文语义结构。"
-                  : "出版商正文只提供可读文本，图片或公式结构可能不完整。",
-              };
-            })(),
-            wordCount,
-            sourceLanguage: detectArticleLanguage(sourceText),
+            ...preparedSource,
             resetTranslation: Boolean(dependencies.resetTranslation ?? dependencies.force),
           });
         } catch (sourceError) {

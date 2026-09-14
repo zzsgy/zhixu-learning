@@ -11,6 +11,7 @@ import {
   savePaperCandidates,
 } from "./database.mjs";
 import { fetchExternalResource } from "./article-parser.mjs";
+import { parseArxivIdentity } from "./paper-identity.mjs";
 
 /** arxivEndpoint 是无需浏览器跨域访问的公开论文检索接口。 */
 const arxivEndpoint = "https://export.arxiv.org/api/query";
@@ -316,7 +317,7 @@ async function fetchTopicCandidate(topic) {
       Accept: "application/atom+xml",
       "User-Agent": "ZhixuLocalKnowledge/1.0",
     },
-    signal: AbortSignal.timeout(paperRequestTimeoutMilliseconds),
+    timeoutMs: paperRequestTimeoutMilliseconds,
   }, "arXiv 论文接口");
   if (!response.ok) {
     throw new Error(`论文来源暂时不可用（${response.status}）。`);
@@ -339,26 +340,22 @@ export async function fetchArxivPaperByUrl(rawUrl) {
   const parsedUrl = new URL(String(rawUrl || ""));
   if (!/(^|\.)arxiv\.org$/i.test(parsedUrl.hostname)) return null;
   /** arxivId 是兼容新旧编号形式的无版本论文编号。 */
-  const arxivId = parsedUrl.pathname
-    .replace(/^\/(?:abs|pdf)\//i, "")
-    .replace(/\.pdf$/i, "")
-    .replace(/v\d+$/i, "")
-    .trim();
-  if (!/^(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?\/\d{7})$/i.test(arxivId)) {
+  const identity = parseArxivIdentity(rawUrl);
+  if (!identity) {
     throw new TypeError("无法从链接中识别 arXiv 论文编号。");
   }
   /** requestUrl 是只查询一个编号的官方 Atom API。 */
   const requestUrl = new URL(arxivEndpoint);
-  requestUrl.searchParams.set("id_list", arxivId);
+  requestUrl.searchParams.set("id_list", `${identity.arxivId}${identity.requestedVersion}`);
   /** response 是 arXiv 官方元数据响应。 */
   const response = await fetchExternalResource(requestUrl, {
     headers: { Accept: "application/atom+xml", "User-Agent": "ZhixuLocalKnowledge/1.0" },
-    signal: AbortSignal.timeout(paperRequestTimeoutMilliseconds),
+    timeoutMs: paperRequestTimeoutMilliseconds,
   }, "arXiv 元数据接口");
   if (!response.ok) throw new Error(`arXiv 元数据读取失败（${response.status}）。`);
   /** candidates 是官方响应中解析出的唯一论文。 */
   const candidates = parseArxivResponse(await response.text(), "AI");
-  return candidates[0] ?? null;
+  return candidates[0] ? { ...candidates[0], externalId: identity.externalId, sourceUrl: identity.sourceUrl, pdfUrl: identity.pdfUrl } : null;
 }
 
 /**

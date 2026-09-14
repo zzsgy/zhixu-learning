@@ -4,6 +4,7 @@
  * 结构清单只统计可核验的语义资产，不尝试根据纯文本猜测原图或公式。
  */
 import { parseHTML } from "linkedom";
+import { parsePaperAssetUrl } from "../public/paper-assets.js";
 
 /** LaTeX 定界符匹配器，与阅读页 KaTeX 支持范围保持一致。 */
 const latexPattern = /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$(?!\s)(?:\\.|[^$\r\n])+?\$/g;
@@ -189,7 +190,7 @@ export function normalizePaperTranslationHtml(translatedHtml) {
   }
   for (const image of Array.from(root.querySelectorAll("img"))) {
     const source = image.getAttribute("src") || "";
-    if (!/^https:\/\//i.test(source)) {
+    if (!/^https:\/\//i.test(source) && !parsePaperAssetUrl(source)) {
       image.remove();
       continue;
     }

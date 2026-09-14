@@ -12,6 +12,8 @@
     <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
     <link rel="stylesheet" href="/vendor/lxgw-wenkai/lxgwwenkai-regular.css" />
     <link rel="stylesheet" href="/styles.css?v=20260910-1" />
+    <link rel="stylesheet" href="/paper-library.css" />
+    <link rel="stylesheet" href="/storage-dashboard.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -172,6 +174,10 @@
           <nav class="folder-breadcrumbs" id="folder-breadcrumbs" aria-label="文件夹路径"></nav>
           <div class="folder-grid" id="folder-grid"></div>
           <div class="document-grid" id="document-grid"></div>
+          <div class="library-toolbar" id="search-pagination" hidden>
+            <small id="search-result-count" role="status" aria-live="polite"></small>
+            <button class="secondary-button" id="search-load-more" type="button" hidden>加载更多</button>
+          </div>
           <div class="empty-state" id="empty-state" hidden>
             <span>00</span>
             <h3>文档库还是空的</h3>
@@ -294,24 +300,10 @@
         </section>
 
         <section class="view" id="papers-view">
-          <div class="paper-library-hero">
-            <div>
-              <p class="eyebrow">DAILY CLASSIC PAPER</p>
-              <h2>每天认识一篇经典论文，按技术脉络打牢基础。</h2>
-              <p>
-                推荐从神经语言模型、Transformer、RAG、向量检索和 Agent 基础论文开始，
-                再逐步延伸到深度学习与生物学经典工作。
-              </p>
-            </div>
-            <div class="hero-stat">
-              <span id="paper-total">0</span>
-              <small>已选论文</small>
-            </div>
-          </div>
           <div class="paper-library-heading">
-            <div>
-              <span>SELECTED PAPERS</span>
-              <h2>我的论文</h2>
+            <div class="paper-library-summary">
+              <span><strong id="paper-total">0</strong> 篇论文</span>
+              <p>按研究方向归档，让阅读有迹可循。</p>
             </div>
             <div class="paper-library-actions">
               <details class="view-mode" id="paper-view-mode">
@@ -349,11 +341,44 @@
               </button>
             </div>
           </div>
+          <div class="paper-workspace">
+          <aside class="paper-directory-panel" aria-label="论文目录管理">
+            <header><h3>论文目录</h3><button id="paper-folder-new" type="button" class="secondary-button">＋ 新建</button></header>
+            <label class="paper-folder-search-label">查找目录<input id="paper-folder-search" type="search" placeholder="目录名称或路径" /></label>
+            <nav id="paper-folder-tree" aria-label="论文目录"></nav>
+            <p class="paper-directory-hint">目录仅用于论文归档，与文档库分开。数字包含子目录。</p>
+          </aside>
+          <div class="paper-main">
+          <nav id="paper-folder-breadcrumbs" class="folder-breadcrumbs" aria-label="当前论文目录"></nav>
+          <div id="paper-folder-actions" class="paper-folder-actions"></div>
+          <div class="paper-search-toolbar">
+            <label>搜索论文<input id="paper-search" type="search" placeholder="中文 / 英文标题、作者、摘要" /></label>
+            <label>阅读状态<select id="paper-reading-filter"><option value="">全部</option><option value="unread">未读</option><option value="reading">在读</option><option value="completed">已读</option></select></label>
+            <label>排序<select id="paper-sort"><option value="recent">最近加入</option><option value="oldest">最早加入</option><option value="published">发表时间</option><option value="title">标题</option></select></label>
+          </div>
           <div class="paper-source-tabs" id="paper-source-tabs">
             <button class="is-active" data-paper-source="" type="button">全部</button>
             <button data-paper-source="classic" type="button">每日经典</button>
             <button data-paper-source="manual" type="button">手动导入</button>
           </div>
+          <label class="paper-quality-filter">质量状态
+            <select id="paper-quality-filter">
+              <option value="">全部状态</option>
+              <option value="degraded">图文结构降级</option>
+              <option value="unknown">尚未验证完整性</option>
+              <option value="failed">导入或翻译失败</option>
+              <option value="processing">处理中</option>
+              <option value="duplicate">既有重复身份（仅供核对）</option>
+            </select>
+          </label>
+          <div class="paper-batch-toolbar">
+            <label><input id="paper-select-page" type="checkbox" /> 选择本页</label>
+            <span id="paper-selection-count" role="status" aria-live="polite">已选 0 篇</span>
+            <button class="secondary-button" id="paper-move-selected" type="button" disabled>移动所选</button>
+            <button class="secondary-button" id="paper-clear-selection" type="button" disabled>取消选择</button>
+            <label id="paper-descendants-label"><input id="paper-descendants" type="checkbox" checked /> 包含子目录</label>
+          </div>
+          <p id="paper-result-status" class="paper-result-status" role="status" aria-live="polite"></p>
           <div class="paper-grid" id="paper-grid"></div>
           <div class="empty-state" id="paper-empty-state">
             <span>00</span>
@@ -362,6 +387,13 @@
             <button class="primary-button" id="empty-paper-reminder-button" type="button">
               查看今日推荐
             </button>
+          </div>
+          <div id="paper-pagination" class="paper-pagination">
+            <button class="secondary-button" id="paper-prev-page" type="button">上一页</button>
+            <span id="paper-page-status"></span>
+            <button class="secondary-button" id="paper-next-page" type="button">下一页</button>
+          </div>
+          </div>
           </div>
         </section>
 
@@ -615,53 +647,46 @@
         </section>
 
         <section class="view" id="storage-view">
-          <div class="storage-hero">
-            <p class="eyebrow">LOCAL FIRST</p>
-            <h2>数据由你掌控，网络只在需要 AI 时使用。</h2>
-            <p>
-              数据库、正文索引、原始文件和备份全部保存在本项目的
-              <code>desktop/data</code> 目录。删除程序前请先复制该目录。
-            </p>
+          <div class="storage-intro">
+            <p>查看资料位置、管理备份，处理需要关注的后台任务。</p>
+            <span class="storage-local-badge">仅本机访问</span>
           </div>
-          <div class="storage-grid">
-            <article>
-              <span>01</span>
-              <h3>SQLite 主数据库</h3>
-              <p>保存标题、分类、摘要、提取正文和完整性摘要。</p>
-            </article>
-            <article>
-              <span>02</span>
-              <h3>本地原始附件</h3>
-              <p>上传文件不进入云端数据库，可随时下载原件。</p>
-            </article>
-            <article>
-              <span>03</span>
-              <h3>每日自动备份</h3>
-              <p>每天第一次变更后生成完整数据库备份，默认保留30天。</p>
-              <button class="secondary-button" id="backup-button" type="button">
-                立即确认备份
-              </button>
-            </article>
-            <article class="browser-integration-card">
-              <span>04</span>
-              <h3>浏览器快速收藏</h3>
-              <p>安装本地 Chrome/Edge 扩展后，可收藏当前网页、链接或选中文字。</p>
-              <button class="secondary-button" id="browser-pairing-button" type="button">
-                生成配对码
-              </button>
-              <div class="browser-pairing-code" id="browser-pairing-code" hidden>
-                <strong>000000</strong>
-                <small>十分钟内在扩展中输入，仅可使用一次。</small>
+          <div class="storage-overview" aria-label="存储概况">
+            <div><span>最近数据库快照</span><strong id="storage-snapshot-overview">读取中…</strong><small>仅数据库，不含附件</small></div>
+            <div><span>完整备份</span><strong id="storage-full-overview">读取中…</strong><small id="storage-full-volume">数据库与本地资料</small></div>
+            <div><span>后台任务</span><strong id="storage-jobs-overview">读取中…</strong><small id="storage-jobs-detail">正在读取最近任务</small></div>
+            <div><span>文件维护</span><strong id="storage-cleanup-overview">读取中…</strong><small>仅处理已删除资料的残留文件</small></div>
+          </div>
+          <p class="storage-error" id="storage-last-error" role="alert" hidden></p>
+          <div class="storage-dashboard">
+            <section class="storage-panel storage-backups" aria-labelledby="storage-backups-heading">
+              <header class="storage-panel-heading"><div><h2 id="storage-backups-heading">备份与恢复准备</h2><p>日常快照与完整副本，各司其职。</p></div><span class="storage-section-label">BACKUP</span></header>
+              <div class="storage-backup-options">
+                <section class="storage-backup-option" aria-labelledby="storage-snapshot-heading">
+                  <div class="storage-option-title"><h3 id="storage-snapshot-heading">数据库快照</h3><span class="storage-state" id="storage-snapshot-state">读取中</span></div>
+                  <p class="storage-description">保存正文、目录、笔记和阅读记录，不包含原始附件及图片。</p>
+                  <dl class="storage-facts"><div><dt>最近创建</dt><dd id="storage-snapshot-time">—</dd></div><div><dt>快照大小</dt><dd id="storage-snapshot-size">—</dd></div></dl>
+                  <p class="storage-operation-status" id="storage-backup-status" role="status"></p>
+                  <button class="secondary-button" id="backup-button" type="button">创建数据库快照</button>
+                </section>
+                <section class="storage-backup-option is-recommended" aria-labelledby="storage-full-heading">
+                  <div class="storage-option-title"><h3 id="storage-full-heading">完整备份</h3><span class="storage-state" id="storage-full-state">读取中</span></div>
+                  <p class="storage-description">包含数据库、原始附件、论文和正文图片。迁移或卸载前使用。</p>
+                  <dl class="storage-facts"><div><dt>最近校验</dt><dd id="storage-full-time">—</dd></div><div><dt>备份内容</dt><dd id="storage-full-size">—</dd></div></dl>
+                  <p class="storage-operation-status" id="storage-full-backup-status" role="status"></p>
+                  <button class="primary-button" id="full-backup-button" type="button">创建完整备份并校验</button>
+                </section>
               </div>
-              <div class="browser-client-list" id="browser-client-list"></div>
-            </article>
-            <article class="import-job-card">
-              <span>05</span>
-              <h3>后台导入任务</h3>
-              <p>浏览器收藏、OCR、视频字幕和图文 PDF 共用此任务中心；失败任务可在这里重试。</p>
-              <button class="secondary-button" id="refresh-import-jobs" type="button">
-                刷新任务状态
-              </button>
+              <aside class="storage-safety-note"><strong>请保留一份异盘副本</strong><p>同一块硬盘上的备份不能防止磁盘损坏。请将完整备份复制到外接硬盘或 NAS；不要直接同步正在使用的数据库。</p></aside>
+              <details class="storage-backup-paths"><summary>查看最近备份的完整路径</summary><dl class="storage-path-list"><div><dt>数据库快照</dt><dd><code id="storage-snapshot-path">读取中…</code></dd></div><div><dt>完整备份</dt><dd><code id="storage-full-path">读取中…</code></dd></div></dl></details>
+            </section>
+            <section class="storage-panel storage-locations" aria-labelledby="storage-locations-heading">
+              <header class="storage-panel-heading"><div><h2 id="storage-locations-heading">资料位置</h2><p>SQLite 与原始附件分别保存。</p></div><span class="storage-section-label">LOCAL</span></header>
+              <dl class="storage-path-list"><div><dt>资料根目录</dt><dd><code id="storage-data-path">正在读取实际路径…</code></dd></div><div><dt>主数据库</dt><dd><code id="storage-database-path">读取中…</code></dd></div><div><dt>原始附件</dt><dd><code id="storage-attachment-path">读取中…</code></dd></div><div><dt>备份目录</dt><dd><code id="storage-backup-path">读取中…</code></dd></div></dl>
+              <p class="storage-footnote">路径可选中复制。迁移前先创建完整备份，不要直接移动正在使用的数据库文件。</p>
+            </section>
+            <section class="storage-panel storage-jobs" aria-labelledby="storage-jobs-heading">
+              <header class="storage-panel-heading"><div><h2 id="storage-jobs-heading">后台导入任务</h2><p>查看浏览器收藏、OCR、视频和论文导入进度。</p></div><button class="secondary-button" id="refresh-import-jobs" type="button">刷新状态</button></header>
               <div class="import-job-toolbar">
                 <label>
                   显示
@@ -681,7 +706,20 @@
               </div>
               <small class="import-job-summary" id="import-job-summary"></small>
               <div class="import-job-list" id="import-job-list"></div>
-            </article>
+            </section>
+            <div class="storage-side-tools">
+              <section class="storage-panel storage-browser" aria-labelledby="storage-browser-heading">
+                <header class="storage-panel-heading"><div><h2 id="storage-browser-heading">浏览器快速收藏</h2><p>将网页、链接和选中文字送入知识库。</p></div><span class="storage-state" id="storage-browser-state">读取中</span></header>
+                <div class="browser-client-list" id="browser-client-list"></div>
+                <details class="storage-pairing-details"><summary>连接新的 Chrome / Edge 扩展</summary><p>安装知序本地扩展后，生成一次性配对码并在扩展中输入。</p><button class="secondary-button" id="browser-pairing-button" type="button">生成配对码</button><div class="browser-pairing-code" id="browser-pairing-code" hidden><strong>000000</strong><small>十分钟内在扩展中输入，仅可使用一次。</small></div></details>
+              </section>
+              <section class="storage-panel storage-maintenance" aria-labelledby="storage-maintenance-heading">
+                <header class="storage-panel-heading"><div><h2 id="storage-maintenance-heading">文件维护</h2><p>处理删除资料后尚未清理的本地文件。</p></div><span class="storage-state" id="storage-cleanup-state">读取中</span></header>
+                <p id="storage-cleanup-status" role="status"></p>
+                <button class="secondary-button" id="storage-cleanup-retry" type="button" disabled>重试待清理文件</button>
+                <p class="storage-footnote">网页图片可能被多篇内容共用，目前不会自动删除。</p>
+              </section>
+            </div>
           </div>
         </section>
 

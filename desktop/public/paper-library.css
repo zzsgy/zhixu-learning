@@ -1,0 +1,96 @@
+#papers-view .paper-library-heading { margin:0 0 22px; padding:22px 0 0; gap:16px; }
+#papers-view .paper-library-summary > span { color:var(--ink); font:14px/1.5 var(--sans); letter-spacing:0; }
+#papers-view .paper-library-summary strong { font-size:22px; font-weight:600; }
+#papers-view .paper-library-summary p { margin:4px 0 0; color:var(--ink-soft); font-size:12px; }
+#papers-view :is(.secondary-button,.primary-button,.danger-button,.view-mode-button) { min-height:34px; border-radius:6px; padding:7px 12px; font:12px/1.4 var(--sans); }
+#papers-view button:disabled { opacity:.4; cursor:default; }
+#papers-view :is(button,input,select,summary):focus-visible { outline:2px solid var(--cyan-strong); outline-offset:3px; }
+.paper-workspace { display:grid; grid-template-columns:238px minmax(0,1fr); gap:24px; align-items:start; }
+.paper-directory-panel { position:sticky; top:20px; border:1px solid var(--line); border-radius:14px; background:var(--card-bg); padding:16px 10px; }
+#papers-view .paper-directory-panel header { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0 6px 14px; }
+.paper-directory-panel h3 { margin:0; font-size:15px; }
+.paper-directory-panel header button { padding:7px 9px; font-size:11px; }
+.paper-directory-panel input[type="search"], .paper-search-toolbar input, .paper-search-toolbar select, .paper-organization-dialog input, .paper-organization-dialog select, #paper-import-folder { width:100%; min-width:0; border:1px solid var(--line-dark); border-radius:7px; background:var(--paper-raised); color:var(--ink); padding:10px; font:inherit; }
+.paper-folder-search-label { display:grid; gap:6px; padding:0 6px 12px; font-size:11px; color:var(--ink-soft); }
+#paper-folder-tree { max-height:60vh; overflow:auto; }
+.paper-folder-row { display:flex; min-width:0; padding-left:calc(var(--folder-depth)*13px); gap:2px; margin:3px 0; }
+.paper-folder-toggle,.paper-folder-entry { border:0; background:transparent; color:var(--ink); cursor:pointer; }
+.paper-folder-toggle,.paper-folder-spacer { flex:0 0 18px; padding:0; }
+.paper-folder-entry { display:flex; justify-content:space-between; align-items:center; min-width:0; flex:1; gap:8px; border-radius:7px; padding:10px 8px; text-align:left; font:12px/1.4 var(--sans); }
+.paper-folder-entry span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.paper-folder-entry small { color:var(--ink-soft); font-family:var(--mono); }
+.paper-folder-entry:hover { background:var(--quote-bg); }
+.paper-folder-entry.is-active { background:color-mix(in srgb,var(--cyan-strong) 14%,var(--paper)); color:var(--cyan-strong); font-weight:700; }
+.paper-directory-hint { margin:12px 6px 0; color:var(--ink-soft); font-size:11px; line-height:1.75; }
+.paper-main { min-width:0; }
+.paper-main .folder-breadcrumbs { margin:0 0 12px; flex-wrap:wrap; }
+.paper-main .folder-breadcrumbs button { overflow-wrap:anywhere; border:0; background:transparent; padding:4px 0; color:var(--cyan-strong); }
+.paper-folder-actions { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+.paper-folder-actions:empty { display:none; }
+.paper-search-toolbar { display:grid; grid-template-columns:minmax(180px,1fr) 100px 120px; gap:12px; margin-bottom:16px; }
+.paper-search-toolbar label { display:grid; gap:6px; color:var(--ink-soft); font-size:11px; }
+.paper-main .paper-source-tabs { display:inline-flex; flex-wrap:wrap; margin:0 14px 12px 0; }
+.paper-main .paper-quality-filter { display:inline-flex; align-items:center; gap:7px; font-size:11px; }
+#papers-view .paper-quality-filter select { max-width:100%; border:1px solid var(--line); border-radius:6px; background:var(--paper-raised); color:var(--ink); padding:8px; font:12px/1.4 var(--sans); }
+#papers-view .paper-source-tabs { gap:3px; padding:3px; border:1px solid var(--line); border-radius:7px; background:var(--card-bg); }
+#papers-view .paper-source-tabs button { border:0; border-radius:4px; padding:7px 12px; font:12px/1.4 var(--sans); letter-spacing:0; }
+.paper-batch-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin:0; padding:9px 0; border-block:1px solid var(--line); font-size:12px; color:var(--ink-soft); }
+.paper-batch-toolbar label { display:flex; align-items:center; gap:6px; }
+.paper-batch-toolbar button { padding:7px 10px; font-size:11px; }
+.paper-batch-toolbar input,.paper-card-select input { accent-color:var(--cyan-strong); width:16px; height:16px; margin:0; cursor:pointer; }
+#paper-descendants-label { margin-left:auto; }
+.paper-result-status { color:var(--ink-soft); font-size:11px; margin:13px 0; }
+/* The directory workspace owns the complete card layout. Do not inherit the
+   older three-column list or its centered cross-axis alignment. */
+#papers-view .paper-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; align-items:stretch; }
+#papers-view .paper-grid.is-list { grid-template-columns:minmax(0,1fr); gap:10px; }
+#papers-view .paper-grid .paper-card { position:relative; display:grid; grid-template-columns:18px minmax(0,1fr); align-items:stretch; gap:12px; min-width:0; min-height:0; border:1px solid var(--line); border-radius:10px; padding:18px; text-align:left; background:var(--paper-raised); }
+#papers-view .paper-card:hover { border-color:var(--line-dark); }
+#papers-view .paper-card.is-selected { border-color:var(--cyan-strong); box-shadow:0 0 0 1px var(--cyan-strong); background:color-mix(in srgb,var(--quote-bg) 22%,var(--paper-raised)); }
+#papers-view .paper-card:has(.paper-card-more[open]) { z-index:3; }
+.paper-card-select { display:flex; align-self:start; align-items:center; justify-content:center; min-height:24px; cursor:pointer; }
+#papers-view .paper-grid .paper-card-content { display:flex; flex-direction:column; align-items:stretch; min-width:0; gap:0; text-align:left; }
+#papers-view .paper-grid .paper-card-meta { display:flex; flex:0 0 auto; flex-direction:row; flex-wrap:wrap; align-items:center; justify-content:flex-start; gap:6px 10px; margin:0 0 8px; font:11px/1.5 var(--sans); color:var(--ink-soft); }
+#papers-view .paper-grid .paper-source-label { width:auto; margin:0; padding:3px 7px; border-radius:4px; font:11px/1.5 var(--sans); color:var(--cyan-strong); }
+#papers-view .paper-location-link { min-width:0; max-width:48%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; border:0; border-left:1px solid var(--line-dark); background:transparent; color:var(--ink-soft); padding:0 0 0 10px; font:inherit; text-align:left; cursor:pointer; }
+#papers-view .paper-location-link:hover { color:var(--cyan-strong); text-decoration:underline; }
+.paper-card-reading-status { margin-left:auto; white-space:nowrap; color:var(--ink-soft); }
+.paper-card-reading-status[data-status="reading"] { color:var(--cyan-strong); }
+#papers-view .paper-grid .paper-card h3 { display:-webkit-box; min-width:0; margin:0 0 5px; overflow:hidden; font:600 18px/1.5 var(--sans); color:var(--ink); white-space:normal; overflow-wrap:anywhere; -webkit-box-orient:vertical; -webkit-line-clamp:3; }
+#papers-view .paper-grid.is-list .paper-card h3 { -webkit-line-clamp:2; }
+#papers-view .paper-grid .paper-original-title { display:-webkit-box; min-width:0; margin:0 0 6px!important; overflow:hidden; font:12px/1.5 var(--sans)!important; font-style:normal; white-space:normal; overflow-wrap:anywhere; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
+#papers-view .paper-grid .paper-authors { min-width:0; margin:0 0 7px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:12px/1.5 var(--sans); color:var(--ink-soft); }
+#papers-view .paper-grid .paper-abstract { min-width:0; margin:0; font:12px/1.75 var(--sans); color:var(--ink-soft); overflow-wrap:anywhere; -webkit-line-clamp:3; }
+#papers-view .paper-grid.is-list .paper-abstract { -webkit-line-clamp:2; }
+#papers-view .paper-curator-note { display:none; }
+#papers-view .paper-grid .paper-card footer { display:flex; flex:0 0 auto; align-items:center; flex-wrap:wrap; justify-content:space-between; gap:10px 16px; margin:12px 0 0; border:0; padding:0; }
+#papers-view .paper-grid:not(.is-list) .paper-card footer { margin-top:auto; padding-top:14px; }
+.paper-card-states { display:flex; flex-wrap:wrap; align-items:center; min-width:0; gap:4px 10px; }
+#papers-view .paper-grid .paper-translation-state { display:inline; width:auto; max-width:60ch; margin:0; padding:0; border:0; font:11px/1.6 var(--sans); letter-spacing:0; white-space:normal; overflow-wrap:anywhere; }
+#papers-view .paper-translation-state.is-translated::before { content:"✓ "; }
+#papers-view .paper-translation-state.is-warning { color:#956f21; }
+:root[data-theme="dark"] #papers-view .paper-translation-state.is-warning { color:#dbc282; }
+.paper-card-actions { display:flex; flex:0 0 auto; flex-wrap:wrap; align-items:center; gap:7px; margin-left:auto; }
+#papers-view .paper-card-actions > .secondary-button { border-color:var(--line); }
+.paper-card-more { position:relative; }
+#papers-view .paper-card-more-trigger { display:flex; align-items:center; gap:7px; list-style:none; min-height:34px; padding:7px 10px; border:1px solid transparent; border-radius:6px; font:12px/1.4 var(--sans); cursor:pointer; color:var(--ink-soft); }
+.paper-card-more-trigger::-webkit-details-marker { display:none; }
+.paper-card-more-trigger::after { content:"⌄"; }
+#papers-view .paper-card-more-trigger:hover, #papers-view .paper-card-more[open] summary { background:var(--quote-bg); color:var(--ink); }
+.paper-card-more-panel { position:absolute; top:calc(100% + 5px); right:0; z-index:5; display:grid; width:170px; padding:5px; border:1px solid var(--line-dark); border-radius:8px; background:var(--paper-raised); box-shadow:0 6px 24px color-mix(in srgb,var(--ink) 12%,transparent); }
+#papers-view .paper-grid .paper-card-more-panel :is(a,button) { display:flex; align-items:center; justify-content:flex-start; width:100%; min-height:34px; padding:8px 10px; border:0; border-radius:4px; font:12px/1.4 var(--sans); text-decoration:none; }
+#papers-view .paper-card-more-panel :is(a,button):hover { background:var(--quote-bg); }
+#papers-view .paper-card-more-panel .danger-button { margin-top:4px; border-top:1px solid var(--line); border-radius:0 0 4px 4px; color:var(--red); }
+.paper-pagination { display:flex; justify-content:center; align-items:center; gap:16px; margin:24px 0; font-size:12px; color:var(--ink-soft); }
+.paper-organization-dialog { width:min(520px,calc(100vw - 36px)); padding:26px; border:1px solid var(--line-dark); border-radius:14px; background:var(--paper-raised); color:var(--ink); }
+.paper-organization-dialog::backdrop { background:rgba(10,25,20,.38); }
+.paper-organization-dialog h2 { margin:0 0 20px; font-size:21px; }
+.paper-organization-dialog label { display:grid; gap:7px; margin:14px 0; font-size:13px; }
+.paper-organization-dialog p { font-size:13px; line-height:1.7; overflow-wrap:anywhere; }
+.paper-dialog-error { color:var(--red); }
+.paper-dialog-footer { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
+.paper-organization-dialog small { color:var(--ink-soft); }
+.paper-workspace [hidden] { display:none!important; }
+@media(max-width:1400px) { .paper-workspace { grid-template-columns:205px minmax(0,1fr); gap:18px; } #papers-view .paper-grid { grid-template-columns:minmax(0,1fr); } }
+@media(max-width:1000px) { .paper-workspace { grid-template-columns:minmax(0,1fr); } .paper-directory-panel { position:static; } #paper-folder-tree { max-height:180px; } .paper-directory-hint { margin-top:8px; } }
+@media(max-width:760px) { #papers-view .paper-library-heading { align-items:stretch; } #papers-view .paper-library-actions { flex-wrap:wrap; } .paper-search-toolbar { grid-template-columns:minmax(0,1fr) minmax(0,1fr); } .paper-search-toolbar label:first-child { grid-column:1/-1; } #papers-view .paper-grid .paper-card { padding:14px 12px; gap:8px; } #papers-view .paper-grid .paper-card h3 { font-size:16px; } #papers-view .paper-location-link { max-width:65%; } #papers-view .paper-grid .paper-card footer { align-items:flex-start; flex-direction:column; } .paper-card-actions { margin-left:0; } }

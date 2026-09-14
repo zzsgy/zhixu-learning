@@ -12,11 +12,13 @@ import { parseHTML } from "linkedom";
 import { articleTranslationWorkDirectory } from "./config.mjs";
 import {
   claimNextPendingArticleTranslation,
+  deferArticleTranslation,
   markArticleTranslationFailed,
   resetInterruptedArticleTranslations,
   updateArticleTranslation,
   updateArticleTranslationProgress,
 } from "./database.mjs";
+import { deferTranslationAvailability, getTranslationRetryWait } from "./codex-translation-retry.mjs";
 
 /** processTimeoutMilliseconds 是单个文章分段允许使用 Codex 的最长时间。 */
 const processTimeoutMilliseconds = 20 * 60 * 1000;
@@ -58,7 +60,10 @@ function setWorkerState(patch) {
  * @returns {Record<string, unknown>} 工作器状态。
  */
 export function getCodexArticleTranslationWorkerStatus() {
-  return { ...workerState };
+  const waiting = getTranslationRetryWait();
+  return waiting && !activeWorkerPromise && workerEnabled
+    ? { ...workerState, status: "waiting", message: waiting.reason, retryAfter: waiting.retryAfter }
+    : { ...workerState, retryAfter: waiting?.retryAfter || 0 };
 }
 
 /**
@@ -713,6 +718,12 @@ async function translateArticle(article) {
   /** outputs 按原文顺序收集各段结果。 */
   const outputs = [];
   for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
+    const waiting = getTranslationRetryWait();
+    if (waiting) {
+      const error = new Error(waiting.reason);
+      error.code = "CODEX_SHARED_WAIT";
+      throw error;
+    }
     /** progressBefore 是开始当前分段前的真实已完成百分比。 */
     const progressBefore = 8 + Math.round((sectionIndex / sections.length) * 82);
     updateArticleTranslationProgress(String(article.id), {
@@ -787,6 +798,11 @@ async function drainTranslationQueue() {
     return;
   }
   while (true) {
+    const waiting = getTranslationRetryWait();
+    if (waiting) {
+      setWorkerState({ status: "waiting", message: waiting.reason });
+      return;
+    }
     /** article 是原子领取的下一篇英文文章。 */
     const article = claimNextPendingArticleTranslation();
     if (!article) {
@@ -806,6 +822,14 @@ async function drainTranslationQueue() {
     } catch (error) {
       /** message 是写入文章状态和页面的安全错误。 */
       const message = error instanceof Error ? error.message : "Codex 文章翻译失败。";
+      const retryState = error?.code === "CODEX_SHARED_WAIT"
+        ? getTranslationRetryWait()
+        : deferTranslationAvailability(error);
+      if (retryState) {
+        deferArticleTranslation(String(article.id), retryState.reason);
+        setWorkerState({ status: "waiting", message: retryState.reason, currentArticleId: String(article.id), currentArticleTitle: String(article.title), stage: "queued" });
+        return;
+      }
       markArticleTranslationFailed(String(article.id), message);
       console.error(`Codex 文章翻译失败：《${article.title}》：${message}`);
       setWorkerState({
@@ -827,6 +851,11 @@ async function drainTranslationQueue() {
  */
 export function triggerCodexArticleTranslationWorker() {
   if (activeWorkerPromise) return activeWorkerPromise;
+  const waiting = workerEnabled ? getTranslationRetryWait() : null;
+  if (waiting) {
+    setWorkerState({ status: "waiting", message: waiting.reason });
+    return Promise.resolve();
+  }
   activeWorkerPromise = drainTranslationQueue().finally(() => {
     activeWorkerPromise = null;
   });

@@ -39,7 +39,7 @@ test("中文论文 HTML 通过 Chrome 生成并复用 PDF 缓存", { skip: !fs.e
     assert.match(exportHtml, /中文 PDF 测试/);
     assert.doesNotMatch(exportHtml, /alert\(1\)/);
     const generated = await (await fetch(`${baseUrl}/api/papers/paper_pdf_fixture/chinese-pdf`, { method: "POST" })).json();
-    assert.equal(generated.cached, false);
+    assert.equal(generated.cached, false, JSON.stringify(generated));
     const pdfResponse = await fetch(`${baseUrl}${generated.url}`);
     const pdf = Buffer.from(await pdfResponse.arrayBuffer());
     assert.equal(pdfResponse.status, 200);

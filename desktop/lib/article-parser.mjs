@@ -172,19 +172,32 @@ export function detectArticleLanguage(text) {
  * @param {string} resourceLabel 用户提示中的资源名称。
  * @returns {Promise<Response>} 外部资源响应。
  */
-export async function fetchExternalResource(url, options, resourceLabel) {
+export async function fetchExternalResource(url, options = {}, resourceLabel, dependencies = {}) {
+  const { timeoutMs = fetchTimeoutMilliseconds, signal: callerSignal, ...requestOptions } = options;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError("外部请求超时必须是正数毫秒。");
+  const fetchResource = dependencies.fetch ?? undiciFetch;
+  const waitForRetry = dependencies.wait ?? wait;
   /** lastError 保存最后一次网络失败，用于生成准确的最终提示。 */
   let lastError;
   for (let attempt = 1; attempt <= fetchAttemptLimit; attempt += 1) {
+    callerSignal?.throwIfAborted();
+    // 每轮都有新的超时信号；调用方 signal 只负责取消整个操作。
+    const attemptSignal = AbortSignal.timeout(timeoutMs);
+    const signal = callerSignal ? AbortSignal.any([callerSignal, attemptSignal]) : attemptSignal;
     try {
-      return await undiciFetch(url, {
-        ...options,
+      return await fetchResource(url, {
+        ...requestOptions,
+        signal,
         dispatcher: externalRequestDispatcher,
       });
     } catch (error) {
+      if (callerSignal?.aborted) throw callerSignal.reason ?? error;
       lastError = error;
+      const retryable = attemptSignal.aborted
+        || ["ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_SOCKET"].includes(readNetworkErrorCode(error));
+      if (!retryable) break;
       if (attempt < fetchAttemptLimit) {
-        await wait(retryDelayMilliseconds[attempt - 1] ?? 750);
+        await waitForRetry(retryDelayMilliseconds[attempt - 1] ?? 750);
       }
     }
   }
@@ -272,10 +285,11 @@ function isPrivateAddress(address) {
   }
   if (net.isIPv6(address)) {
     /** normalizedAddress 是移除方括号并转为小写的 IPv6。 */
-    const normalizedAddress = address.toLowerCase().replace(/^\[|\]$/g, "");
+    const normalizedAddress = new URL(`http://[${address}]/`).hostname.toLowerCase().replace(/^\[|\]$/g, "");
     return (
       normalizedAddress === "::" ||
       normalizedAddress === "::1" ||
+      normalizedAddress.startsWith("::ffff:") ||
       normalizedAddress.startsWith("fc") ||
       normalizedAddress.startsWith("fd") ||
       /^fe[89ab]/.test(normalizedAddress)
@@ -323,7 +337,7 @@ export async function lookupPublicAddresses(hostname, lookup = dns.lookup) {
  * @param {string} input 用户输入的文章链接。
  * @returns {Promise<URL>} 已验证的公开 HTTP(S) 地址。
  */
-async function validatePublicUrl(input) {
+export async function validatePublicUrl(input, lookup = dns.lookup) {
   /** url 是标准 URL 解析器得到的绝对地址。 */
   const url = new URL(input.trim());
   if (url.protocol !== "https:" && url.protocol !== "http:") {
@@ -346,11 +360,47 @@ async function validatePublicUrl(input) {
   /** addresses 是 DNS 返回的全部目标地址。 */
   const addresses = net.isIP(hostname)
     ? [{ address: hostname }]
-    : await lookupPublicAddresses(hostname);
+    : await lookupPublicAddresses(hostname, lookup);
   if (addresses.length === 0 || addresses.some((item) => isPrivateAddress(item.address))) {
     throw new Error("不能读取本机、局域网或保留网络地址。");
   }
   return url;
+}
+
+/** PDF/结构化论文也使用逐跳公网校验；返回 Response 时正文超时仍有效。 */
+export async function fetchPublicResource(inputUrl, options = {}, resourceLabel = "公开资源", dependencies = {}) {
+  const validateUrl = (url) => validatePublicUrl(String(url), dependencies.lookup ?? dns.lookup);
+  const fetchResource = dependencies.fetchResource ?? fetchExternalResource;
+  let currentUrl = await validateUrl(inputUrl);
+  for (let redirectCount = 0; redirectCount <= maximumRedirects; redirectCount += 1) {
+    options.signal?.throwIfAborted();
+    const response = await fetchResource(currentUrl, { ...options, redirect: "manual" }, resourceLabel);
+    const location = response.headers.get("location");
+    if (response.status >= 300 && response.status < 400 && location) {
+      if (response.body?.cancel) await response.body.cancel().catch(() => {});
+      if (redirectCount === maximumRedirects) throw new Error(`${resourceLabel}重定向次数过多。`);
+      currentUrl = await validateUrl(new URL(location, currentUrl).href);
+      continue;
+    }
+    return { response, finalUrl: currentUrl };
+  }
+  throw new Error(`${resourceLabel}重定向次数过多。`);
+}
+
+/** 按实际解压后字节数限制正文，未知 Content-Length 也不会无限缓冲。 */
+export async function readLimitedResponseBytes(response, maximumBytes, resourceLabel) {
+  if (Number(response.headers.get("content-length") || 0) > maximumBytes) {
+    if (response.body?.cancel) await response.body.cancel().catch(() => {});
+    throw new Error(`${resourceLabel}超过允许容量。`);
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of response.body ?? []) {
+    size += chunk.byteLength;
+    if (size > maximumBytes) throw new Error(`${resourceLabel}超过允许容量。`);
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks, size);
 }
 
 /**
@@ -389,7 +439,7 @@ export async function fetchPublicSource(inputUrl) {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36 ZhixuReader/1.0",
       },
-      signal: AbortSignal.timeout(fetchTimeoutMilliseconds),
+      timeoutMs: fetchTimeoutMilliseconds,
     }, "文章网页");
     /** redirectLocation 是服务器声明的下一跳地址。 */
     const redirectLocation = response.headers.get("location");
@@ -474,7 +524,7 @@ export async function fetchPublicImage(inputUrl) {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36 ZhixuReader/1.0",
       },
-      signal: AbortSignal.timeout(fetchTimeoutMilliseconds),
+      timeoutMs: fetchTimeoutMilliseconds,
     }, "文章图片");
     /** redirectLocation 是图片服务器声明的下一跳。 */
     const redirectLocation = response.headers.get("location");

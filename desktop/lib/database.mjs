@@ -8,8 +8,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parseHTML } from "linkedom";
+import { searchKnowledgePage } from "./knowledge-search.mjs";
+import { listLibraryMetadataPage, listTargetLocations } from "./library-pagination.mjs";
+import { initializeReadingSessionDays, recordReadingDayIncrement } from "./reading-session-days.mjs";
+import { createDatabaseSnapshot, createFullBackup, getStorageStatus } from "./backup-service.mjs";
+import { getPaperIdentityKey, parseArxivIdentity } from "./paper-identity.mjs";
+import { createPaperFolderStore } from "./paper-folders.mjs";
 import {
   backupDirectory,
+  dataDirectory,
   databasePath,
   ensureLocalDirectories,
   serverConfig,
@@ -476,7 +483,23 @@ database.exec(`
 
   CREATE INDEX IF NOT EXISTS browser_clients_active_idx
     ON browser_clients(revoked_at, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS pending_file_deletions (
+    id TEXT PRIMARY KEY,
+    asset_kind TEXT NOT NULL CHECK(asset_kind IN ('attachment', 'paper_pdf', 'paper_chinese_pdf', 'paper_chinese_hash')),
+    file_name TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(asset_kind, file_name)
+  );
 `);
+
+// 旧会话只能按原最后活动日回填；新会话随后按每日实际增量累计。
+initializeReadingSessionDays(database);
 
 /**
  * 为已经存在的 SQLite 表补充新增字段。
@@ -577,6 +600,7 @@ for (const tableName of ["papers", "paper_candidates"]) {
 
 /** paperLibraryColumns 是统一论文库新增的来源、视频、全文和翻译字段。 */
 const paperLibraryColumns = Object.freeze([
+  ["identity_key", "TEXT NOT NULL DEFAULT ''"],
   ["source_type", "TEXT NOT NULL DEFAULT 'weekly'"],
   ["source_label", "TEXT NOT NULL DEFAULT '每周精选'"],
   ["curator_note", "TEXT NOT NULL DEFAULT ''"],
@@ -599,6 +623,12 @@ const paperLibraryColumns = Object.freeze([
 ]);
 for (const [columnName, columnDefinition] of paperLibraryColumns) {
   ensureTableColumn("papers", columnName, columnDefinition);
+}
+// 非唯一索引保留既有重复记录及其笔记，只让后续导入复用稳定身份。
+database.exec("CREATE INDEX IF NOT EXISTS papers_identity_idx ON papers(identity_key);");
+for (const row of database.prepare("SELECT id, external_id, source_url, pdf_url FROM papers WHERE identity_key = ''").all()) {
+  const key = getPaperIdentityKey({ externalId: row.external_id, sourceUrl: row.source_url, pdfUrl: row.pdf_url });
+  if (key) database.prepare("UPDATE papers SET identity_key = ? WHERE id = ?").run(key, row.id);
 }
 
 /** defaultFolderNames 是知识库按使用场景组织的一级入口。 */
@@ -945,8 +975,8 @@ export function createImportJob(input) {
     INSERT INTO import_jobs(
       id, job_type, source_label, source_url, status, stage,
       progress_percent, payload_json, result_json, error_message,
-      attempt_count, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, 'queued', 'queued', 0, ?, '{}', '', 0, ?, ?)
+      attempt_count, created_at, updated_at, target_type, target_id
+    ) VALUES (?, ?, ?, ?, 'queued', 'queued', 0, ?, '{}', '', 0, ?, ?, ?, ?)
   `).run(
     jobId,
     jobType,
@@ -955,6 +985,8 @@ export function createImportJob(input) {
     JSON.stringify(input.payload && typeof input.payload === "object" ? input.payload : {}),
     now,
     now,
+    input.targetType || null,
+    input.targetId || null,
   );
   return getImportJob(jobId);
 }
@@ -1720,6 +1752,34 @@ export function markArticleTranslationFailed(articleId, message) {
   return getArticleById(articleId);
 }
 
+/** 外部服务暂不可用时保留文章的队列位置和已完成分段。 */
+export function deferArticleTranslation(articleId, message) {
+  database.prepare(`
+    UPDATE articles SET translation_status = 'pending', translation_stage = 'queued',
+      translation_error = ?, updated_at = ?
+    WHERE id = ? AND translation_status = 'processing'
+  `).run(String(message || "翻译暂缓，稍后自动继续。").slice(0, 1000), new Date().toISOString(), articleId);
+  return getArticleById(articleId);
+}
+
+/** 两类翻译工作器共享持久化的账号可用性等待状态。 */
+export function getCodexTranslationRetryState() {
+  const row = database.prepare("SELECT value FROM settings WHERE key = ?")
+    .get("codex.translation.retry");
+  try {
+    const value = JSON.parse(row?.value || "{}");
+    return { retryAfter: Math.max(0, Number(value.retryAfter) || 0), reason: String(value.reason || "") };
+  } catch { return { retryAfter: 0, reason: "" }; }
+}
+
+export function setCodexTranslationRetryState({ retryAfter = 0, reason = "" } = {}) {
+  const state = { retryAfter: Math.max(0, Number(retryAfter) || 0), reason: String(reason).slice(0, 1000) };
+  database.prepare(`INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`)
+    .run("codex.translation.retry", JSON.stringify(state), new Date().toISOString());
+  return state;
+}
+
 /**
  * 服务启动时把异常中断的文章恢复到队列，磁盘分段结果将被继续使用。
  *
@@ -1991,34 +2051,38 @@ export function insertDocument(document) {
       document.summary,
       document.extractedText,
     );
+    // 目录和索引必须与主记录一起提交，避免归属失败留下半保存资料。
+    const importedFolderNames = Array.isArray(document.folderPath) ? document.folderPath : [];
+    const targetFolderId = String(document.targetFolderId || "").trim();
+    if (targetFolderId) {
+      const selectedFolderPath = importedFolderNames.length > 0
+        ? ensureFolderPath(importedFolderNames, [], targetFolderId)
+        : [];
+      assignContentToFolder("document", document.id, selectedFolderPath.at(-1)?.id || targetFolderId);
+    } else {
+      const initialFolderNames = importedFolderNames.length > 0
+        ? [automaticFolderRootName, ...importedFolderNames]
+        : [automaticFolderRootName, document.category || "其它"];
+      const initialFolderPath = ensureFolderPath(initialFolderNames);
+      assignContentToFolder("document", document.id, initialFolderPath.at(-1).id);
+    }
+    const savedDocument = getDocumentById(document.id);
     database.exec("COMMIT;");
+    return savedDocument;
   } catch (error) {
     database.exec("ROLLBACK;");
     throw error;
   }
-  /** importedFolderNames 是文件夹导入携带的本机相对目录。 */
-  const importedFolderNames = Array.isArray(document.folderPath) ? document.folderPath : [];
-  /** targetFolderId 是用户上传前明确选择的知识库目录。 */
-  const targetFolderId = String(document.targetFolderId || "").trim();
-  if (targetFolderId) {
-    /** selectedFolderPath 在指定目录下继续保留本机文件夹层级。 */
-    const selectedFolderPath = importedFolderNames.length > 0
-      ? ensureFolderPath(importedFolderNames, [], targetFolderId)
-      : [];
-    assignContentToFolder(
-      "document",
-      document.id,
-      selectedFolderPath.at(-1)?.id || targetFolderId,
-    );
-  } else {
-    /** initialFolderNames 未指定目标时保留原结构，但统一置于待整理入口。 */
-    const initialFolderNames = importedFolderNames.length > 0
-      ? [automaticFolderRootName, ...importedFolderNames]
-      : [automaticFolderRootName, document.category || "其它"];
-    const initialFolderPath = ensureFolderPath(initialFolderNames);
-    assignContentToFolder("document", document.id, initialFolderPath.at(-1).id);
-  }
-  return getDocumentById(document.id);
+}
+
+/** 不读取长正文的文章分页；原 listArticles 数组接口保持兼容。 */
+export function listArticlesPage(filters = {}) {
+  const { rows, ...pagination } = listLibraryMetadataPage(database, "article", filters);
+  const articles = rows.map((row) => {
+    const { contentHtml, contentText, translatedHtml, translatedText, ...item } = mapArticleRow(row);
+    return { ...item, tags: row.tags };
+  });
+  return { articles, ...pagination };
 }
 
 /**
@@ -2488,6 +2552,7 @@ export function updateDocumentCategory(documentId, category) {
 function mapPaperRow(row) {
   return {
     id: row.id,
+    identityKey: row.identity_key || "",
     externalId: row.external_id,
     title: row.title,
     abstract: row.abstract,
@@ -2556,6 +2621,13 @@ function mapPaperCandidateRow(row) {
  *
  * @returns {Record<string, unknown>[]} 按加入时间倒序排列的论文。
  */
+export const paperFolders = createPaperFolderStore(database);
+
+export function getPaperLibraryPage(options, duplicateIds) {
+  const { rows, ...page } = paperFolders.page(options, duplicateIds);
+  return { ...page, papers: rows.map(row => ({ ...mapPaperRow(row), folderId: row.folder_id || null, readingStatus: row.reading_status })) };
+}
+
 export function listPapers(sourceType = "") {
   /** normalizedSourceType 是可选的论文来源过滤值。 */
   const normalizedSourceType = String(sourceType || "").trim();
@@ -2592,7 +2664,7 @@ export function getPaperById(paperId) {
  */
 export function upsertImportedPaper(paper) {
   /** externalId 是文件摘要或规范化网页地址组成的稳定去重键。 */
-  const externalId = String(paper.externalId || "").trim();
+  let externalId = String(paper.externalId || "").trim();
   /** title 是论文列表必须展示的标题。 */
   const title = String(paper.title || "").trim();
   if (!externalId || !title) {
@@ -2601,9 +2673,9 @@ export function upsertImportedPaper(paper) {
   /** now 是本次导入或更新的统一时间。 */
   const now = new Date().toISOString();
   /** existingRow 用于重复导入时保留本地 ID 和首次创建时间。 */
-  const existingRow = database
-    .prepare("SELECT id, created_at FROM papers WHERE external_id = ? LIMIT 1")
-    .get(externalId);
+  const existingRow = findPaperIdentityRow(paper);
+  if (existingRow) externalId = existingRow.external_id;
+  if (existingRow?.source_text?.trim() && !paper.replaceExisting) return mapPaperRow(existingRow);
   /** paperId 是论文的稳定本地 ID。 */
   const paperId = existingRow?.id ?? String(paper.id || `paper_${crypto.randomUUID()}`);
   /** sourceText 是文件或网页中已经提取的可读正文。 */
@@ -2690,6 +2762,95 @@ export function upsertImportedPaper(paper) {
       existingRow?.created_at ?? now,
       now,
     );
+  database.prepare("UPDATE papers SET identity_key = ? WHERE id = ?").run(getPaperIdentityKey(paper), paperId);
+  return getPaperById(paperId);
+}
+
+/** 不读取正文的文档分页；页面可继续读取第1000项以后的内容。 */
+export function listDocumentsPage(filters = {}) {
+  const { rows, ...pagination } = listLibraryMetadataPage(database, "document", filters);
+  const documents = rows.map((row) => {
+    const { extractedText, ...item } = mapDocumentRow(row);
+    return { ...item, tags: row.tags };
+  });
+  return { documents, ...pagination };
+}
+
+export function getContentLocations(targets) {
+  return listTargetLocations(database, targets);
+}
+
+function findPaperIdentityRow(paper) {
+  const key = getPaperIdentityKey(paper);
+  return database.prepare(`SELECT * FROM papers
+    WHERE external_id = ? OR (? <> '' AND identity_key = ?)
+    ORDER BY CASE WHEN TRIM(source_text) <> '' THEN 0 ELSE 1 END, created_at, id LIMIT 1
+  `).get(String(paper.externalId || ""), key, key) || null;
+}
+
+/** 网络请求之前事务性保存占位论文和任务，重复点击复用同一任务。 */
+export function enqueuePaperImport({ inputUrl = "", paperId = "", force = false, paperFolderId = "" } = {}) {
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    paperFolders.assertFolder(paperFolderId);
+    let paper = paperId ? getPaperById(paperId) : null;
+    if (paperId && !paper) throw new Error("论文不存在。");
+    const identity = parseArxivIdentity(inputUrl || paper?.sourceUrl);
+    const url = new URL(inputUrl || paper?.sourceUrl || paper?.pdfUrl);
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password) throw new TypeError("论文链接必须是不含登录凭据的 HTTP 或 HTTPS 公开地址。");
+    url.hash = "";
+    if (!paper) {
+      const input = {
+      externalId: identity?.externalId || `manual-url:${url.href}`,
+      title: identity ? `arXiv ${identity.arxivId} · 等待识别` : `${url.hostname} · 等待识别`,
+      sourceUrl: identity?.sourceUrl || url.href,
+      pdfUrl: identity?.pdfUrl || (/\.pdf$/i.test(url.pathname) ? url.href : null),
+      sourceLanguage: "unknown",
+      };
+      const existing = findPaperIdentityRow(input);
+      paper = upsertImportedPaper(input);
+      // 新记录与目标目录在同一事务保存；重复导入（包括尚未完成的导入）不改变用户归档。
+      if (!existing && paperFolderId) database.prepare("INSERT INTO paper_folder_items(paper_id,folder_id,updated_at) VALUES(?,?,?)").run(paper.id, paperFolderId, new Date().toISOString());
+    }
+    const active = database.prepare("SELECT * FROM import_jobs WHERE job_type = 'paper_import' AND target_id = ? AND status IN ('queued','running') ORDER BY created_at LIMIT 1").get(paper.id);
+    let job = active ? mapImportJobRow(active) : null;
+    const duplicate = Boolean(paper.sourceText?.trim() && !force);
+    if (!job && !duplicate) {
+      const kind = identity ? "arxiv" : paper.pdfUrl ? "pdf" : "webpage";
+      const payload = { paperId: paper.id, inputUrl: identity?.sourceUrl || url.href, inputKind: kind, requestedVersion: identity?.requestedVersion || "", force: Boolean(force) };
+      const previous = database.prepare("SELECT id FROM import_jobs WHERE job_type = 'paper_import' AND target_id = ? AND status = 'failed' ORDER BY updated_at DESC LIMIT 1").get(paper.id);
+      if (previous) {
+        database.prepare("UPDATE import_jobs SET payload_json = ? WHERE id = ?").run(JSON.stringify(payload), previous.id);
+        job = retryImportJob(previous.id);
+      } else job = createImportJob({ jobType: "paper_import", sourceLabel: paper.title, sourceUrl: url.href, targetType: "paper", targetId: paper.id, payload });
+      database.prepare("UPDATE papers SET extraction_error = NULL, full_translation_status = CASE WHEN TRIM(source_text) = '' THEN 'pending' ELSE full_translation_status END WHERE id = ?").run(paper.id);
+    }
+    database.exec("COMMIT;");
+    return { paper: getPaperById(paper.id), importJob: job, duplicate, processing: Boolean(job) };
+  } catch (error) { database.exec("ROLLBACK;"); throw error; }
+}
+
+export function recoverPendingPaperImports() {
+  const rows = database.prepare(`SELECT id, source_url FROM papers p WHERE TRIM(source_text) = '' AND extraction_error IS NULL AND full_translation_status = 'pending'
+    AND source_url LIKE 'http%' AND NOT EXISTS (SELECT 1 FROM import_jobs j WHERE j.job_type = 'paper_import' AND j.target_id = p.id)`).all();
+  for (const row of rows) enqueuePaperImport({ paperId: row.id, inputUrl: row.source_url });
+  return rows.length;
+}
+
+export function getPaperImportStatuses() {
+  return database.prepare(`SELECT id, target_id, status, stage, progress_percent, attempt_count, error_message FROM import_jobs j
+    WHERE job_type = 'paper_import' AND id = (SELECT id FROM import_jobs WHERE job_type = 'paper_import' AND target_id = j.target_id ORDER BY created_at DESC, id DESC LIMIT 1)`).all();
+}
+
+export function listPaperIdentityDuplicates() {
+  return database.prepare("SELECT identity_key AS identityKey, COUNT(*) AS count FROM papers WHERE identity_key <> '' GROUP BY identity_key HAVING COUNT(*) > 1").all().map(group => ({ ...group, paperIds: database.prepare("SELECT id FROM papers WHERE identity_key = ? ORDER BY created_at, id").all(group.identityKey).map(row => row.id) }));
+}
+
+export function updatePaperImportMetadata(paperId, metadata) {
+  database.prepare(`UPDATE papers SET title = ?, abstract = ?, authors_json = ?, published_at = COALESCE(?, published_at),
+    source_url = ?, pdf_url = COALESCE(?, pdf_url), identity_key = COALESCE(NULLIF(?, ''), identity_key), updated_at = ? WHERE id = ?`).run(
+    String(metadata.title || "未命名论文"), String(metadata.abstract || metadata.summary || ""), JSON.stringify(metadata.authors || []),
+    metadata.publishedAt || null, metadata.sourceUrl, metadata.pdfUrl || null, getPaperIdentityKey(metadata), new Date().toISOString(), paperId);
   return getPaperById(paperId);
 }
 
@@ -2798,7 +2959,8 @@ export function markPaperExtractionFailed(paperId, message) {
   database
     .prepare(`
       UPDATE papers
-      SET full_translation_status = 'failed', extraction_error = ?, updated_at = ?
+      SET full_translation_status = CASE WHEN TRIM(source_text) <> '' THEN full_translation_status ELSE 'failed' END,
+          extraction_error = ?, updated_at = ?
       WHERE id = ?
     `)
     .run(String(message || "无法提取论文全文。").slice(0, 500), updatedAt, paperId);
@@ -3004,9 +3166,13 @@ export function upsertCuratedPaper(paper) {
   /** now 是目录同步时间。 */
   const now = new Date().toISOString();
   /** existingRow 是相同外部论文地址已经存在的记录。 */
-  const existingRow = database
-    .prepare("SELECT id, created_at FROM papers WHERE external_id = ? LIMIT 1")
-    .get(paper.externalId);
+  const existingRow = findPaperIdentityRow(paper);
+  if (existingRow) {
+    database.prepare(`UPDATE papers SET video_url = COALESCE(?, video_url), video_alt_url = COALESCE(?, video_alt_url),
+      duration = COALESCE(?, duration), identity_key = ? WHERE id = ?`).run(
+      paper.videoUrl || null, paper.videoAltUrl || null, paper.duration || null, getPaperIdentityKey(paper), existingRow.id);
+    return getPaperById(existingRow.id);
+  }
   /** paperId 复用已存在的本地 ID。 */
   const paperId = existingRow?.id ?? `paper_${crypto.randomUUID()}`;
   /** createdAt 保留论文首次进入知识库的时间。 */
@@ -3059,6 +3225,7 @@ export function upsertCuratedPaper(paper) {
       createdAt,
       now,
     );
+  database.prepare("UPDATE papers SET identity_key = ? WHERE id = ?").run(getPaperIdentityKey(paper), paperId);
   return getPaperById(paperId);
 }
 
@@ -3321,7 +3488,8 @@ export function selectPaperCandidate(candidateId) {
   const sourceLabel = isDailyClassic ? "每日经典" : "每周精选";
   database.exec("BEGIN IMMEDIATE;");
   try {
-    database
+    const existingIdentity = findPaperIdentityRow({ externalId: candidate.external_id, sourceUrl: candidate.source_url, pdfUrl: candidate.pdf_url });
+    if (!existingIdentity) database
       .prepare(`
         INSERT INTO papers (
           id, external_id, title, abstract, title_zh, abstract_zh,
@@ -3372,7 +3540,9 @@ export function selectPaperCandidate(candidateId) {
     /** savedPaper 是处理重复外部论文后最终存在的论文记录。 */
     const savedPaper = database
       .prepare("SELECT * FROM papers WHERE external_id = ? LIMIT 1")
-      .get(candidate.external_id);
+      .get(existingIdentity?.external_id || candidate.external_id);
+    database.prepare("UPDATE papers SET identity_key = ? WHERE id = ?").run(
+      getPaperIdentityKey({ externalId: candidate.external_id, sourceUrl: candidate.source_url, pdfUrl: candidate.pdf_url }), savedPaper.id);
     database
       .prepare(`
         INSERT INTO paper_week_status (
@@ -3654,6 +3824,8 @@ export function startReadingSession(targetType, targetId, progressPercent = 0) {
     normalizedProgress,
     normalizedProgress,
   );
+  database.prepare(`INSERT INTO reading_session_days(session_id,local_day,active_seconds,updated_at)
+    VALUES (?,?,0,?)`).run(session.id, toLocalDateKey(now), now);
   return session;
 }
 
@@ -3677,11 +3849,26 @@ export function updateReadingSession(sessionId, changes = {}) {
   );
   const now = new Date().toISOString();
   const endedAt = changes.ended ? (existing.ended_at || now) : existing.ended_at;
-  database.prepare(`
-    UPDATE reading_sessions
-    SET last_active_at = ?, ended_at = ?, active_seconds = ?, progress_end = ?
-    WHERE id = ?
-  `).run(now, endedAt, activeSeconds, progressEnd, sessionId);
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    recordReadingDayIncrement(database, {
+      sessionId,
+      startedAt: existing.started_at,
+      previousSeconds: Number(existing.active_seconds) || 0,
+      activeSeconds,
+      activeSecondsByDay: changes.activeSecondsByDay,
+      now,
+    });
+    database.prepare(`
+      UPDATE reading_sessions
+      SET last_active_at = ?, ended_at = ?, active_seconds = ?, progress_end = ?
+      WHERE id = ?
+    `).run(now, endedAt, activeSeconds, progressEnd, sessionId);
+    database.exec("COMMIT;");
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
   return {
     id: existing.id,
     targetType: existing.target_type,
@@ -3962,12 +4149,13 @@ export function getActivityDashboard(requestedDays = 30) {
   const bucketMap = new Map(buckets.map((bucket) => [bucket.date, bucket]));
 
   const sessions = database.prepare(`
-    SELECT * FROM reading_sessions
-    WHERE last_active_at >= ?
-    ORDER BY last_active_at DESC
-  `).all(since);
+    SELECT s.target_type,s.target_id,d.local_day,d.active_seconds,d.updated_at AS last_active_at
+    FROM reading_session_days d JOIN reading_sessions s ON s.id=d.session_id
+    WHERE d.local_day >= ? AND d.local_day <= ?
+    ORDER BY d.updated_at DESC
+  `).all(toLocalDateKey(startDate), toLocalDateKey(until));
   for (const session of sessions) {
-    const bucket = bucketMap.get(toLocalDateKey(session.last_active_at));
+    const bucket = bucketMap.get(session.local_day);
     if (!bucket) continue;
     bucket.activeSeconds += Number(session.active_seconds) || 0;
     bucket.itemIds.add(`${session.target_type}:${session.target_id}`);
@@ -4306,6 +4494,55 @@ function normalizeKnowledgeTargetType(targetType) {
   return normalizedType;
 }
 
+/** 与主记录删除位于同一事务，保证重启后仍能完成精确文件清理。 */
+function enqueueKnowledgeTargetFiles(targetType, targetRow) {
+  const files = [];
+  if (targetType === "document") files.push(["attachment", targetRow.storedName]);
+  if (targetType === "paper") {
+    const safeId = String(targetRow.id).replace(/[^a-zA-Z0-9_-]/g, "_");
+    files.push(["paper_pdf", `${targetRow.id}.pdf`], ["paper_chinese_pdf", `${safeId}.pdf`], ["paper_chinese_hash", `${safeId}.sha256`]);
+  }
+  const now = new Date().toISOString();
+  const statement = database.prepare(`
+    INSERT INTO pending_file_deletions(id, asset_kind, file_name, target_type, target_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(asset_kind, file_name) DO NOTHING
+  `);
+  for (const [kind, fileName] of files) {
+    if (!fileName || path.basename(fileName) !== fileName || /[\\/:]/.test(fileName) || [".", ".."].includes(fileName)) {
+      throw new Error("原始资产路径无效，已取消删除以保护本机文件。");
+    }
+    statement.run(`file_delete_${crypto.randomUUID()}`, kind, fileName, targetType, targetRow.id, now, now);
+  }
+}
+
+export function listPendingFileDeletions() {
+  return database.prepare("SELECT * FROM pending_file_deletions ORDER BY created_at, id").all().map((row) => ({
+    id: row.id, assetKind: row.asset_kind, fileName: row.file_name, targetType: row.target_type,
+    targetId: row.target_id, attemptCount: row.attempt_count, lastError: row.last_error,
+    createdAt: row.created_at, updatedAt: row.updated_at,
+  }));
+}
+
+export function completePendingFileDeletion(id) {
+  database.prepare("DELETE FROM pending_file_deletions WHERE id = ?").run(String(id));
+}
+
+export function failPendingFileDeletion(id, error) {
+  database.prepare("UPDATE pending_file_deletions SET attempt_count = attempt_count + 1, last_error = ?, updated_at = ? WHERE id = ?")
+    .run(String(error?.message || error || "文件清理失败").slice(0, 2000), new Date().toISOString(), String(id));
+}
+
+/** 最后一次检查实时引用，保护历史重复记录和规范化名称碰撞时共享的文件。 */
+export function isPendingFileStillReferenced(item) {
+  if (item.assetKind === "attachment") return Boolean(database.prepare("SELECT id FROM documents WHERE stored_name = ? LIMIT 1").get(item.fileName));
+  if (item.assetKind === "paper_pdf") return Boolean(database.prepare("SELECT id FROM papers WHERE id = ? LIMIT 1").get(String(item.fileName).replace(/\.pdf$/, "")));
+  if (["paper_chinese_pdf", "paper_chinese_hash"].includes(item.assetKind)) {
+    const stem = String(item.fileName).replace(/\.(?:pdf|sha256)$/, "");
+    return database.prepare("SELECT id FROM papers").all().some((row) => String(row.id).replace(/[^a-zA-Z0-9_-]/g, "_") === stem);
+  }
+  return true;
+}
+
 /**
  * 永久删除一项知识内容及其全部阅读、标签和专题关联。
  *
@@ -4391,6 +4628,7 @@ export function deleteKnowledgeTarget(targetType, targetId) {
         .run(targetRow.externalId);
       database.prepare("DELETE FROM papers WHERE id = ?").run(normalizedId);
     }
+    enqueueKnowledgeTargetFiles(normalizedType, targetRow);
     database.prepare(
       `DELETE FROM tags WHERE NOT EXISTS (
         SELECT 1 FROM content_tags WHERE content_tags.tag_name = tags.name
@@ -4500,6 +4738,7 @@ export function deleteKnowledgeTargets(items) {
           .run(targetRow.externalId);
         database.prepare("DELETE FROM papers WHERE id = ?").run(normalizedId);
       }
+      enqueueKnowledgeTargetFiles(normalizedType, targetRow);
     }
     database.prepare(
       `DELETE FROM tags WHERE NOT EXISTS (
@@ -4742,21 +4981,22 @@ function getKnowledgeTargetSummary(targetType, targetId) {
   if (normalizedType === "document") {
     /** row 是文档摘要字段。 */
     const row = database.prepare(`
-      SELECT id, title, category, summary, updated_at
+      SELECT id, COALESCE(NULLIF(display_title, ''), title) AS title,
+        title AS source_title, category, summary, updated_at
       FROM documents WHERE id = ? LIMIT 1
     `).get(normalizedId);
-    return row ? { targetType: normalizedType, targetId: row.id, title: row.title,
+    return row ? { id: row.id, targetType: normalizedType, targetId: row.id, title: row.title, sourceTitle: row.source_title,
       category: row.category, summary: row.summary, updatedAt: row.updated_at } : null;
   }
   if (normalizedType === "article") {
     /** row 是网页文章摘要字段。 */
     const row = database.prepare(`
-      SELECT id, title, category,
+      SELECT id, COALESCE(NULLIF(display_title, ''), title) AS title, title AS source_title, category,
         COALESCE(NULLIF(translated_summary, ''), summary) AS summary,
         updated_at
       FROM articles WHERE id = ? LIMIT 1
     `).get(normalizedId);
-    return row ? { targetType: normalizedType, targetId: row.id, title: row.title,
+    return row ? { id: row.id, targetType: normalizedType, targetId: row.id, title: row.title, sourceTitle: row.source_title,
       category: row.category, summary: row.summary, updatedAt: row.updated_at } : null;
   }
   /** row 是论文的中英文摘要字段。 */
@@ -5297,71 +5537,12 @@ function createSearchExcerpt(rawText, query) {
  * @returns {Record<string, unknown>[]} 去重后的统一结果。
  */
 export function searchKnowledgeBase(filters = {}) {
-  /** query 是清理并限制长度后的搜索词。 */
-  const query = String(filters.query ?? "").trim().slice(0, 200);
-  if (!query) return [];
-  /** targetType 是可选内容类型过滤值。 */
-  const targetType = String(filters.targetType ?? "").trim();
-  if (targetType) normalizeKnowledgeTargetType(targetType);
-  /** category 是可选分类过滤值。 */
-  const category = String(filters.category ?? "").trim();
-  /** tagName 是可选标签过滤值。 */
-  const tagName = String(filters.tagName ?? "").trim();
-  /** likeQuery 是 SQLite LIKE 使用的模式。 */
-  const likeQuery = `%${query.replaceAll("%", "\\%").replaceAll("_", "\\_")}%`;
-  /** candidateRows 收集各类型正文及个人笔记的命中项。 */
-  const candidateRows = [];
-  if (!targetType || targetType === "document") candidateRows.push(...database.prepare(`
-    SELECT 'document' AS target_type, id AS target_id,
-      COALESCE(NULLIF(display_title, ''), title) AS title, category, summary,
-      extracted_text AS search_text, updated_at, '文档正文' AS match_source
-    FROM documents WHERE display_title LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\'
-      OR summary LIKE ? ESCAPE '\\' OR extracted_text LIKE ? ESCAPE '\\'
-  `).all(likeQuery, likeQuery, likeQuery, likeQuery));
-  if (!targetType || targetType === "article") candidateRows.push(...database.prepare(`
-    SELECT 'article' AS target_type, id AS target_id,
-      COALESCE(NULLIF(display_title, ''), title) AS title, category, summary,
-      content_text AS search_text, updated_at, '网页正文' AS match_source
-    FROM articles WHERE display_title LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\'
-      OR summary LIKE ? ESCAPE '\\' OR content_text LIKE ? ESCAPE '\\'
-  `).all(likeQuery, likeQuery, likeQuery, likeQuery));
-  if (!targetType || targetType === "paper") candidateRows.push(...database.prepare(`
-    SELECT 'paper' AS target_type, id AS target_id,
-      COALESCE(NULLIF(title_zh, ''), title) AS title, category,
-      COALESCE(NULLIF(abstract_zh, ''), abstract, '') AS summary,
-      COALESCE(full_translation_html, source_text, abstract_zh, abstract, '') AS search_text,
-      updated_at, '论文全文' AS match_source
-    FROM papers WHERE title LIKE ? ESCAPE '\\' OR title_zh LIKE ? ESCAPE '\\'
-      OR abstract LIKE ? ESCAPE '\\' OR abstract_zh LIKE ? ESCAPE '\\'
-      OR source_text LIKE ? ESCAPE '\\' OR full_translation_html LIKE ? ESCAPE '\\'
-  `).all(likeQuery, likeQuery, likeQuery, likeQuery, likeQuery, likeQuery));
-  candidateRows.push(...database.prepare(`
-    SELECT rs.target_type, rs.target_id, '' AS title, '' AS category, '' AS summary,
-      rs.note_text AS search_text, rs.updated_at, '阅读笔记' AS match_source
-    FROM reading_states AS rs WHERE rs.note_text LIKE ? ESCAPE '\\'
-      AND (? = '' OR rs.target_type = ?)
-    UNION ALL
-    SELECT ra.target_type, ra.target_id, '' AS title, '' AS category, '' AS summary,
-      ra.quote_text || ' ' || ra.note_text AS search_text, ra.updated_at, '高亮批注' AS match_source
-    FROM reading_annotations AS ra WHERE (ra.quote_text LIKE ? ESCAPE '\\' OR ra.note_text LIKE ? ESCAPE '\\')
-      AND (? = '' OR ra.target_type = ?)
-  `).all(likeQuery, targetType, targetType, likeQuery, likeQuery, targetType, targetType));
-  /** resultMap 按内容 ID 合并正文与笔记的重复命中。 */
-  const resultMap = new Map();
-  for (const row of candidateRows) {
-    /** summary 是该命中项对应的最新内容元数据。 */
-    const summary = getKnowledgeTargetSummary(row.target_type, row.target_id);
-    if (!summary || (category && summary.category !== category)) continue;
-    /** tags 是命中内容的全部标签。 */
-    const tags = listContentTags(row.target_type, row.target_id);
-    if (tagName && !tags.includes(tagName)) continue;
-    /** resultKey 是统一结果的去重键。 */
-    const resultKey = `${row.target_type}:${row.target_id}`;
-    if (resultMap.has(resultKey)) continue;
-    resultMap.set(resultKey, { ...summary, tags, matchSource: row.match_source,
-      excerpt: createSearchExcerpt(row.search_text || summary.summary, query) });
-  }
-  return [...resultMap.values()].sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt))).slice(0, 200);
+  return searchKnowledgePage(database, filters).results;
+}
+
+/** 分页搜索供HTTP接口使用；原数组返回形式保留。 */
+export function searchKnowledgeBasePage(filters = {}) {
+  return searchKnowledgePage(database, filters);
 }
 
 /**
@@ -5577,31 +5758,33 @@ export function listAiConversations(filters = {}) {
  *
  * @returns {string | null} 新建备份路径；当天已有备份时返回空值。
  */
-export function createDailyBackup() {
-  /** today 是用于备份文件命名的本地日期。 */
-  const today = new Date().toLocaleDateString("sv-SE");
-  /** backupPath 是当天的 SQLite 备份路径。 */
-  const backupPath = path.join(backupDirectory, `zhixu-${today}.db`);
-  if (!fs.existsSync(backupPath)) {
-    database.exec(`VACUUM INTO '${escapeSqlLiteral(backupPath)}';`);
+export function createDailyBackup({ throwOnError = false } = {}) {
+  try {
+    return createDatabaseSnapshot(database, {
+      dataDirectory, backupDirectory, kind: "daily", retentionDays: serverConfig.backupRetentionDays,
+    });
+  } catch (error) {
+    console.error(`每日备份未完成，资料仍保留：${error.message}`);
+    if (throwOnError) throw error;
+    return null;
   }
+}
 
-  /** retentionMilliseconds 是备份保留时长的毫秒值。 */
-  const retentionMilliseconds =
-    serverConfig.backupRetentionDays * 24 * 60 * 60 * 1000;
-  /** expirationThreshold 是备份过期时间阈值。 */
-  const expirationThreshold = Date.now() - retentionMilliseconds;
-  for (const entry of fs.readdirSync(backupDirectory, { withFileTypes: true })) {
-    if (!entry.isFile() || !/^zhixu-\d{4}-\d{2}-\d{2}\.db$/.test(entry.name)) {
-      continue;
-    }
-    /** candidatePath 是待检查备份文件的绝对路径。 */
-    const candidatePath = path.join(backupDirectory, entry.name);
-    if (fs.statSync(candidatePath).mtimeMs < expirationThreshold) {
-      fs.rmSync(candidatePath);
-    }
+export function createManualBackup() {
+  return createDatabaseSnapshot(database, { dataDirectory, backupDirectory, kind: "manual" });
+}
+
+export function getLocalStorageStatus() {
+  return getStorageStatus({ dataDirectory, backupDirectory });
+}
+
+let fullBackupPromise = null;
+export function createFullKnowledgeBackup() {
+  if (!fullBackupPromise) {
+    fullBackupPromise = createFullBackup(database, { dataDirectory, backupDirectory })
+      .finally(() => { fullBackupPromise = null; });
   }
-  return backupPath;
+  return fullBackupPromise;
 }
 
 /**

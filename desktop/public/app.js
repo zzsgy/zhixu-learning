@@ -4,8 +4,14 @@
  * 页面只请求当前电脑上的本地服务，不连接任何第三方前端接口。
  */
 import renderMathInElement from "/vendor/katex/contrib/auto-render.mjs";
+import { normalizePaperMath } from "./paper-math.js";
 import { getProjectPage } from "./project-index.js";
 import { normalizePaperReadingLayout } from "./paper-layout.js";
+import { parsePaperAssetUrl } from "./paper-assets.js";
+import { createPaperLibrary } from "./paper-library.js";
+import { renderStorageDashboard, renderStorageJobOverview, renderStorageBrowserOverview } from "./storage-dashboard.js";
+
+let paperLibrary;
 
 /** applicationState 保存当前筛选、文档列表和已打开文档。 */
 const applicationState = {
@@ -67,6 +73,11 @@ const applicationState = {
   readingNoteTimer: null,
   /** searchResults 是跨文档、文章、论文和笔记的统一搜索结果。 */
   searchResults: [],
+  searchTotal: 0,
+  searchHasMore: false,
+  searchLoading: false,
+  searchResultsQuery: "",
+  libraryRequestSequence: 0,
   /** activeTag 是文档库当前启用的标签筛选值。 */
   activeTag: "",
   /** tags 是知识库中全部标签及其使用次数。 */
@@ -173,6 +184,7 @@ const applicationState = {
   readingActivityTimer: null,
   /** readingActivitySeconds 是当前会话已累计的活跃秒数。 */
   readingActivitySeconds: 0,
+  readingActivitySecondsByDay: {},
   /** readingActivityLastTickAt 是上一次计时检查的时间。 */
   readingActivityLastTickAt: 0,
   /** readingActivityLastInteractionAt 是最近一次阅读交互时间。 */
@@ -197,6 +209,9 @@ const dom = {
   viewModeOptions: document.querySelectorAll("#view-mode .view-mode-option"),
   documentTotal: document.querySelector("#document-total"),
   searchInput: document.querySelector("#search-input"),
+  searchPagination: document.querySelector("#search-pagination"),
+  searchResultCount: document.querySelector("#search-result-count"),
+  searchLoadMore: document.querySelector("#search-load-more"),
   folderBreadcrumbs: document.querySelector("#folder-breadcrumbs"),
   folderGrid: document.querySelector("#folder-grid"),
   newFolderButton: document.querySelector("#new-folder-button"),
@@ -233,6 +248,12 @@ const dom = {
   uploadDuplicateList: document.querySelector("#upload-duplicate-list"),
   uploadQueue: document.querySelector("#upload-queue"),
   backupButton: document.querySelector("#backup-button"),
+  fullBackupButton: document.querySelector("#full-backup-button"),
+  storageDataPath: document.querySelector("#storage-data-path"),
+  storageBackupStatus: document.querySelector("#storage-backup-status"),
+  storageFullBackupStatus: document.querySelector("#storage-full-backup-status"),
+  storageCleanupStatus: document.querySelector("#storage-cleanup-status"),
+  storageCleanupRetry: document.querySelector("#storage-cleanup-retry"),
   browserPairingButton: document.querySelector("#browser-pairing-button"),
   browserPairingCode: document.querySelector("#browser-pairing-code"),
   browserClientList: document.querySelector("#browser-client-list"),
@@ -319,6 +340,7 @@ const dom = {
   articleReaderContent: document.querySelector("#article-reader-content"),
   paperTotal: document.querySelector("#paper-total"),
   paperGrid: document.querySelector("#paper-grid"),
+  paperQualityFilter: document.querySelector("#paper-quality-filter"),
   paperEmptyState: document.querySelector("#paper-empty-state"),
   paperViewMode: document.querySelector("#paper-view-mode"),
   paperViewModeLabel: document.querySelector("#paper-view-mode-label"),
@@ -2807,7 +2829,22 @@ function accumulateReadingActivity(allowHidden = false) {
   applicationState.readingActivityLastTickAt = now;
   const isActive = (allowHidden || document.visibilityState === "visible")
     && now - applicationState.readingActivityLastInteractionAt <= 2 * 60 * 1000;
-  if (isActive) applicationState.readingActivitySeconds += Math.round(elapsedSeconds);
+  if (isActive) {
+    const seconds = Math.round(elapsedSeconds);
+    let remaining = seconds;
+    let cursor = now - seconds * 1000;
+    while (remaining > 0) {
+      const date = new Date(cursor);
+      const day = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+      const midnight = new Date(date);
+      midnight.setHours(24, 0, 0, 0);
+      const part = Math.min(remaining, Math.max(1, Math.ceil((midnight.getTime() - cursor) / 1000)));
+      applicationState.readingActivitySecondsByDay[day] = (applicationState.readingActivitySecondsByDay[day] || 0) + part;
+      remaining -= part;
+      cursor += part * 1000;
+    }
+    applicationState.readingActivitySeconds += seconds;
+  }
 }
 
 /** 把当前会话累计时长保存到本地服务。 */
@@ -2817,6 +2854,7 @@ function flushReadingActivitySession(ended = false, useBeacon = false) {
   accumulateReadingActivity(ended || useBeacon);
   const payload = JSON.stringify({
     activeSeconds: applicationState.readingActivitySeconds,
+    activeSecondsByDay: applicationState.readingActivitySecondsByDay,
     progressPercent: calculateReadingProgress(),
     ended,
   });
@@ -2849,6 +2887,7 @@ async function startReadingActivitySession(targetType, targetId, progressPercent
   window.clearInterval(applicationState.readingActivityTimer);
   applicationState.readingActivitySession = null;
   applicationState.readingActivitySeconds = 0;
+  applicationState.readingActivitySecondsByDay = {};
   applicationState.readingActivityLastSentSeconds = 0;
   applicationState.readingActivityLastTickAt = Date.now();
   applicationState.readingActivityLastInteractionAt = Date.now();
@@ -4279,6 +4318,9 @@ async function returnToPreviousPage(fallbackView = "library") {
 
 /** importJobStageLabels 是后台阶段到中文状态的映射。 */
 const importJobStageLabels = Object.freeze({
+  metadata: "正在读取论文信息",
+  extracting: "正在获取与提取全文",
+  classifying: "正在分类",
   queued: "等待处理",
   starting: "正在启动",
   fetching: "正在抓取网页",
@@ -4305,6 +4347,15 @@ const importJobStageLabels = Object.freeze({
  * @returns {Promise<void>}
  */
 async function locateImportJobTarget(job) {
+  if (job.targetType === "paper") {
+    await loadPapers();
+    showView("papers");
+    const paper = applicationState.papers.find(item => item.id === job.targetId);
+    if (paper?.sourceTextWordCount > 0) await openPaper(paper.id);
+    return;
+  }
+  applicationState.searchQuery = "";
+  dom.searchInput.value = "";
   await loadLibrary();
   const targetItems = job.targetType === "article"
     ? applicationState.articles
@@ -4337,6 +4388,7 @@ async function locateImportJobTarget(job) {
  * @returns {void}
  */
 function renderImportJobs() {
+  renderStorageJobOverview(applicationState.importJobs);
   dom.importJobList.replaceChildren();
   if (applicationState.importJobs.length === 0) {
     dom.importJobSummary.textContent = "";
@@ -4557,6 +4609,7 @@ async function loadImportJobs() {
  * @returns {void}
  */
 function renderBrowserClients(clients) {
+  renderStorageBrowserOverview(clients);
   dom.browserClientList.replaceChildren();
   if (clients.length === 0) {
     dom.browserClientList.append(
@@ -4642,11 +4695,22 @@ async function generateBrowserPairingCode() {
  * @returns {Promise<void>}
  */
 async function loadStorageOperations() {
-  await Promise.all([loadBrowserClients(), loadImportJobs()]);
+  await Promise.all([loadBrowserClients(), loadImportJobs(), loadStorageStatus()]);
+}
+
+async function loadStorageStatus() {
+  const results = await Promise.allSettled([requestJson("/api/storage"), requestJson("/api/storage/cleanup")]);
+  renderStorageDashboard(
+    results[0].status === "fulfilled" ? results[0].value.storage : null,
+    results[1].status === "fulfilled" ? results[1].value : null,
+    document,
+    results.flatMap((result, index) => result.status === "rejected" ? [`${index ? "文件维护" : "存储备份"}状态读取失败：${result.reason.message}`] : []),
+  );
 }
 
 /** 从文档库进入导入页时，将当前目录同步为两种内容的默认保存位置。 */
 function openUploadFromCurrentLocation() {
+  void paperLibrary.prepareImport(applicationState.activeView === "papers");
   const folder = applicationState.activeView === "library"
     ? applicationState.folders.find((item) => item.id === applicationState.activeFolderId)
     : null;
@@ -4736,6 +4800,10 @@ function showView(viewName) {
  * @returns {DocumentFragment} 可插入阅读页的原文片段。
  */
 function setArticleImageSource(image, remoteSource) {
+  if (parsePaperAssetUrl(remoteSource)) {
+    image.setAttribute("src", remoteSource);
+    return;
+  }
   /** proxySource 始终通过本机缓存代理读取远程图片。 */
   const proxySource = `/api/article-images?url=${encodeURIComponent(remoteSource)}`;
   image.setAttribute("src", proxySource);
@@ -5161,6 +5229,7 @@ function renderReadingMath(readingSurface) {
       { left: "$", right: "$", display: false },
     ],
     ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code", "option"],
+    preProcess: normalizePaperMath,
     throwOnError: false,
     strict: "ignore",
     trust: false,
@@ -5901,7 +5970,7 @@ async function deleteKnowledgeItem(item) {
   /** endpoint 是不同内容类型对应的删除接口。 */
   const endpoint = `/api/${targetType === "paper" ? "papers" : `${targetType}s`}/${encodeURIComponent(targetId)}`;
   try {
-    await requestJson(endpoint, { method: "DELETE" });
+    const result = await requestJson(endpoint, { method: "DELETE" });
     if (applicationState.readingWorkspace?.targetId === targetId) {
       closeReadingWorkspace();
     }
@@ -5916,7 +5985,7 @@ async function deleteKnowledgeItem(item) {
     }
     await Promise.all([loadLibrary(), loadPapers(), loadTopics()]);
     showView(targetType === "paper" ? "papers" : "library");
-    showToast(`《${title}》已永久删除。`);
+    showToast(result.warnings?.length ? `《${title}》记录已删除；${result.warnings.join("；")}` : `《${title}》已永久删除。`);
   } catch (error) {
     showToast(error.message);
   }
@@ -6332,7 +6401,7 @@ function getUploadFolderPathLabel(folderId) {
 
 /** 返回统一内容条目的批量选择键。 */
 function getLibraryItemKey(item) {
-  return `${item.targetType}:${item.id}`;
+  return `${item.targetType}:${item.targetId || item.id}`;
 }
 
 /** 更新批量整理工具栏的数量与按钮状态。 */
@@ -6424,7 +6493,7 @@ async function deleteSelectedLibraryItems() {
     applicationState.libraryBatchMode = false;
     await Promise.all([loadLibrary(), loadPapers(), loadTopics()]);
     showView("library");
-    showToast(`已永久删除 ${Number(result.deletedCount || items.length)} 项内容。`);
+    showToast(result.warnings?.length ? `已删除 ${Number(result.deletedCount || items.length)} 项记录；${result.warnings.join("；")}` : `已永久删除 ${Number(result.deletedCount || items.length)} 项内容。`);
   } catch (error) {
     showToast(error.message);
     renderLibraryBatchToolbar();
@@ -6977,10 +7046,10 @@ function renderDocumentGrid() {
         "span",
         "",
         documentItem.targetType === "article"
-          ? `${Number(documentItem.wordCount || 0).toLocaleString("zh-CN")} 字`
+          ? Number.isFinite(documentItem.wordCount) ? `${documentItem.wordCount.toLocaleString("zh-CN")} 字` : "全文检索结果"
           : documentItem.targetType === "paper"
             ? "中英文阅读"
-            : formatFileSize(documentItem.sizeBytes),
+            : Number.isFinite(documentItem.sizeBytes) ? formatFileSize(documentItem.sizeBytes) : "全文检索结果",
       ),
     );
     /** title 是支持搜索关键词高亮的卡片标题。 */
@@ -7018,7 +7087,13 @@ function renderLibrary() {
   const allItems = applicationState.searchQuery
     ? applicationState.searchResults
     : [...applicationState.documents, ...applicationState.articles];
-  dom.documentTotal.textContent = String(allItems.length);
+  dom.documentTotal.textContent = String(applicationState.searchQuery ? applicationState.searchTotal : allItems.length);
+  dom.searchPagination.hidden = !applicationState.searchQuery;
+  dom.searchResultCount.textContent = applicationState.searchLoading && !allItems.length
+    ? "正在搜索…" : `已显示 ${allItems.length} / 共 ${applicationState.searchTotal} 项`;
+  dom.searchLoadMore.hidden = !applicationState.searchHasMore;
+  dom.searchLoadMore.disabled = applicationState.searchLoading;
+  dom.searchLoadMore.textContent = applicationState.searchLoading ? "正在加载…" : "加载更多";
   dom.favoriteFilterButton.classList.toggle(
     "is-active",
     applicationState.favoriteOnly,
@@ -7081,31 +7156,66 @@ function renderTagFilters() {
  *
  * @returns {Promise<void>}
  */
-async function loadLibrary() {
-  if (applicationState.searchQuery) {
-    /** parameters 是统一搜索接口的关键词参数。 */
-    const parameters = new URLSearchParams({ q: applicationState.searchQuery });
-    /** searchPayload 是跨全部内容和个人笔记的搜索响应。 */
-    const searchPayload = await requestJson(`/api/search?${parameters}`);
-    applicationState.searchResults = searchPayload.results;
-  } else {
-    /** documentRequest 是上传文件列表请求。 */
-    const documentRequest = requestJson("/api/documents");
-    /** articleRequest 是 URL 文章列表请求。 */
-    const articleRequest = requestJson("/api/articles");
-    /** folderRequest 是树形文件夹及累计数量请求。 */
-    const folderRequest = requestJson("/api/folders");
-    /** responses 是文档、文章和文件夹并行返回的结果。 */
-    const [documentPayload, articlePayload, folderPayload] = await Promise.all([
-      documentRequest,
-      articleRequest,
-      folderRequest,
-    ]);
-    applicationState.documents = documentPayload.documents;
-    applicationState.articles = articlePayload.articles;
-    applicationState.folders = folderPayload.folders;
-    applicationState.searchResults = [];
+/** 按页读取完整轻量索引，保留目录、批量操作和任务定位的完整候选集。 */
+async function loadLibraryMetadataPages(endpoint, key, sequence) {
+  const items = new Map();
+  let offset = 0;
+  while (sequence === applicationState.libraryRequestSequence) {
+    const payload = await requestJson(`${endpoint}?limit=200&offset=${offset}`);
+    const page = payload[key] || [];
+    for (const item of page) items.set(item.id, item);
+    if (!payload.hasMore) return [...items.values()];
+    if (!page.length) throw new Error("资料列表分页未能继续，请刷新后重试。");
+    offset += page.length;
   }
+  return null;
+}
+
+async function loadLibrary({ append = false } = {}) {
+  if (append && (applicationState.searchLoading || !applicationState.searchHasMore)) return;
+  const query = applicationState.searchQuery;
+  const sequence = ++applicationState.libraryRequestSequence;
+  if (query) {
+    if (query !== applicationState.searchResultsQuery) {
+      applicationState.searchResults = [];
+      applicationState.searchTotal = 0;
+      applicationState.searchHasMore = false;
+      applicationState.selectedLibraryItemKeys.clear();
+    }
+    applicationState.searchLoading = true;
+    renderLibrary();
+    try {
+      const offset = append ? applicationState.searchResults.length : 0;
+      const parameters = new URLSearchParams({ q: query, limit: "50", offset: String(offset) });
+      const payload = await requestJson(`/api/search?${parameters}`);
+      if (sequence !== applicationState.libraryRequestSequence || query !== applicationState.searchQuery) return;
+      const candidates = append ? [...applicationState.searchResults, ...payload.results] : payload.results;
+      applicationState.searchResults = [...new Map(candidates.map((item) => [getLibraryItemKey(item), item])).values()];
+      applicationState.searchTotal = Number(payload.total ?? applicationState.searchResults.length);
+      applicationState.searchHasMore = Boolean(payload.hasMore);
+      applicationState.searchResultsQuery = query;
+    } finally {
+      if (sequence === applicationState.libraryRequestSequence) {
+        applicationState.searchLoading = false;
+        renderLibrary();
+      }
+    }
+    return;
+  }
+  applicationState.searchLoading = false;
+  const [documents, articles, folderPayload] = await Promise.all([
+    loadLibraryMetadataPages("/api/documents", "documents", sequence),
+    loadLibraryMetadataPages("/api/articles", "articles", sequence),
+    requestJson("/api/folders"),
+  ]);
+  if (sequence !== applicationState.libraryRequestSequence || applicationState.searchQuery) return;
+  applicationState.documents = documents;
+  applicationState.articles = articles;
+  applicationState.folders = folderPayload.folders;
+  applicationState.searchResults = [];
+  applicationState.searchResultsQuery = "";
+  applicationState.searchTotal = 0;
+  applicationState.searchHasMore = false;
   renderLibrary();
 }
 
@@ -7282,11 +7392,14 @@ async function retryPaperExtraction(paper, button) {
  * @returns {void}
  */
 function renderPapers() {
-  dom.paperTotal.textContent = String(applicationState.papers.length);
+  dom.paperTotal.textContent = String(paperLibrary.libraryTotal());
+  const visiblePapers = applicationState.papers;
   dom.paperGrid.replaceChildren();
-  dom.paperGrid.hidden = applicationState.papers.length === 0;
-  dom.paperEmptyState.hidden = applicationState.papers.length > 0;
-  for (const paper of applicationState.papers) {
+  dom.paperGrid.hidden = visiblePapers.length === 0;
+  dom.paperEmptyState.hidden = visiblePapers.length > 0;
+  dom.paperEmptyState.querySelector("h3").textContent = paperLibrary.libraryTotal() ? "当前目录或筛选没有匹配论文" : "论文库还没有内容";
+  dom.paperEmptyState.querySelector("p").textContent = paperLibrary.libraryTotal() ? "可以切换到全部论文、清除搜索筛选，或将论文移动到这个目录。" : "选择今日经典论文，或导入自己的论文，再按研究方向建立目录。";
+  for (const paper of visiblePapers) {
     /** card 是论文库中的单篇论文卡片。 */
     const card = document.createElement("article");
     card.className = "paper-card";
@@ -7308,7 +7421,8 @@ function renderPapers() {
     /** hasFullPaperTranslation 表示 Codex 中文全文已经写回数据库。 */
     const hasFullPaperTranslation = paper.fullTranslationStatus === "ready";
     /** isPaperSourceMissing 避免无 PDF、无正文的论文被误报为等待翻译。 */
-    const isPaperSourceMissing = !paper.pdfUrl
+    const hasActiveImport = ["queued", "running"].includes(paper.importJob?.status);
+    const isPaperSourceMissing = !hasActiveImport && !paper.pdfUrl
       && !hasExtractedPaperText
       && !hasFullPaperTranslation;
     /** hasReadablePaperContent 汇总卡片能够安全依赖的轻量状态字段。 */
@@ -7367,12 +7481,16 @@ function renderPapers() {
       );
     }
     /** processingLabel 是论文从下载、解析到 Codex 翻译的当前可读状态。 */
-    const processingLabel = paper.extractionError
-      ? `PDF 解析失败：${paper.extractionError}`
+    const processingLabel = hasActiveImport
+      ? `${importJobStageLabels[paper.importJob.stage] || "正在导入"} · ${Math.round(paper.importJob.progressPercent)}% · 第 ${Math.max(1, paper.importJob.attemptCount)} 次`
+      : paper.extractionError
+      ? `全文导入失败：${paper.extractionError}`
       : hasFullPaperTranslation
         ? paper.fullTranslationFidelity === "degraded"
           ? "Codex 中文全文已完成 · 图文结构降级"
-          : "Codex 中文全文已完成 · 完整性已校验"
+          : paper.fullTranslationFidelity === "complete"
+            ? "Codex 中文全文已完成 · 完整性已校验"
+            : "Codex 中文全文已完成 · 完整性尚未验证"
         : paper.fullTranslationStatus === "failed"
           ? `Codex 中文全文失败：${paper.fullTranslationError || "可进入阅读页重试"}`
           : paper.pdfUrl && !hasExtractedPaperText
@@ -7385,12 +7503,13 @@ function renderPapers() {
                 ? "原文可直接阅读"
                 : "等待 Codex 翻译";
     /** paperStateIsFailed 统一控制提取或全文翻译失败样式。 */
-    const paperStateIsFailed = Boolean(
+    const paperStateIsFailed = !hasActiveImport && Boolean(
       paper.extractionError
         || paper.fullTranslationStatus === "failed"
         || isPaperSourceMissing,
     );
     contentElements.push(
+      ...(paper.hasDuplicateIdentity ? [createTextElement("span", "paper-translation-state", "既有重复身份 · 记录与笔记均已保留")] : []),
       createTextElement(
         "span",
         `paper-translation-state ${hasFullPaperTranslation ? "is-translated" : ""} ${paperStateIsFailed ? "is-failed" : ""}`,
@@ -7416,6 +7535,7 @@ function renderPapers() {
     content.className = "paper-card-content";
     content.replaceChildren(...contentElements.slice(1, -1));
     card.replaceChildren(metadata, content, footer);
+    paperLibrary.decorate(card, paper);
     dom.paperGrid.append(card);
   }
 }
@@ -7425,17 +7545,28 @@ function renderPapers() {
  *
  * @returns {Promise<void>}
  */
+let paperRefreshTimer = null;
+let paperRequestSequence = 0;
 async function loadPapers() {
+  const sequence = ++paperRequestSequence;
+  window.clearTimeout(paperRefreshTimer);
   try {
     /** queryString 是当前论文来源筛选参数。 */
-    const queryString = applicationState.activePaperSource
-      ? `?source=${encodeURIComponent(applicationState.activePaperSource)}`
-      : "";
+    const queryString = `?${paperLibrary.query(applicationState.activePaperSource)}`;
     /** payload 是本地论文列表接口响应。 */
     const payload = await requestJson(`/api/papers${queryString}`);
+    if (sequence !== paperRequestSequence) return;
     applicationState.papers = payload.papers;
+    paperLibrary.setData(payload);
     renderPapers();
+    if (payload.papers.some(paper => ["queued", "running"].includes(paper.importJob?.status) || ["pending", "processing"].includes(paper.fullTranslationStatus))) {
+      paperRefreshTimer = window.setTimeout(() => {
+        if (applicationState.activeView === "papers" && !document.hidden) void loadPapers();
+      }, 5_000);
+    }
   } catch (error) {
+    if (sequence !== paperRequestSequence) return;
+    if (error.message.includes("论文目录已不存在") && await paperLibrary.recoverFolder()) return;
     showToast(error.message);
   }
 }
@@ -7467,6 +7598,7 @@ function createSafePaperTranslation(translatedHtml) {
     "TD",
     "STRONG",
     "EM",
+    "U",
     "SUB",
     "SUP",
     "BR",
@@ -7500,7 +7632,7 @@ function createSafePaperTranslation(translatedHtml) {
     if (sourceElement.tagName === "IMG") {
       /** remoteSource 只接受数据库已验证的公开 HTTP(S) 图片。 */
       const remoteSource = sourceElement.getAttribute("src") || "";
-      if (!/^https?:\/\//i.test(remoteSource)) return;
+      if (!/^https?:\/\//i.test(remoteSource) && !parsePaperAssetUrl(remoteSource)) return;
       /** safeImage 始终通过本地图片代理加载，避免第三方防盗链与隐私请求。 */
       const safeImage = document.createElement("img");
       setArticleImageSource(safeImage, remoteSource);
@@ -8172,6 +8304,12 @@ async function uploadFile(file, options = {}) {
       headers: requestHeaders,
       body: file,
     });
+    if (payload.warnings?.length) {
+      statusElement.textContent = payload.warnings.join("；");
+      queueItem.classList.add("is-warning");
+      if (!options.quietSuccess) showToast(statusElement.textContent);
+      return { status: "uploaded", warnings: payload.warnings };
+    }
     queueItem.classList.add("is-complete");
     /** targetFolderLabel 明确展示实际目录，避免把自动识别分类误认为保存位置。 */
     const targetFolderLabel = String(options.targetFolderLabel || "").trim();
@@ -8452,6 +8590,7 @@ async function uploadPaperFile(file) {
       headers: {
         "Content-Type": file.type || "application/pdf",
         "X-File-Name": encodeURIComponent(file.name),
+        "X-Paper-Folder-Id": paperLibrary.importFolderId(),
       },
       body: file,
     });
@@ -8486,12 +8625,14 @@ async function importPaperUrl() {
     const payload = await requestJson("/api/papers/import/url", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: inputUrl }),
+      body: JSON.stringify({ url: inputUrl, paperFolderId: paperLibrary.importFolderId() }),
     });
     dom.paperUrlInput.value = "";
     await loadPapers();
     showToast(
-      payload.processing
+      payload.duplicate
+        ? `《${payload.paper.titleZh || payload.paper.title}》已在论文库中，已复用原记录。`
+        : payload.processing
         ? `《${payload.paper.titleZh || payload.paper.title}》已保存，正在后台下载并解析。`
         : `《${payload.paper.titleZh || payload.paper.title}》已导入论文库。`,
     );
@@ -8635,6 +8776,7 @@ function setupPaperViewMode() {
 }
 
 async function initializeApplication() {
+  paperLibrary = createPaperLibrary({ request: requestJson, notify: showToast, reload: loadPapers });
   setupThemeToggle();
   setupViewMode();
   setupPaperViewMode();
@@ -8712,13 +8854,14 @@ async function initializeApplication() {
   dom.paperAiButton.addEventListener("click", () => {
     if (applicationState.selectedPaper) void openAiWithSource("paper", applicationState.selectedPaper.id);
   });
+  dom.paperQualityFilter.addEventListener("change", () => paperLibrary.changed());
   for (const button of dom.paperSourceTabs.querySelectorAll("button")) {
     button.addEventListener("click", () => {
       applicationState.activePaperSource = button.dataset.paperSource || "";
       for (const tabButton of dom.paperSourceTabs.querySelectorAll("button")) {
         tabButton.classList.toggle("is-active", tabButton === button);
       }
-      void loadPapers();
+      paperLibrary.changed();
     });
   }
   dom.checkPaperReminderButton.addEventListener("click", () => {
@@ -8811,7 +8954,7 @@ async function initializeApplication() {
     window.clearTimeout(applicationState.searchTimer);
     applicationState.searchTimer = window.setTimeout(() => {
       applicationState.searchQuery = dom.searchInput.value.trim();
-      void loadLibrary();
+      void loadLibrary().catch((error) => showToast(error.message));
     }, 260);
   });
   dom.favoriteFilterButton.addEventListener("click", () => {
@@ -8885,12 +9028,49 @@ async function initializeApplication() {
     }
   });
   dom.backupButton.addEventListener("click", async () => {
+    dom.backupButton.disabled = true;
+    dom.fullBackupButton.disabled = true;
+    dom.backupButton.textContent = "正在创建快照…";
+    dom.storageBackupStatus.textContent = "正在保存并校验数据库快照…";
     try {
       /** payload 是手动确认备份响应。 */
       const payload = await requestJson("/api/backups", { method: "POST" });
       showToast(`${payload.message} ${payload.backupName}`);
     } catch (error) {
       showToast(error.message);
+    } finally {
+      dom.backupButton.disabled = false;
+      dom.fullBackupButton.disabled = false;
+      dom.backupButton.textContent = "创建数据库快照";
+      await loadStorageStatus().catch(error => showToast(error.message));
+    }
+  });
+  dom.searchLoadMore.addEventListener("click", () => {
+    void loadLibrary({ append: true }).catch((error) => showToast(error.message));
+  });
+  dom.storageCleanupRetry.addEventListener("click", async () => {
+    dom.storageCleanupRetry.disabled = true;
+    try {
+      const result = await requestJson("/api/storage/cleanup/retry", { method: "POST" });
+      showToast(result.pendingFileCount ? `仍有 ${result.pendingFileCount} 个文件待清理，请解除占用后重试。` : "文件清理已完成。");
+    } catch (error) { showToast(error.message); }
+    finally { await loadStorageStatus().catch(error => showToast(error.message)); }
+  });
+  dom.fullBackupButton.addEventListener("click", async () => {
+    dom.fullBackupButton.disabled = true;
+    dom.backupButton.disabled = true;
+    dom.fullBackupButton.textContent = "正在备份并校验…";
+    dom.storageFullBackupStatus.textContent = "正在复制资料并校验完整备份…";
+    try {
+      const payload = await requestJson("/api/backups/full", { method: "POST" });
+      showToast(payload.message);
+    } catch (error) {
+      showToast(error.message);
+    } finally {
+      dom.fullBackupButton.disabled = false;
+      dom.backupButton.disabled = false;
+      dom.fullBackupButton.textContent = "创建完整备份并校验";
+      await loadStorageStatus().catch((error) => { dom.storageFullBackupStatus.textContent = error.message; });
     }
   });
   dom.browserPairingButton.addEventListener("click", () => {

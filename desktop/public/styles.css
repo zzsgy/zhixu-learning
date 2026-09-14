@@ -2581,11 +2581,16 @@ body.has-reading-toc .floating-reader-back {
 
 /* 本地存储说明页。 */
 .storage-hero { border-bottom: 1px solid var(--line-dark); padding: 44px 0 36px; }
-.storage-grid { display: grid; grid-template-columns: repeat(3, 1fr); border-left: 1px solid var(--line-dark); }
-.storage-grid article { min-height: 260px; border-right: 1px solid var(--line-dark); border-bottom: 1px solid var(--line-dark); padding: 30px; }
+.storage-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-left: 1px solid var(--line-dark); }
+.storage-grid article { min-width: 0; min-height: 260px; border-right: 1px solid var(--line-dark); border-bottom: 1px solid var(--line-dark); padding: 30px; }
+#search-pagination[hidden], #search-load-more[hidden] { display: none; }
+.storage-grid button { max-width: 100%; white-space: normal; }
 .storage-grid article > span { color: var(--blue); font-family: var(--mono); }
 .storage-grid h3 { margin: 40px 0 14px; font-family: var(--serif); font-size: 26px; }
 .storage-grid p { color: var(--ink-soft); line-height: 1.8; }
+.storage-grid p, .storage-hero code { overflow-wrap: anywhere; }
+.paper-quality-filter { display: flex; align-items: center; gap: 12px; margin: 12px 0 22px; }
+.paper-quality-filter select { max-width: 100%; padding: 8px; }
 .storage-grid button { margin-top: 18px; }
 .browser-integration-card, .import-job-card { min-height: 340px !important; }
 .browser-pairing-code { margin-top: 18px; border: 1px solid var(--line-dark); padding: 14px; background: var(--paper-raised); }

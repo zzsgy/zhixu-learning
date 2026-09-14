@@ -10,6 +10,8 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { parseHTML } from "linkedom";
 import { normalizePaperReadingLayout } from "./public/paper-layout.js";
+import { parsePaperAssetUrl } from "./public/paper-assets.js";
+import { resolvePaperAsset } from "./lib/paper-assets.mjs";
 import {
   articleImageDirectory,
   attachmentDirectory,
@@ -29,6 +31,15 @@ import {
   createImportJob,
   createReadingAnnotation,
   createDailyBackup,
+  createManualBackup,
+  createFullKnowledgeBackup,
+  getLocalStorageStatus,
+  enqueuePaperImport,
+  recoverPendingPaperImports,
+  getPaperImportStatuses,
+  listPaperIdentityDuplicates,
+  paperFolders,
+  getPaperLibraryPage,
   createKnowledgeCard,
   createTopic,
   clearPaperLibrary,
@@ -58,8 +69,11 @@ import {
   insertDocument,
   ensureFolderPath,
   listArticles,
+  listArticlesPage,
   listAiConversations,
   listDocuments,
+  listDocumentsPage,
+  getContentLocations,
   listDocumentPages,
   listFolders,
   listGitHubProjects,
@@ -82,7 +96,7 @@ import {
   saveArticle,
   saveDocumentOcrResult,
   saveAiExchange,
-  searchKnowledgeBase,
+  searchKnowledgeBasePage,
   selectPaperCandidate,
   setFavorite,
   snoozePaperReminder,
@@ -158,7 +172,13 @@ import {
   parseDocsifyChapter,
 } from "./lib/docsify-importer.mjs";
 import { createImportJobRunner } from "./lib/import-job-runner.mjs";
+import { createPaperImportHandler } from "./lib/paper-import-service.mjs";
 import { createArticleImageCache } from "./lib/article-image-cache.mjs";
+import { checkLocalApiRequest } from "./lib/local-request-security.mjs";
+import { createFileDeletionRunner } from "./lib/file-deletion-runner.mjs";
+import {
+  listPendingFileDeletions, completePendingFileDeletion, failPendingFileDeletion, isPendingFileStillReferenced,
+} from "./lib/database.mjs";
 import {
   getOcrEngineStatus,
   isOcrSupportedExtension,
@@ -184,6 +204,21 @@ const articleImageCache = createArticleImageCache({
   fetchImage: fetchPublicImage,
 });
 
+const fileDeletionRunner = createFileDeletionRunner({
+  directories: { attachment: attachmentDirectory, paper_pdf: paperDirectory,
+    paper_chinese_pdf: paperChinesePdfDirectory, paper_chinese_hash: paperChinesePdfDirectory },
+  listPending: listPendingFileDeletions, isReferenced: isPendingFileStillReferenced,
+  markComplete: completePendingFileDeletion, markFailed: failPendingFileDeletion,
+});
+
+function runPendingFileCleanup() {
+  try { return fileDeletionRunner.run(); } catch (error) {
+    console.warn(`附件清理暂未完成：${error.message}`);
+    return { deletedFileCount: 0, preservedFileCount: 0, pendingFileCount: null,
+      warnings: ["资料记录已删除，附件清理暂未完成，将在下次启动或重试时继续。"] };
+  }
+}
+
 /** paperScheduleIntervalMilliseconds 是后台检查新自然周的间隔。 */
 const paperScheduleIntervalMilliseconds = 6 * 60 * 60 * 1000;
 /** backfilledArticleCount 是本次启动补齐语言状态的历史文章数量。 */
@@ -201,24 +236,9 @@ if (backfilledArticleCount > 0) {
  */
 function queuePaperPdfProcessing(paper, options = {}) {
   if (!paper?.id) return;
-  /** processingTask 是单篇论文的后台提取、分类和翻译唤醒流程。 */
-  const processingTask = preparePaperFullText(paper.id, {
-    force: Boolean(options.force),
-  })
-    .then(async (extractedPaper) => {
-      if (!extractedPaper?.sourceText) return extractedPaper;
-      /** classification 是依据完整英文正文生成的技术分类。 */
-      const classification = await classifyDocument({
-        fileName: extractedPaper.title,
-        text: extractedPaper.sourceText,
-      });
-      return updatePaperCategory(extractedPaper.id, classification.category);
-    })
-    .then(() => triggerCodexPaperTranslationWorker())
-    .catch((error) => {
-      console.error(`论文后台解析失败：${error.message}`);
-    });
-  void processingTask;
+  const result = enqueuePaperImport({ paperId: paper.id, inputUrl: paper.sourceUrl || paper.pdfUrl, force: Boolean(options.force) });
+  importJobRunner.trigger();
+  return result;
 }
 
 /** browserPairingCodeLifetimeMilliseconds 是一次性配对码的有效期。 */
@@ -732,6 +752,7 @@ async function processVideoTranscriptJob(job, context) {
 /** importJobRunner 是 OCR、视频和浏览器收藏共用的顺序任务执行器。 */
 const importJobRunner = createImportJobRunner({
   handlers: {
+    paper_import: createPaperImportHandler(),
     browser_capture: processBrowserCaptureJob,
     document_ocr: processDocumentOcrJob,
     video_transcript: processVideoTranscriptJob,
@@ -992,10 +1013,7 @@ function toPaperListItem(paper) {
  * @returns {Array<Record<string, unknown>>} 带 location 的任务。
  */
 function attachImportJobLocations(jobs) {
-  const targetsByKey = new Map([
-    ...listDocuments({ limit: 1000 }).map((item) => [`document:${item.id}`, item]),
-    ...listArticles({ limit: 1000 }).map((item) => [`article:${item.id}`, item]),
-  ]);
+  const targetsByKey = getContentLocations(jobs);
   const foldersById = new Map(listFolders().map((folder) => [folder.id, folder]));
   return jobs.map((job) => {
     const target = targetsByKey.get(`${job.targetType}:${job.targetId}`);
@@ -1020,7 +1038,7 @@ function escapePaperExportText(value) {
 /** 生成隔离的中文论文打印页；正文只保留阅读型标签和安全属性。 */
 function createChinesePaperExportHtml(paper, origin) {
   const { document: parsedDocument } = parseHTML(`<main>${paper.fullTranslationHtml || ""}</main>`);
-  const allowedTags = new Set(["H2", "H3", "H4", "P", "UL", "OL", "LI", "BLOCKQUOTE", "PRE", "CODE", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "STRONG", "EM", "SUB", "SUP", "BR", "IMG"]);
+  const allowedTags = new Set(["H2", "H3", "H4", "P", "UL", "OL", "LI", "BLOCKQUOTE", "PRE", "CODE", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "STRONG", "EM", "U", "SUB", "SUP", "BR", "IMG"]);
   const discardedTags = new Set(["SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "TEMPLATE", "FORM"]);
   for (const element of [...parsedDocument.querySelectorAll("main *")]) {
     if (discardedTags.has(element.tagName)) {
@@ -1037,6 +1055,7 @@ function createChinesePaperExportHtml(paper, origin) {
     if (element.tagName === "IMG") {
       const source = element.getAttribute("src") || "";
       if (/^https?:\/\//i.test(source)) element.setAttribute("src", `${origin}/api/article-images?url=${encodeURIComponent(source)}`);
+      else if (parsePaperAssetUrl(source)) element.setAttribute("src", `${origin}${source}`);
       else element.remove();
     }
   }
@@ -1044,12 +1063,15 @@ function createChinesePaperExportHtml(paper, origin) {
   const title = escapePaperExportText(paper.titleZh || paper.title);
   const originalTitle = escapePaperExportText(paper.titleZh ? paper.title : "");
   const abstract = escapePaperExportText(paper.abstractZh || paper.abstract || "");
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${title}</title><link rel="stylesheet" href="/vendor/katex/katex.min.css"><style>@page{size:A4;margin:18mm 17mm 20mm}*{box-sizing:border-box}body{margin:0;color:#182622;font-family:"Noto Serif SC","Microsoft YaHei",serif;font-size:11pt;line-height:1.72}h1{font-size:25pt;line-height:1.25;margin:0 0 8mm}h2{font-size:18pt;break-after:avoid;margin:11mm 0 4mm}h3{font-size:14pt;break-after:avoid;margin:8mm 0 3mm}h4{font-size:12pt;break-after:avoid}p,li{orphans:3;widows:3}header{border-bottom:1px solid #9db4ac;margin-bottom:10mm;padding-bottom:7mm}.original{color:#697a75;font-style:italic}.abstract{border-left:3px solid #5a998c;padding-left:5mm;color:#42534e}img{display:block;max-width:100%;max-height:225mm;object-fit:contain;margin:6mm auto;break-inside:avoid}table{width:100%;border-collapse:collapse;margin:0;font-size:8.5pt;break-inside:auto}tr{break-inside:avoid}th,td{border:1px solid #aebdb8;padding:2mm;vertical-align:top}pre{white-space:pre-wrap;word-break:break-word;background:#f3f7f5;padding:4mm}blockquote{margin:5mm 0;border-left:3px solid #9db4ac;padding-left:5mm;color:#42534e}.katex-display{overflow:hidden}.paper-caption{margin:6mm 0 2mm;color:#42534e;font:700 8.5pt/1.45 "Microsoft YaHei",sans-serif}.paper-page-continuation{margin:4mm 0;border-block:1px solid #d5dfdb;padding:1.5mm 0;color:#697a75;text-align:center;font-size:8pt}.paper-table-scroll{margin:2mm 0 7mm;overflow:visible;border:1px solid #aebdb8;border-radius:2mm}.paper-table-scroll table{border:0}.paper-table-scroll tr:last-child>td{border-bottom:0}.paper-table-scroll tr>td:last-child{border-right:0}.paper-table-heading-row>td,.paper-table-heading-row>th{background:#f3f7f5;font-weight:700}.paper-transcript-table{font-family:Consolas,"Courier New",monospace;font-size:7.2pt;line-height:1.38}.paper-transcript-table p{margin:0 0 1mm}.paper-transcript-pre{margin:0!important;border:0!important;background:transparent!important;padding:0!important;font:7.2pt/1.38 Consolas,"Courier New",monospace!important}.paper-prompt-transcript{margin:3mm 0 7mm;border:1px solid #aebdb8;border-radius:2mm}.paper-prompt-row{display:grid;grid-template-columns:25mm 1fr;border-bottom:1px solid #d5dfdb;break-inside:avoid}.paper-prompt-row:last-child{border-bottom:0}.paper-prompt-row>*{margin:0;padding:2mm 3mm}.paper-prompt-label{border-right:1px solid #d5dfdb;background:#f3f7f5;font:700 8pt/1.45 "Microsoft YaHei",sans-serif}.paper-prompt-value{font:8pt/1.5 Consolas,"Courier New",monospace;overflow-wrap:anywhere}.paper-transcript-line{margin:0 0 1mm;border-left:2px solid #9db4ac;padding-left:2mm}</style></head><body><header><h1>${title}</h1>${originalTitle ? `<p class="original">${originalTitle}</p>` : ""}${abstract ? `<p class="abstract">${abstract}</p>` : ""}</header><main>${parsedDocument.querySelector("main")?.innerHTML || ""}</main><script type="module">import renderMathInElement from "/vendor/katex/contrib/auto-render.mjs";renderMathInElement(document.querySelector("main"),{delimiters:[{left:"$$",right:"$$",display:true},{left:"\\[",right:"\\]",display:true},{left:"\\(",right:"\\)",display:false},{left:"$",right:"$",display:false}],throwOnError:false,strict:"ignore",trust:false});document.documentElement.dataset.pdfReady="true";</script></body></html>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${title}</title><link rel="stylesheet" href="/vendor/katex/katex.min.css"><style>@page{size:A4;margin:18mm 17mm 20mm}*{box-sizing:border-box}body{margin:0;color:#182622;font-family:"Noto Serif SC","Microsoft YaHei",serif;font-size:11pt;line-height:1.72}h1{font-size:25pt;line-height:1.25;margin:0 0 8mm}h2{font-size:18pt;break-after:avoid;margin:11mm 0 4mm}h3{font-size:14pt;break-after:avoid;margin:8mm 0 3mm}h4{font-size:12pt;break-after:avoid}p,li{orphans:3;widows:3}header{border-bottom:1px solid #9db4ac;margin-bottom:10mm;padding-bottom:7mm}.original{color:#697a75;font-style:italic}.abstract{border-left:3px solid #5a998c;padding-left:5mm;color:#42534e}img{display:block;max-width:100%;max-height:225mm;object-fit:contain;margin:6mm auto;break-inside:avoid}table{width:100%;border-collapse:collapse;margin:0;font-size:8.5pt;break-inside:auto}tr{break-inside:avoid}th,td{border:1px solid #aebdb8;padding:2mm;vertical-align:top}pre{white-space:pre-wrap;word-break:break-word;background:#f3f7f5;padding:4mm}blockquote{margin:5mm 0;border-left:3px solid #9db4ac;padding-left:5mm;color:#42534e}.katex-display{overflow:hidden}.paper-caption{margin:6mm 0 2mm;color:#42534e;font:700 8.5pt/1.45 "Microsoft YaHei",sans-serif}.paper-page-continuation{margin:4mm 0;border-block:1px solid #d5dfdb;padding:1.5mm 0;color:#697a75;text-align:center;font-size:8pt}.paper-table-scroll{margin:2mm 0 7mm;overflow:visible;border:1px solid #aebdb8;border-radius:2mm}.paper-table-scroll table{border:0}.paper-table-scroll tr:last-child>td{border-bottom:0}.paper-table-scroll tr>td:last-child{border-right:0}.paper-table-heading-row>td,.paper-table-heading-row>th{background:#f3f7f5;font-weight:700}.paper-transcript-table{font-family:Consolas,"Courier New",monospace;font-size:7.2pt;line-height:1.38}.paper-transcript-table p{margin:0 0 1mm}.paper-transcript-pre{margin:0!important;border:0!important;background:transparent!important;padding:0!important;font:7.2pt/1.38 Consolas,"Courier New",monospace!important}.paper-prompt-transcript{margin:3mm 0 7mm;border:1px solid #aebdb8;border-radius:2mm}.paper-prompt-row{display:grid;grid-template-columns:25mm 1fr;border-bottom:1px solid #d5dfdb;break-inside:avoid}.paper-prompt-row:last-child{border-bottom:0}.paper-prompt-row>*{margin:0;padding:2mm 3mm}.paper-prompt-label{border-right:1px solid #d5dfdb;background:#f3f7f5;font:700 8pt/1.45 "Microsoft YaHei",sans-serif}.paper-prompt-value{font:8pt/1.5 Consolas,"Courier New",monospace;overflow-wrap:anywhere}.paper-transcript-line{margin:0 0 1mm;border-left:2px solid #9db4ac;padding-left:2mm}</style></head><body><header><h1>${title}</h1>${originalTitle ? `<p class="original">${originalTitle}</p>` : ""}${abstract ? `<p class="abstract">${abstract}</p>` : ""}</header><main>${parsedDocument.querySelector("main")?.innerHTML || ""}</main><script type="module" src="/paper-export.js"></script></body></html>`;
 }
 
 function getChinesePaperPdfPaths(paper) {
   const safeId = String(paper.id).replace(/[^a-zA-Z0-9_-]/g, "_");
-  const hash = crypto.createHash("sha256").update(paper.fullTranslationHtml || "").digest("hex");
+  // 渲染器版本参与缓存键，避免公式修复后仍返回旧的错误 PDF。
+  const hash = crypto.createHash("sha256").update("zhixu-paper-renderer-v3\0")
+    .update(JSON.stringify([paper.titleZh || "", paper.title || "", paper.abstractZh || "", paper.abstract || "", paper.fullTranslationHtml || ""]))
+    .digest("hex");
   return { pdfPath: path.join(paperChinesePdfDirectory, `${safeId}.pdf`), hashPath: path.join(paperChinesePdfDirectory, `${safeId}.sha256`), hash };
 }
 
@@ -1084,6 +1106,15 @@ async function generateChinesePaperPdf(paper) {
 }
 
 async function handleApiRequest(request, response, url) {
+  if (request.method === "GET" && url.pathname === "/api/storage/cleanup") {
+    const pending = listPendingFileDeletions();
+    sendJson(response, 200, { pending, pendingFileCount: pending.length, articleImages: "保留共享图片，尚未执行无引用图片清理。" });
+    return true;
+  }
+  if (request.method === "POST" && url.pathname === "/api/storage/cleanup/retry") {
+    sendJson(response, 200, runPendingFileCleanup());
+    return true;
+  }
   if (request.method === "OPTIONS" && url.pathname.startsWith("/api/browser/")) {
     /** extensionOrigin 是仅允许浏览器扩展跨源调用的来源。 */
     const extensionOrigin = getBrowserExtensionOrigin(request);
@@ -1571,36 +1602,15 @@ async function handleApiRequest(request, response, url) {
     const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
     /** items 是交给数据库事务校验与删除的目标集合。 */
     const items = Array.isArray(payload.items) ? payload.items : [];
-    /** attachmentPaths 在删除数据库记录前保存需要清理的精确本地附件。 */
-    const attachmentPaths = [];
-    for (const item of items) {
-      const targetType = String(item?.targetType || "").trim();
-      const targetId = String(item?.targetId || "").trim();
-      if (targetType === "document" && targetId) {
-        const document = getDocumentById(targetId);
-        if (document?.storedName) {
-          attachmentPaths.push({
-            path: path.resolve(attachmentDirectory, document.storedName),
-            directory: attachmentDirectory,
-          });
-        }
-      } else if (targetType === "paper" && targetId) {
-        const cachedPdfPath = getCachedPaperPdfPath(targetId);
-        if (cachedPdfPath) attachmentPaths.push({ path: cachedPdfPath, directory: paperDirectory });
-      }
-    }
     createDailyBackup();
     /** deletedTargets 仅在所有目标均成功删除后返回。 */
     const deletedTargets = deleteKnowledgeTargets(items);
-    for (const attachment of attachmentPaths) {
-      if (isPathInsideDirectory(attachment.path, attachment.directory)) {
-        fs.rmSync(attachment.path, { force: true });
-      }
-    }
+    const cleanup = runPendingFileCleanup();
     sendJson(response, 200, {
       deleted: deletedTargets,
       deletedCount: deletedTargets.length,
       folders: listFolders(),
+      cleanup, warnings: cleanup.warnings,
     });
     return true;
   }
@@ -1844,13 +1854,16 @@ async function handleApiRequest(request, response, url) {
 
   if (request.method === "GET" && url.pathname === "/api/search") {
     /** results 是跨内容正文、阅读笔记和高亮批注的统一搜索结果。 */
-    const results = searchKnowledgeBase({
+    const searchPage = searchKnowledgeBasePage({
       query: url.searchParams.get("q") ?? "",
       targetType: url.searchParams.get("targetType") ?? "",
       category: url.searchParams.get("category") ?? "",
       tagName: url.searchParams.get("tagName") ?? "",
+      folderId: url.searchParams.get("folderId") ?? "",
+      limit: url.searchParams.get("limit"),
+      offset: url.searchParams.get("offset"),
     });
-    sendJson(response, 200, { results });
+    sendJson(response, 200, searchPage);
     return true;
   }
 
@@ -2133,8 +2146,41 @@ async function handleApiRequest(request, response, url) {
     /** sourceType 是可选的论文来源过滤值。 */
     const sourceType = url.searchParams.get("source") ?? "";
     /** papers 是用户已经保存到统一论文库的论文。 */
-    const papers = listPapers(sourceType).map(toPaperListItem);
-    sendJson(response, 200, { papers });
+    const jobByPaper = new Map(getPaperImportStatuses().map(job => [job.target_id, { id: job.id, status: job.status, stage: job.stage, progressPercent: job.progress_percent, attemptCount: job.attempt_count, errorMessage: job.error_message }]));
+    const duplicates = listPaperIdentityDuplicates();
+    const duplicateIds = new Set(duplicates.flatMap(group => group.paperIds));
+    const page = url.searchParams.has("page") ? getPaperLibraryPage(Object.fromEntries(url.searchParams), [...duplicateIds]) : null;
+    const papers = (page?.papers || listPapers(sourceType)).map(paper => ({ ...toPaperListItem(paper), importJob: jobByPaper.get(paper.id) || null, hasDuplicateIdentity: duplicateIds.has(paper.id) }));
+    sendJson(response, 200, { ...page, papers, duplicates });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/paper-folders") {
+    sendJson(response, 200, { folders: paperFolders.list() });
+    return true;
+  }
+  if (request.method === "POST" && url.pathname === "/api/paper-folders") {
+    const payload = JSON.parse((await readRequestBuffer(request, 32 * 1024)).toString("utf8") || "{}");
+    const folder = paperFolders.create(payload);
+    createDailyBackup();
+    sendJson(response, 201, { folder, folders: paperFolders.list() });
+    return true;
+  }
+  const paperFolderMatch = url.pathname.match(/^\/api\/paper-folders\/([^/]+)$/);
+  if (paperFolderMatch && ["PATCH", "DELETE"].includes(request.method)) {
+    const id = decodeURIComponent(paperFolderMatch[1]);
+    const result = request.method === "DELETE"
+      ? { released: paperFolders.remove(id) }
+      : { folder: paperFolders.update(id, JSON.parse((await readRequestBuffer(request, 32 * 1024)).toString("utf8") || "{}")) };
+    createDailyBackup();
+    sendJson(response, 200, { ...result, folders: paperFolders.list() });
+    return true;
+  }
+  if (request.method === "PATCH" && url.pathname === "/api/paper-folder-items") {
+    const payload = JSON.parse((await readRequestBuffer(request, 128 * 1024)).toString("utf8") || "{}");
+    const movedCount = paperFolders.assign(payload.paperIds, payload.folderId || null);
+    createDailyBackup();
+    sendJson(response, 200, { movedCount, folders: paperFolders.list() });
     return true;
   }
 
@@ -2252,19 +2298,15 @@ async function handleApiRequest(request, response, url) {
       sendJson(response, 404, { message: "候选论文不存在或已经失效。" });
       return true;
     }
-    /** fullTextTask 在响应后继续下载并提取公开 PDF，不阻塞用户操作。 */
-    const fullTextTask = preparePaperFullText(paper.id)
-      .then(() => triggerCodexPaperTranslationWorker())
-      .catch((error) => {
-        console.error(`论文全文提取失败：${error.message}`);
-      });
-    void fullTextTask;
+    queuePaperPdfProcessing(paper);
     createDailyBackup();
     sendJson(response, 201, { paper });
     return true;
   }
 
   if (request.method === "POST" && url.pathname === "/api/papers/import/file") {
+    const targetPaperFolderId = String(request.headers["x-paper-folder-id"] || "").trim();
+    paperFolders.assertFolder(targetPaperFolderId);
     /** originalName 是经过安全清理的本地论文文件名。 */
     const originalName = sanitizeFileName(String(request.headers["x-file-name"] ?? ""));
     if (path.extname(originalName).toLowerCase() !== ".pdf") {
@@ -2289,6 +2331,7 @@ async function handleApiRequest(request, response, url) {
       sourceUrl: `/api/papers/${encodeURIComponent(paperId)}/pdf`,
       sourceLanguage: "unknown",
     });
+    if (targetPaperFolderId && initialPaper.id === paperId) paperFolders.assign([initialPaper.id], targetPaperFolderId);
     /** extractedPaper 是从 PDF 完整提取正文后的记录。 */
     const extractedPaper = await preparePaperFullTextFromBuffer(initialPaper.id, pdfBytes);
     /** classification 是依据论文正文得到的自动技术分类。 */
@@ -2321,52 +2364,12 @@ async function handleApiRequest(request, response, url) {
       sendJson(response, 400, { message: "论文链接必须使用 HTTP 或 HTTPS。" });
       return true;
     }
-    /** arxivPaper 是通过官方接口读取的可选 arXiv 元数据。 */
-    const arxivPaper = await fetchArxivPaperByUrl(inputUrl);
-    /** isDirectPdf 表示链接直接指向 PDF 文件。 */
-    const isDirectPdf = /\.pdf$/i.test(parsedUrl.pathname);
-    let paper;
-    if (arxivPaper) {
-      paper = upsertImportedPaper({
-        ...arxivPaper,
-        sourceLanguage: "en",
-      });
-      queuePaperPdfProcessing(paper);
-    } else if (isDirectPdf) {
-      /** paperId 是直接 PDF 的本地稳定 ID。 */
-      const paperId = `paper_${crypto.randomUUID()}`;
-      paper = upsertImportedPaper({
-        id: paperId,
-        externalId: `manual-url:${parsedUrl.href}`,
-        title: decodeURIComponent(path.basename(parsedUrl.pathname, ".pdf")) || "未命名论文",
-        category: "其它",
-        sourceUrl: parsedUrl.href,
-        pdfUrl: parsedUrl.href,
-        sourceLanguage: "unknown",
-      });
-      queuePaperPdfProcessing(paper);
-    } else {
-      /** parsedArticle 复用经过安全校验的网页正文解析能力。 */
-      const parsedArticle = await parseAndClassifyArticle(inputUrl);
-      paper = upsertImportedPaper({
-        externalId: `manual-url:${parsedArticle.url}`,
-        title: parsedArticle.title,
-        abstract: parsedArticle.summary,
-        authors: parsedArticle.author ? [parsedArticle.author] : [],
-        category: parsedArticle.category,
-        publishedAt: parsedArticle.publishedAt,
-        sourceUrl: parsedArticle.url,
-        sourceText: parsedArticle.contentText,
-        sourceLanguage: parsedArticle.sourceLanguage,
-        curatorNote: "从公开论文网页导入",
-      });
-    }
-    if (!paper.pdfUrl) void triggerCodexPaperTranslationWorker();
+    const targetPaperFolderId = String(payload.paperFolderId || "").trim();
+    paperFolders.assertFolder(targetPaperFolderId);
+    const result = enqueuePaperImport({ inputUrl: parsedUrl.href, paperFolderId: targetPaperFolderId });
+    importJobRunner.trigger();
     createDailyBackup();
-    sendJson(response, paper.pdfUrl ? 202 : 201, {
-      paper,
-      processing: Boolean(paper.pdfUrl && !paper.sourceText),
-    });
+    sendJson(response, result.processing ? 202 : 200, result);
     return true;
   }
 
@@ -2383,12 +2386,12 @@ async function handleApiRequest(request, response, url) {
       sendJson(response, 404, { message: "论文不存在。" });
       return true;
     }
-    if (!paper.pdfUrl) {
-      sendJson(response, 400, { message: "该论文没有可重试的公开 PDF 地址。" });
+    if (!/^https?:\/\//i.test(paper.sourceUrl || paper.pdfUrl || "")) {
+      sendJson(response, 400, { message: "该论文没有可重试的公开来源，请重新导入本地 PDF。" });
       return true;
     }
-    queuePaperPdfProcessing(paper, { force: true });
-    sendJson(response, 202, { paper, processing: true });
+    const result = queuePaperPdfProcessing(paper, { force: true });
+    sendJson(response, 202, result);
     return true;
   }
 
@@ -2402,18 +2405,10 @@ async function handleApiRequest(request, response, url) {
       return true;
     }
     createDailyBackup();
-    /** currentPapers 是删除前用于精确定位 PDF 缓存的论文集合。 */
-    const currentPapers = listPapers();
     /** result 是数据库论文、关联数据和旧推荐状态的清理结果。 */
     const result = clearPaperLibrary();
-    for (const paper of currentPapers) {
-      /** cachedPdfPath 是当前论文的精确 PDF 缓存路径。 */
-      const cachedPdfPath = getCachedPaperPdfPath(paper.id);
-      if (cachedPdfPath && isPathInsideDirectory(cachedPdfPath, paperDirectory)) {
-        fs.rmSync(cachedPdfPath, { force: true });
-      }
-    }
-    sendJson(response, 200, result);
+    const cleanup = runPendingFileCleanup();
+    sendJson(response, 200, { ...result, cleanup, warnings: cleanup.warnings });
     return true;
   }
 
@@ -2458,6 +2453,16 @@ async function handleApiRequest(request, response, url) {
     const pdfSize = fs.statSync(pdfPath).size;
     response.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": pdfSize, "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(`${paper.titleZh || paper.title}-中文.pdf`)}`, "Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff" });
     fs.createReadStream(pdfPath).pipe(response);
+    return true;
+  }
+
+  const requestedPaperAsset = parsePaperAssetUrl(url.pathname);
+  if (request.method === "GET" && requestedPaperAsset) {
+    const asset = getPaperById(requestedPaperAsset.paperId) && resolvePaperAsset(paperDirectory, url.pathname);
+    if (!asset) { sendJson(response, 404, { message: "找不到这幅论文原图。" }); return true; }
+    response.writeHead(200, { "Content-Type": asset.contentType, "Content-Length": fs.statSync(asset.path).size,
+      "Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff" });
+    fs.createReadStream(asset.path).pipe(response);
     return true;
   }
 
@@ -2526,8 +2531,6 @@ async function handleApiRequest(request, response, url) {
   if (request.method === "DELETE" && paperDetailMatch) {
     /** paperId 是用户确认要永久删除的论文 ID。 */
     const paperId = decodeURIComponent(paperDetailMatch[1]);
-    /** cachedPdfPath 是删除数据库前读取到的可选本地 PDF 路径。 */
-    const cachedPdfPath = getCachedPaperPdfPath(paperId);
     createDailyBackup();
     /** deletedTarget 是已删除论文的摘要。 */
     const deletedTarget = deleteKnowledgeTarget("paper", paperId);
@@ -2535,13 +2538,8 @@ async function handleApiRequest(request, response, url) {
       sendJson(response, 404, { message: "找不到这篇论文。" });
       return true;
     }
-    if (
-      cachedPdfPath &&
-      isPathInsideDirectory(cachedPdfPath, paperDirectory)
-    ) {
-      fs.rmSync(cachedPdfPath, { force: true });
-    }
-    sendJson(response, 200, { deleted: deletedTarget });
+    const cleanup = runPendingFileCleanup();
+    sendJson(response, 200, { deleted: deletedTarget, cleanup, warnings: cleanup.warnings });
     return true;
   }
 
@@ -2572,13 +2570,12 @@ async function handleApiRequest(request, response, url) {
     const category = url.searchParams.get("category") ?? "";
     /** query 是地址栏中的可选搜索词。 */
     const query = url.searchParams.get("q") ?? "";
-    /** documents 是符合条件的本地文档列表。 */
-    /** 文档库页面需要覆盖文件夹统计中的全部候选项；否则总量超过默认 200 条后，
-     * 旧目录会显示正确累计数量，却只渲染最近返回的一部分内容。列表项不含正文，
-     * 因此在本地个人知识库中一次返回 1000 条仍保持轻量。 */
-    const documents = listDocuments({ category, query, limit: 1000 }).map(toDocumentListItem);
+    const page = listDocumentsPage({
+      category, query, folderId: url.searchParams.get("folderId") ?? "",
+      limit: url.searchParams.get("limit"), offset: url.searchParams.get("offset"),
+    });
     sendJson(response, 200, {
-      documents,
+      ...page,
       statistics: getDocumentStatistics(),
     });
     return true;
@@ -2589,10 +2586,11 @@ async function handleApiRequest(request, response, url) {
     const category = url.searchParams.get("category") ?? "";
     /** query 是可选文章搜索词。 */
     const query = url.searchParams.get("q") ?? "";
-    /** articles 是符合条件的本地文章列表。 */
-    /** 与普通文档使用相同上限，保证网页文章目录数量和实际列表一致。 */
-    const articles = listArticles({ category, query, limit: 1000 }).map(toArticleListItem);
-    sendJson(response, 200, { articles });
+    const page = listArticlesPage({
+      category, query, folderId: url.searchParams.get("folderId") ?? "",
+      limit: url.searchParams.get("limit"), offset: url.searchParams.get("offset"),
+    });
+    sendJson(response, 200, page);
     return true;
   }
 
@@ -2914,9 +2912,9 @@ async function handleApiRequest(request, response, url) {
     const now = new Date().toISOString();
 
     fs.writeFileSync(storedPath, fileBuffer, { flag: "wx" });
+    let document;
     try {
-      /** document 是即将写入 SQLite 的完整文档记录。 */
-      let document = insertDocument({
+      document = insertDocument({
         id: documentId,
         originalName,
         storedName,
@@ -2937,11 +2935,17 @@ async function handleApiRequest(request, response, url) {
         createdAt: now,
         updatedAt: now,
       });
-      /** needsOcr 表示图片或缺少可用文本层的 PDF 应进入后台识别。 */
-      const needsOcr = isOcrSupportedExtension(extension)
-        && (extension !== ".pdf" || usableExtractionText.trim().length < 80 || corruptedPdfText);
-      let importJob = null;
-      if (needsOcr) {
+    } catch (error) {
+      // 只有尚未提交的导入才删除本次写入的附件。
+      fs.rmSync(storedPath, { force: true });
+      throw error;
+    }
+    const warnings = [];
+    const needsOcr = isOcrSupportedExtension(extension)
+      && (extension !== ".pdf" || usableExtractionText.trim().length < 80 || corruptedPdfText);
+    let importJob = null;
+    if (needsOcr) {
+      try {
         document = queueDocumentOcr(document.id);
         importJob = createImportJob({
           jobType: "document_ocr",
@@ -2949,13 +2953,21 @@ async function handleApiRequest(request, response, url) {
           payload: { documentId: document.id, language: "" },
         });
         importJobRunner.trigger();
+      } catch (error) {
+        const message = `原件已保存，OCR 暂未启动：${error.message}`;
+        warnings.push(message);
+        console.error(message);
+        try { document = failDocumentOcr(document.id, error) || document; }
+        catch (stateError) { console.error(`OCR 状态记录失败：${stateError.message}`); }
       }
-      createDailyBackup();
-      sendJson(response, 201, { document, importJob });
-    } catch (error) {
-      fs.rmSync(storedPath, { force: true });
-      throw error;
     }
+    try {
+      createDailyBackup({ throwOnError: true });
+    } catch (error) {
+      warnings.push(`资料已保存，备份未完成：${error.message}`);
+      console.error(warnings.at(-1));
+    }
+    sendJson(response, 201, { document, importJob, warnings });
     return true;
   }
 
@@ -3082,15 +3094,8 @@ async function handleApiRequest(request, response, url) {
     createDailyBackup();
     /** deletedTarget 是已删除文档的摘要。 */
     const deletedTarget = deleteKnowledgeTarget("document", documentId);
-    /** attachmentPath 是该文档的本地原始附件路径。 */
-    const attachmentPath = path.resolve(
-      attachmentDirectory,
-      existingDocument.storedName,
-    );
-    if (isPathInsideDirectory(attachmentPath, attachmentDirectory)) {
-      fs.rmSync(attachmentPath, { force: true });
-    }
-    sendJson(response, 200, { deleted: deletedTarget });
+    const cleanup = runPendingFileCleanup();
+    sendJson(response, 200, { deleted: deletedTarget, cleanup, warnings: cleanup.warnings });
     return true;
   }
 
@@ -3294,12 +3299,23 @@ async function handleApiRequest(request, response, url) {
     return true;
   }
 
+  if (request.method === "GET" && url.pathname === "/api/storage") {
+    sendJson(response, 200, { storage: getLocalStorageStatus() });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/backups/full") {
+    const backup = await createFullKnowledgeBackup();
+    sendJson(response, 201, { message: "完整备份已生成并校验通过。", backup });
+    return true;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/backups") {
-    /** backupPath 是当天 SQLite 备份文件路径。 */
-    const backupPath = createDailyBackup();
+    const backupPath = createManualBackup();
     sendJson(response, 200, {
-      message: "本地数据库备份已确认。",
+      message: "当前数据库快照已生成并校验通过。",
       backupName: path.basename(backupPath),
+      storage: getLocalStorageStatus(),
     });
     return true;
   }
@@ -3382,6 +3398,11 @@ async function handleRequest(request, response) {
   );
   try {
     if (url.pathname.startsWith("/api/")) {
+      const rejection = checkLocalApiRequest(request, url, serverConfig.port);
+      if (rejection) {
+        sendJson(response, 403, { message: rejection });
+        return;
+      }
       /** handled 表示请求是否命中已知 API。 */
       const handled = await handleApiRequest(request, response, url);
       if (!handled) sendJson(response, 404, { message: "接口不存在。" });
@@ -3465,6 +3486,10 @@ codexWorkerTimer.unref();
 initializeCodexPaperTranslationWorker();
 initializeCodexArticleTranslationWorker();
 cleanupVideoProcessingArtifacts();
+runPendingFileCleanup();
+const fileCleanupTimer = setInterval(runPendingFileCleanup, 60 * 1000);
+fileCleanupTimer.unref();
+recoverPendingPaperImports();
 importJobRunner.start();
 
 /** server 是只监听本机回环地址的 HTTP 服务。 */
