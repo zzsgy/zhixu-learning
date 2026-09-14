@@ -135,6 +135,139 @@ export const articles = sqliteTable(
   ],
 );
 
+/** 知识状态表：统一记录卡片与文章在个人学习流程中的位置。 */
+export const knowledgeStates = sqliteTable(
+  "knowledge_states",
+  {
+    /** 对用户、目标类型和目标 ID 保持稳定的状态记录 ID。 */
+    id: text("id").primaryKey(),
+    /** 状态所属用户。 */
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** card 或 article。 */
+    targetType: text("target_type").notNull(),
+    /** 卡片或文章的稳定 ID。 */
+    targetId: text("target_id").notNull(),
+    /** inbox、organizing、learning、mastered 或 archived。 */
+    status: text("status").notNull().default("inbox"),
+    /** 最近更新时间。 */
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    /** 一名用户对一个知识目标只保留一条当前状态。 */
+    uniqueIndex("knowledge_states_user_target_unique").on(
+      table.userId,
+      table.targetType,
+      table.targetId,
+    ),
+    /** 支持按用户和状态筛选个人知识流。 */
+    index("knowledge_states_user_status_idx").on(table.userId, table.status),
+  ],
+);
+
+/** 个人批注表：保存正文引用与用户自己的理解、疑问或实践记录。 */
+export const annotations = sqliteTable(
+  "annotations",
+  {
+    /** 批注稳定 ID。 */
+    id: text("id").primaryKey(),
+    /** 批注所属用户。 */
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** card 或 article。 */
+    targetType: text("target_type").notNull(),
+    /** 卡片或文章的稳定 ID。 */
+    targetId: text("target_id").notNull(),
+    /** 可选的原文引用；没有选中文字时为 null。 */
+    quoteText: text("quote_text"),
+    /** 用户输入的批注正文。 */
+    noteText: text("note_text").notNull(),
+    /** 首次创建时间。 */
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    /** 最近更新时间。 */
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    /** 支持按知识目标读取全部个人批注。 */
+    index("annotations_user_target_idx").on(
+      table.userId,
+      table.targetType,
+      table.targetId,
+      table.createdAt,
+    ),
+    /** 支持按用户增量同步批注。 */
+    index("annotations_user_updated_idx").on(table.userId, table.updatedAt),
+  ],
+);
+
+/** 专题集合表：由用户按项目、主题或学习目标组织知识内容。 */
+export const collections = sqliteTable(
+  "collections",
+  {
+    /** 专题稳定 ID。 */
+    id: text("id").primaryKey(),
+    /** 专题所属用户。 */
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** 专题名称。 */
+    name: text("name").notNull(),
+    /** 可选的专题说明。 */
+    description: text("description").notNull().default(""),
+    /** 首次创建时间。 */
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    /** 最近更新时间。 */
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    /** 同一用户不能创建两个完全同名的专题。 */
+    uniqueIndex("collections_user_name_unique").on(table.userId, table.name),
+    /** 支持按用户和更新时间读取专题。 */
+    index("collections_user_updated_idx").on(table.userId, table.updatedAt),
+  ],
+);
+
+/** 专题成员表：把卡片或文章加入一个或多个专题。 */
+export const collectionItems = sqliteTable(
+  "collection_items",
+  {
+    /** 专题成员记录 ID。 */
+    id: text("id").primaryKey(),
+    /** 记录所属用户，用于服务端归属校验和跨端同步。 */
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** 所属专题。 */
+    collectionId: text("collection_id")
+      .notNull()
+      .references(() => collections.id, { onDelete: "cascade" }),
+    /** card 或 article。 */
+    targetType: text("target_type").notNull(),
+    /** 卡片或文章的稳定 ID。 */
+    targetId: text("target_id").notNull(),
+    /** 加入专题的时间。 */
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    /** 同一个知识目标在一个专题中只出现一次。 */
+    uniqueIndex("collection_items_collection_target_unique").on(
+      table.collectionId,
+      table.targetType,
+      table.targetId,
+    ),
+    /** 支持读取一个用户的全部专题关系。 */
+    index("collection_items_user_idx").on(table.userId, table.collectionId),
+    /** 支持反向查找知识目标所属专题。 */
+    index("collection_items_user_target_idx").on(
+      table.userId,
+      table.targetType,
+      table.targetId,
+    ),
+  ],
+);
+
 /** 阅读进度表：一名用户对一张卡片只有一条当前状态。 */
 export const progress = sqliteTable(
   "progress",

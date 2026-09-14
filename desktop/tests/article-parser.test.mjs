@@ -1,0 +1,311 @@
+/**
+ * 网页正文清洗器测试。
+ */
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { parseHTML } from "linkedom";
+
+import {
+  createExternalFetchError,
+  detectArticleLanguage,
+  lookupPublicAddresses,
+  markStandaloneArticleImages,
+  mergeArticleImagesByBlockPosition,
+  normalizeLegacyHtmlImages,
+  normalizeArticleMath,
+  normalizeMisusedArticleHeadings,
+  parseAndClassifyCapturedArticle,
+  persistEmbeddedArticleImages,
+  readNetworkErrorCode,
+  restoreReadableFigureImages,
+  restoreMarkedArticleImages,
+  sanitizeArticleHtml,
+} from "../lib/article-parser.mjs";
+
+test("补回 Readability 丢失的出版商正文主图并保留图注位置", () => {
+  const { document: originalDocument } = parseHTML(`
+    <article><figure><figcaption>Fig. 1: Model architecture.</figcaption>
+      <picture><img src="//media.example.test/figure-1.png" alt="Fig. 1"></picture>
+    </figure></article>
+  `);
+  const restored = restoreReadableFigureImages(
+    "<figure><figcaption>Fig. 1: Model architecture.</figcaption><p>Caption details.</p></figure>",
+    originalDocument,
+  );
+  assert.match(restored, /<img[^>]+figure-1\.png/);
+  assert.match(restored, /figcaption>Fig\. 1: Model architecture/);
+});
+
+test("用位置锚点恢复 Framer 无图注正文大图并忽略页头图标", () => {
+  const { document } = parseHTML(`
+    <body>
+      <header><img width="900" height="500" src="/brand-banner.png"></header>
+      <main><h2>Physical Work</h2><div data-framer-name="Image">
+        <img width="1920" height="1286" src="/physical-work.png" alt="">
+      </div><p>Chart explanation.</p></main>
+    </body>
+  `);
+  const markedImages = markStandaloneArticleImages(document);
+  assert.equal(markedImages.length, 1);
+  assert.equal(markedImages[0].src, "/physical-work.png");
+  const restored = restoreMarkedArticleImages(
+    `<h2>Physical Work</h2><p>${markedImages[0].token}</p><p>Chart explanation.</p>`,
+    markedImages,
+  );
+  assert.match(restored, /<img[^>]+physical-work\.png/);
+  assert.doesNotMatch(restored, /ZHIXU_ARTICLE_IMAGE/);
+  assert.doesNotMatch(restored, /brand-banner/);
+});
+
+test("按块位置把修复后的原文图片同步到既有中文译文", () => {
+  const sourceHtml = "<h3>Physical Work</h3><img src=\"https://img.example/chart.png\" alt=\"Chart\"><p>Explanation</p>";
+  const translatedHtml = "<h3>体力劳动</h3><p>说明</p>";
+  const merged = mergeArticleImagesByBlockPosition(sourceHtml, translatedHtml);
+  assert.match(merged, /^<h3>体力劳动<\/h3><img[^>]+chart\.png[^>]*><p>说明<\/p>$/);
+});
+
+test("把带 TeX 注释的 MathML 转成阅读页可渲染公式", () => {
+  const { document } = parseHTML(`
+    <main><math display="block"><semantics><mi>x</mi>
+      <annotation encoding="application/x-tex">x_{95}^2</annotation>
+    </semantics></math></main>
+  `);
+  assert.equal(normalizeArticleMath(document), 1);
+  assert.match(document.querySelector("main")?.textContent || "", /\\\[x_\{95\}\^2\\\]/);
+});
+
+test("解析浏览器已加载网页并执行同一安全清洗", async () => {
+  const article = await parseAndClassifyCapturedArticle(
+    "https://93.184.216.34/postgresql-hot",
+    `<html><head><title>HOT updates</title><meta name="author" content="Laurenz Albe"></head>
+     <body><main><h1>HOT updates</h1><p>${"PostgreSQL Heap Only Tuple improves update performance. ".repeat(12)}</p>
+     <script>alert("blocked")</script></main></body></html>`,
+  );
+  assert.equal(article.title, "HOT updates");
+  assert.equal(article.author, "Laurenz Albe");
+  assert.match(article.contentText, /Heap Only Tuple/);
+  assert.doesNotMatch(article.contentHtml, /script|alert/);
+});
+
+/**
+ * 验证旧博客误用的 HTML image 标签会在 Readability 前变成标准图片。
+ */
+test("规范化旧式 HTML image 和安全图片 object 且不改写 SVG image", () => {
+  /** document 同时包含正文旧式图片、arXiv 图片 object 和具有独立语义的 SVG 图片。 */
+  const { document } = parseHTML(`
+    <main>
+      <image src="/images/diagram.png" alt="架构图"></image>
+      <figure><object type="image/svg+xml" data="paper/figure-1.svg" width="548"></object><figcaption>Figure 1: ReAct workflow.</figcaption></figure>
+      <object type="text/html" data="/unsafe.html"></object>
+      <svg><image src="/images/vector-layer.png"></image></svg>
+    </main>
+  `);
+  assert.equal(normalizeLegacyHtmlImages(document), 2);
+  assert.equal(document.querySelectorAll("main > img").length, 1);
+  assert.equal(document.querySelector("main > img")?.getAttribute("src"), "/images/diagram.png");
+  assert.equal(document.querySelector("figure img")?.getAttribute("src"), "paper/figure-1.svg");
+  assert.match(document.querySelector("figure img")?.getAttribute("alt") || "", /Figure 1/);
+  assert.equal(document.querySelectorAll('object[type="text/html"]').length, 1);
+  assert.equal(document.querySelectorAll("svg image").length, 1);
+});
+
+/**
+ * 验证 Notebook 内嵌 PNG 会落入隔离缓存，正文不再保存大段 Base64。
+ */
+test("持久化 Base64 内嵌图片并改写为受控虚拟地址", () => {
+  /** temporaryDirectory 是本测试独占的图片缓存目录。 */
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "zhixu-embedded-image-"));
+  try {
+    /** onePixelPng 是具有合法 PNG 文件签名的 1×1 图片。 */
+    const onePixelPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    const { document } = parseHTML(
+      `<main><p>Diagram</p><img alt="pixel" src="data:image/png;base64,${onePixelPng}"></main>`,
+    );
+    assert.equal(persistEmbeddedArticleImages(document, temporaryDirectory), 1);
+    const image = document.querySelector("img");
+    assert.match(image?.getAttribute("src") || "", /^https:\/\/embedded\.zhixu\.invalid\/[a-f0-9]{64}\.png$/);
+    const cachedFiles = fs.readdirSync(temporaryDirectory);
+    assert.equal(cachedFiles.length, 1);
+    assert.equal(path.extname(cachedFiles[0]), ".png");
+    assert.ok(fs.statSync(path.join(temporaryDirectory, cachedFiles[0])).size > 8);
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 验证解析异常产生的空列表项不会变成阅读页中的连续黑点。
+ */
+test("清理空列表项并保留真实列表和代码块", () => {
+  /** result 是含空列表、真实列表和代码块的清洗结果。 */
+  const result = sanitizeArticleHtml(
+    `<p>正文</p><ul><li></li><li> </li></ul>
+     <ul><li>真实知识点</li></ul><pre><code>print("hello")</code></pre>`,
+    new URL("https://example.com/article"),
+  );
+  assert.doesNotMatch(result.html, /<li>\s*<\/li>/);
+  assert.match(result.html, /真实知识点/);
+  assert.match(result.html, /print\("hello"\)/);
+});
+
+test("把富文本拆开的相邻代码节点恢复为保留缩进的多行预格式文本", () => {
+  const result = sanitizeArticleHtml(
+    `<pre><code>business/</code><code>├── index.md</code><code>│&nbsp; └── meta/</code></pre>`,
+    new URL("https://example.com/article"),
+  );
+  assert.match(result.html, /<pre><code>business\/\n├── index\.md\n│\s+└── meta\/<\/code><\/pre>/);
+  assert.match(result.text, /business\/\n├── index\.md\n│\s+└── meta\//);
+});
+
+test("导入时删除紧凑推广块并只保留图片的安全显示宽度", () => {
+  const result = sanitizeArticleHtml(
+    `<section><img src="/banner.jpg"><p><strong>还不点击蓝字</strong></p>
+       <p><strong>关注我们</strong></p><img src="/huge-question.gif"></section>
+     <p>这是需要完整保留的正文知识内容。</p>
+     <img src="/diagram.png" width="320" style="width: 320px; position: fixed" onerror="alert(1)">
+     <img src="/icon.png" style="width: 24%; transform: scale(20)">`,
+    new URL("https://example.com/articles/current"),
+  );
+  assert.doesNotMatch(result.html, /点击蓝字|关注我们|huge-question|banner\.jpg/);
+  assert.match(result.html, /这是需要完整保留的正文知识内容/);
+  assert.match(result.html, /data-zhixu-display-width="320"/);
+  assert.match(result.html, /data-zhixu-relative-width-percent="24"/);
+  assert.doesNotMatch(result.html, /data-zhixu-display-width-percent/);
+  assert.doesNotMatch(result.html, /position|transform|onerror/);
+});
+
+test("把来源卡片和强调色转换为安全展示语义并纠正伪标题", () => {
+  const result = sanitizeArticleHtml(
+    `<section style="background-color: rgb(101, 202, 141); padding: 15px; border-radius: 10px; position: fixed">
+       <section style="background-color: rgb(254, 254, 254); padding: 15px">
+         <p style="text-align: center"><img src="/hero.jpg"></p><p><strong>卡片正文</strong></p>
+       </section>
+     </section>
+     <section style="display:flex;justify-content:center;align-items:center">
+       <section style="border-width:1px;border-style:solid;border-color:#488cfa;padding:8px 12px"><p><strong>07</strong></p></section>
+       <section style="background-color:#488cfa;padding:6px 15px;color:#fefefe"><p><strong>吸附层析</strong></p></section>
+     </section>
+     <h1 style="font-weight:bold"><span style="font-size:14px;color:rgb(255,76,0)">指混合物随流动相通过固定相时，由于吸附剂对不同物质的不同吸附力，而使混合物分离的方法。它是各种层析技术中应用最早的一类，至今仍广泛应用。</span></h1>`,
+    new URL("https://example.com/article"),
+  );
+  assert.match(result.html, /class="[^"]*article-source-surface[^"]*article-source-rounded/);
+  assert.match(result.html, /--article-source-background:rgb\(101, 202, 141\)/);
+  assert.match(result.html, /article-source-surface-neutral/);
+  assert.match(result.html, /article-source-row article-source-justify-center article-source-align-center/);
+  assert.match(result.html, /article-source-frame/);
+  assert.match(result.html, /article-source-label/);
+  assert.match(result.html, /article-source-accent-text article-source-small-text/);
+  assert.doesNotMatch(result.html, /<h1/);
+  assert.doesNotMatch(result.html, /position:\s*fixed/);
+});
+
+test("保留正常短标题并只降级正文形状的错误标题", () => {
+  const { document } = parseHTML(`<article><h2>正常章节标题</h2><h1><span style="font-size:14px">${"普通正文句子。".repeat(12)}</span></h1></article>`);
+  const root = document.querySelector("article");
+  assert.equal(normalizeMisusedArticleHeadings(root), 1);
+  assert.equal(root.querySelectorAll("h2").length, 1);
+  assert.equal(root.querySelectorAll("h1").length, 0);
+  assert.equal(root.querySelectorAll("p").length, 1);
+});
+
+/**
+ * 验证 Fetch 顶层通用异常可以追溯到底层 socket 错误。
+ */
+test("读取嵌套网络错误代码并生成可操作提示", () => {
+  /** networkError 模拟 Node Fetch 的 TypeError -> cause 异常链。 */
+  const networkError = new TypeError("fetch failed", {
+    cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+  });
+  assert.equal(readNetworkErrorCode(networkError), "ECONNRESET");
+  assert.equal(
+    createExternalFetchError(networkError, "文章网页").message,
+    "文章网页连接被中途重置，请检查网络或代理后重试。",
+  );
+});
+
+/**
+ * 验证代理未启动时不会继续向用户展示笼统的 fetch failed。
+ */
+test("代理连接失败时提示检查代理进程", () => {
+  /** proxyError 模拟代理端口没有进程监听的错误。 */
+  const proxyError = Object.assign(new Error("connect ECONNREFUSED"), {
+    code: "ECONNREFUSED",
+  });
+  assert.equal(
+    createExternalFetchError(proxyError, "文章网页").message,
+    "文章网页连接被拒绝，请检查代理是否正在运行。",
+  );
+});
+
+/**
+ * 验证目标站证书链不完整时不会误导用户检查本机代理。
+ */
+test("HTTPS 证书链失败时提示网站证书问题", () => {
+  /** certificateError 模拟服务器漏发中间证书时的 Node TLS 异常。 */
+  const certificateError = new TypeError("fetch failed", {
+    cause: Object.assign(new Error("unable to verify the first certificate"), {
+      code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+    }),
+  });
+  assert.equal(
+    createExternalFetchError(certificateError, "文章网页").message,
+    "文章网页的 HTTPS 证书链无法验证，请稍后重试或联系网站维护者。",
+  );
+});
+
+/**
+ * 验证系统 DNS 短暂失败时会重试，而不是立即让整次文章导入失败。
+ */
+test("DNS 短暂失败后重试并返回公网地址", async () => {
+  /** attempts 记录模拟 DNS 被调用的次数。 */
+  let attempts = 0;
+  /** lookup 前两次失败，第三次模拟 GitHub Pages 的公网解析结果。 */
+  const lookup = async () => {
+    attempts += 1;
+    if (attempts < 3) {
+      throw Object.assign(new Error("getaddrinfo ENOTFOUND"), {
+        code: "ENOTFOUND",
+      });
+    }
+    return [{ address: "185.199.110.153", family: 4 }];
+  };
+  assert.deepEqual(
+    await lookupPublicAddresses("lilianweng.github.io", lookup),
+    [{ address: "185.199.110.153", family: 4 }],
+  );
+  assert.equal(attempts, 3);
+});
+
+/**
+ * 验证 DNS 持续失败时不会把 getaddrinfo 等底层英文错误暴露给页面。
+ */
+test("DNS 持续失败时返回可操作的中文提示", async () => {
+  /** lookup 始终模拟系统解析失败。 */
+  const lookup = async () => {
+    throw Object.assign(new Error("getaddrinfo ENOTFOUND"), {
+      code: "ENOTFOUND",
+    });
+  };
+  await assert.rejects(
+    lookupPublicAddresses("missing.example", lookup),
+    /文章网页域名解析失败，请检查 DNS 或网络连接。/,
+  );
+});
+
+/**
+ * 验证技术文章中的英文模型名不会让中文正文被误判为英文。
+ */
+test("识别中文、英文和中英混合技术文章", () => {
+  /** chineseText 是包含大量英文缩写的中文技术正文。 */
+  const chineseText = "Transformer 模型通过 Attention、MoE 和 Router 处理令牌。".repeat(80);
+  /** englishText 是等待 Codex 翻译的英文技术正文。 */
+  const englishText = "The mixture of experts model routes every token to specialized neural network experts. ".repeat(60);
+  /** mixedText 是中文讲解和英文原文比例接近的双语正文。 */
+  const mixedText = `${"混合专家模型通过路由器选择不同专家完成计算。".repeat(30)} ${englishText}`;
+  assert.equal(detectArticleLanguage(chineseText), "zh");
+  assert.equal(detectArticleLanguage(englishText), "en");
+  assert.equal(detectArticleLanguage(mixedText), "mixed");
+});

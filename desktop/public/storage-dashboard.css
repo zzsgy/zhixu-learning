@@ -1,0 +1,82 @@
+/* Storage management is scoped separately from reading and library layouts. */
+#storage-view { --storage-muted:var(--ink-soft); --storage-warning:#946328; --storage-warning-bg:#fcf7ed; }
+:root[data-theme="dark"] #storage-view { --storage-warning:#e3bf84; --storage-warning-bg:#302a20; }
+#storage-view .storage-intro { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; padding:20px 0; }
+#storage-view .storage-intro p { margin:0; color:var(--ink-soft); font-size:13px; line-height:1.7; }
+#storage-view .storage-local-badge { border:1px solid var(--line); border-radius:999px; padding:5px 10px; font-size:11px; color:var(--cyan-strong); background:var(--quote-bg); }
+#storage-view .storage-local-badge::before { content:"●"; margin-right:6px; font-size:8px; }
+#storage-view .storage-overview { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:22px; }
+#storage-view .storage-overview > div { display:flex; flex-direction:column; min-width:0; gap:6px; padding:17px 20px; border:1px solid var(--line); border-radius:10px; background:var(--paper-raised); }
+#storage-view .storage-overview span { font-size:12px; color:var(--ink-soft); }
+#storage-view .storage-overview strong { font:600 19px/1.5 var(--sans); color:var(--ink); overflow-wrap:anywhere; }
+#storage-view .storage-overview small { font-size:11px; color:var(--ink-soft); line-height:1.5; }
+#storage-view [data-tone="warning"] { color:var(--storage-warning); }
+#storage-view .storage-overview strong[data-tone="warning"] { color:var(--storage-warning); }
+#storage-view .storage-dashboard { display:grid; grid-template-columns:minmax(0,1.6fr) minmax(290px,1fr); align-items:start; gap:20px; }
+#storage-view .storage-panel { min-width:0; margin:0; border:1px solid var(--line); border-radius:12px; background:var(--paper-raised); padding:22px; }
+#storage-view .storage-panel-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin:0 0 18px; padding:0; border:0; }
+#storage-view .storage-panel h2 { margin:0; color:var(--ink); font:600 18px/1.5 var(--sans); letter-spacing:0; }
+#storage-view .storage-panel-heading p { margin:5px 0 0; color:var(--ink-soft); font-size:12px; line-height:1.7; }
+#storage-view .storage-section-label { padding-top:4px; color:var(--ink-soft); font:10px/1.6 var(--mono); letter-spacing:.1em; }
+#storage-view :is(.primary-button,.secondary-button) { display:inline-flex; align-items:center; justify-content:center; min-height:36px; max-width:100%; margin:0; border-radius:6px; padding:8px 12px; font:500 12px/1.45 var(--sans); white-space:normal; }
+#storage-view .secondary-button { border-color:var(--line-dark); }
+#storage-view .storage-panel-heading > button { flex:0 0 auto; }
+#storage-view button:disabled { opacity:.4; cursor:default; }
+#storage-view :is(button,summary,select):focus-visible { outline:2px solid var(--cyan-strong); outline-offset:3px; }
+#storage-view .storage-backup-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+#storage-view .storage-backup-option { display:flex; min-width:0; flex-direction:column; padding:16px; border:1px solid var(--line); border-radius:8px; background:color-mix(in srgb,var(--paper) 60%,var(--paper-raised)); }
+#storage-view .storage-backup-option.is-recommended { border-color:color-mix(in srgb,var(--cyan-strong) 35%,var(--line)); background:color-mix(in srgb,var(--quote-bg) 32%,var(--paper-raised)); }
+#storage-view .storage-option-title { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }
+#storage-view .storage-option-title h3 { margin:0; font:600 15px/1.5 var(--sans); }
+#storage-view .storage-state { flex:0 0 auto; padding:3px 7px; border-radius:4px; background:var(--paper); color:var(--ink-soft); font:11px/1.5 var(--sans); }
+#storage-view .storage-state[data-tone="success"] { color:var(--cyan-strong); background:var(--quote-bg); }
+#storage-view .storage-state[data-tone="warning"] { color:var(--storage-warning); background:var(--storage-warning-bg); }
+#storage-view .storage-description { margin:12px 0 16px; color:var(--ink-soft); font-size:12px; line-height:1.75; }
+#storage-view .storage-facts { display:grid; gap:10px; margin:0; }
+#storage-view .storage-facts > div { display:grid; gap:3px; }
+#storage-view dt { font-size:11px; color:var(--ink-soft); }
+#storage-view dd { min-width:0; margin:0; color:var(--ink); font:12px/1.6 var(--sans); overflow-wrap:anywhere; }
+#storage-view .storage-operation-status { margin:12px 0; color:var(--ink-soft); font-size:11px; line-height:1.7; overflow-wrap:anywhere; }
+#storage-view .storage-backup-option > button { width:100%; margin-top:auto; }
+#storage-view .storage-safety-note { display:block; margin:16px 0 0; border-left:3px solid color-mix(in srgb,var(--storage-warning) 65%,transparent); border-radius:0 6px 6px 0; padding:11px 13px; background:var(--storage-warning-bg); color:var(--storage-warning); }
+#storage-view .storage-safety-note strong { font-size:12px; font-weight:600; }
+#storage-view .storage-safety-note p { margin:4px 0 0; font-size:12px; line-height:1.7; }
+#storage-view .storage-path-list { display:grid; gap:13px; margin:0; }
+#storage-view .storage-path-list dt { margin-bottom:5px; }
+#storage-view .storage-path-list code { display:block; min-width:0; border:1px solid var(--line); border-radius:6px; background:var(--paper); padding:9px 10px; color:var(--ink); font:11px/1.75 var(--mono); overflow-wrap:anywhere; white-space:normal; user-select:text; }
+#storage-view .storage-footnote { margin:15px 0 0; color:var(--ink-soft); font-size:11px; line-height:1.75; }
+#storage-view :is(.storage-backup-paths,.storage-pairing-details) { margin-top:16px; border-top:1px solid var(--line); padding-top:12px; }
+#storage-view summary { cursor:pointer; color:var(--ink-soft); font-size:12px; line-height:1.7; }
+#storage-view summary:hover { color:var(--cyan-strong); }
+#storage-view .storage-backup-paths .storage-path-list { margin-top:12px; }
+#storage-view .storage-side-tools { display:grid; min-width:0; gap:20px; }
+#storage-view .storage-pairing-details p { margin:10px 0; color:var(--ink-soft); font-size:12px; line-height:1.7; }
+#storage-view .browser-client-list { gap:8px; margin:0; }
+#storage-view .browser-client-item { padding:11px 12px; border:1px solid var(--line); border-radius:6px; background:var(--paper); }
+#storage-view .browser-client-item strong { color:var(--ink); font-size:12px; white-space:normal; overflow-wrap:anywhere; }
+#storage-view .browser-client-item small { font-size:11px; }
+#storage-view .browser-pairing-code { border-radius:6px; }
+#storage-view .browser-pairing-code strong { font-size:26px; }
+#storage-view .storage-maintenance > p:not(.storage-footnote) { margin:0 0 14px; color:var(--ink-soft); font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
+#storage-view .import-job-toolbar { flex-wrap:wrap; gap:8px 16px; margin:0; padding:12px 0; border-block:1px solid var(--line); }
+#storage-view .import-job-toolbar select { max-width:100%; border-color:var(--line); border-radius:5px; font-size:12px; }
+#storage-view .import-job-summary { margin:10px 0; font-size:11px; }
+#storage-view .import-job-list { display:grid; gap:0; max-height:440px; margin:0; padding-right:5px; overflow:auto; scrollbar-gutter:stable; }
+#storage-view .import-job-item { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 0; border:0; border-bottom:1px solid var(--line); }
+#storage-view .import-job-item:first-child { padding-top:4px; }
+#storage-view .import-job-item:last-child { border-bottom:0; }
+#storage-view .import-job-item > div:first-child { flex:1 1 auto; }
+#storage-view .import-job-item strong { font:500 13px/1.65 var(--sans); color:var(--ink); white-space:normal; overflow-wrap:anywhere; }
+#storage-view .import-job-item small { font-size:11px; line-height:1.6; overflow-wrap:anywhere; }
+#storage-view .import-job-item p { margin:6px 0 0; font-size:11px; line-height:1.7; overflow-wrap:anywhere; color:var(--red); }
+#storage-view .import-job-item.is-failed { margin-bottom:6px; padding:12px; border:1px solid color-mix(in srgb,var(--red) 30%,var(--line)); border-radius:6px; background:color-mix(in srgb,var(--red) 4%,var(--paper-raised)); }
+#storage-view .import-job-item.is-failed strong { color:var(--red); }
+#storage-view .import-job-item:is(.is-running,.is-queued) strong { color:var(--cyan-strong); }
+#storage-view .import-job-actions { display:flex; flex:0 0 auto; flex-wrap:wrap; justify-content:flex-end; align-items:center; gap:4px 10px; max-width:150px; }
+#storage-view .text-button { min-height:30px; padding:4px 0; border:0; font:12px/1.6 var(--sans); color:var(--cyan-strong); white-space:normal; }
+#storage-view :is(.browser-client-empty,.import-job-empty) { margin:0; padding:18px 12px; border:1px dashed var(--line); border-radius:7px; font-size:12px; line-height:1.7; color:var(--ink-soft); }
+#storage-view .storage-error { margin:0 0 18px; padding:12px 16px; border:1px solid color-mix(in srgb,var(--red) 35%,var(--line)); border-radius:8px; color:var(--red); font-size:12px; line-height:1.75; overflow-wrap:anywhere; background:color-mix(in srgb,var(--red) 5%,var(--paper-raised)); }
+#storage-view [hidden] { display:none!important; }
+@media(max-width:1450px) { #storage-view .storage-overview { grid-template-columns:repeat(2,minmax(0,1fr)); } #storage-view .storage-dashboard { grid-template-columns:minmax(0,1fr) minmax(275px,.72fr); gap:16px; } #storage-view .storage-backup-options { grid-template-columns:minmax(0,1fr); } #storage-view .storage-backup-option { display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:14px; } #storage-view .storage-backup-option .storage-option-title,#storage-view .storage-backup-option .storage-description { grid-column:1/-1; } #storage-view .storage-backup-option .storage-description { margin:8px 0 12px; } #storage-view .storage-backup-option .storage-facts { grid-column:1/-1; grid-template-columns:repeat(2,minmax(0,1fr)); } #storage-view .storage-backup-option > button { width:auto; align-self:end; } }
+@media(max-width:1200px) { #storage-view .storage-dashboard { grid-template-columns:minmax(0,1fr); } #storage-view .storage-backup-options { grid-template-columns:repeat(2,minmax(0,1fr)); } #storage-view .storage-backup-option { display:flex; } #storage-view .storage-backup-option .storage-facts { grid-template-columns:1fr; } #storage-view .storage-backup-option > button { width:100%; align-self:auto; } #storage-view .storage-locations .storage-path-list { grid-template-columns:repeat(2,minmax(0,1fr)); } #storage-view .storage-side-tools { grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; } }
+@media(max-width:760px) { #storage-view .storage-overview { gap:8px; } #storage-view .storage-overview > div { padding:13px; } #storage-view .storage-overview strong { font-size:16px; } #storage-view .storage-panel { padding:16px; } #storage-view .storage-panel h2 { font-size:16px; } #storage-view .storage-backup-options,#storage-view .storage-side-tools,#storage-view .storage-locations .storage-path-list { grid-template-columns:minmax(0,1fr); } #storage-view .import-job-item { align-items:flex-start; } #storage-view .import-job-actions { max-width:100px; } }
