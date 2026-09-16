@@ -43,6 +43,9 @@ test("超长标题、推广块和异常媒体不会破坏阅读页比例", () =>
   assert.match(script, /function removeDecorativeArticleImage\(image, sourceCount, relativeWidthPercent = 0\)/);
   assert.match(script, /function removeLegacyArticlePromotionBlocks\(root\)/);
   assert.match(script, /removeLegacyArticlePromotionBlocks\(safeArticleRoot\)/);
+  assert.match(script, /function normalizeLegacyArticleHeadingStructure\(root\)/);
+  assert.match(script, /heading\.replaceWith\(\.\.\.Array\.from\(heading\.childNodes\)\)/);
+  assert.match(script, /normalizeLegacyArticleHeadingStructure\(safeArticleRoot\)/);
   assert.match(script, /image\.dataset\.zhixuDisplayWidth/);
   assert.match(script, /image\.dataset\.zhixuRelativeWidthPercent \|\| image\.dataset\.zhixuDisplayWidthPercent/);
   assert.match(script, /image\.classList\.add\("article-inline-decoration"\)/);

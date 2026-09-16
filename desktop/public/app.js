@@ -15,9 +15,12 @@ import { renderStorageDashboard, renderStorageJobOverview, renderStorageBrowserO
 import { mountNotesCenter } from "./notes-center.js";
 import {
   classifyReadableBlock,
+  createDocumentChapterTocEntries,
   joinReadableTextLines,
+  matchesReadableChapterHeading,
   normalizeReadableLines,
 } from "./reading-semantics.js";
+import { buildSingleColumnPdfFlow } from "./pdf-reading-flow.js";
 
 let paperLibrary;
 let activityDashboard;
@@ -773,6 +776,36 @@ function parseStructuredPdfColumn(lines, options = {}) {
   };
 }
 
+/** 把一段坐标文字添加为连续正文，同时恢复短标题和定义项强调。 */
+function appendStructuredPdfText(target, lines, options = {}) {
+  const parsed = parseStructuredPdfColumn(lines, options);
+  for (const calloutGroup of parsed.calloutGroups) {
+    const calloutList = document.createElement("ol");
+    calloutList.className = "readable-structured-callouts";
+    for (const callout of calloutGroup) {
+      const item = document.createElement("li");
+      item.value = Number(callout.index);
+      item.textContent = callout.text;
+      calloutList.append(item);
+    }
+    target.append(calloutList);
+  }
+  for (const paragraphText of parsed.paragraphs) {
+    if (options.allowHeadings && isReadableHeading(paragraphText, true, true)) {
+      target.append(createTextElement("h3", "readable-structured-heading", paragraphText));
+      continue;
+    }
+    const paragraph = document.createElement("p");
+    const definitionMatch = paragraphText.match(/^([^：]{1,28}：)(.*)$/);
+    if (definitionMatch) {
+      paragraph.append(createTextElement("strong", "", definitionMatch[1]), definitionMatch[2]);
+    } else {
+      paragraph.textContent = paragraphText;
+    }
+    target.append(paragraph);
+  }
+}
+
 /** 将复杂 PDF 页显示为可复制双栏 HTML，并把原始插图放回相应栏。 */
 function createStructuredPdfPage(pageNumber, pageData) {
   const page = document.createElement("section");
@@ -792,6 +825,34 @@ function createStructuredPdfPage(pageNumber, pageData) {
       "readable-structured-fallback-note",
       "本页包含复杂图示；HTML 阅读保留可复制文字，完整图示可从顶部打开原版 PDF。",
     ));
+  }
+  /**
+   * 单栏页不能套用双栏容器，否则同一行会被拆成先左后右的两个半句。
+   * 按 PDF 纵坐标将正文和跨栏图交错放回原位，图内文字由原始裁剪保留。
+   */
+  if (!pageData.multiColumn && displayFigureRegions.length > 0) {
+    const readingFlow = buildSingleColumnPdfFlow(pageData, displayFigureRegions);
+    for (const block of readingFlow) {
+      if (block.type === "figure") {
+        page.append(createStructuredPdfFigure(
+          pageNumber,
+          block.figure,
+          block.figure.caption || "",
+          Number(block.figure.regionIndex) || 0,
+        ));
+        continue;
+      }
+      appendStructuredPdfText(page, block.lines, { allowHeadings: true });
+    }
+    const footerText = (pageData.footer || [])
+      .map((line) => normalizeStructuredPdfText(line.text))
+      .join(" ");
+    page.append(createTextElement(
+      "div",
+      "readable-structured-footer",
+      footerText || `原文第 ${pageNumber} 页`,
+    ));
+    return page;
   }
   const columns = document.createElement("div");
   columns.className = "readable-structured-columns";
@@ -875,9 +936,10 @@ function createStructuredPdfPage(pageNumber, pageData) {
  * 把 PDF/文本提取结果重新组织为安全的语义化阅读结构。
  *
  * @param {string} text 文档提取正文。
+ * @param {{ chapterTitle?: string }} options 权威章节标题，用于恢复页首标题语义。
  * @returns {DocumentFragment} 只包含安全文本节点的阅读内容。
  */
-function createReadableDocument(text) {
+function createReadableDocument(text, options = {}) {
   /** fragment 是最终插入阅读页的文档片段。 */
   const fragment = document.createDocumentFragment();
   /** normalizedLines 是保留空行但清理行内多余空白的正文行。 */
@@ -900,8 +962,12 @@ function createReadableDocument(text) {
       /** readableBlocks 是从可能很长的 PDF 行中恢复出的短段落。 */
       const readableBlocks = splitDenseText(paragraphText);
       for (const block of readableBlocks) {
+        const matchesChapterHeading = matchesReadableChapterHeading(
+          block,
+          options.chapterTitle,
+        );
         const blockKind = classifyReadableBlock(block, {
-          heading: isReadableHeading(block, true, true),
+          heading: matchesChapterHeading || isReadableHeading(block, true, true),
         });
         if (blockKind === "heading") {
           /** markdownHeading 是当前标题可能携带的 Markdown 层级标记。 */
@@ -1030,7 +1096,10 @@ function createReadableDocument(text) {
       fragment.append(listItem);
       continue;
     }
-    if (isReadableHeading(line, !previousLine, !nextLine)) {
+    if (
+      matchesReadableChapterHeading(line, options.chapterTitle)
+      || isReadableHeading(line, !previousLine, !nextLine)
+    ) {
       flushParagraph();
       /** markdownHeading 是当前标题可能携带的 Markdown 层级标记。 */
       const markdownHeading = line.match(/^(#{1,4})\s+(.+)$/);
@@ -1707,25 +1776,30 @@ function updateDocumentChapterNavigation() {
 function buildDocumentChapterTableOfContents() {
   dom.readingToc.replaceChildren();
   dom.readingTocTitle.textContent = "文档章节";
-  applicationState.documentChapters.slice(0, 500).forEach((chapter, index) => {
+  const tocEntries = createDocumentChapterTocEntries(applicationState.documentChapters, 500);
+  tocEntries.forEach((entry) => {
     const tocButton = document.createElement("button");
     tocButton.type = "button";
     tocButton.className = "reading-toc-level-h2 document-chapter-toc-button";
-    tocButton.classList.toggle("is-active", index === applicationState.activeDocumentChapterIndex);
-    tocButton.setAttribute("aria-current", index === applicationState.activeDocumentChapterIndex ? "page" : "false");
-    tocButton.textContent = chapter.title.slice(0, 100);
+    tocButton.dataset.documentChapterStartIndex = String(entry.startIndex);
+    tocButton.dataset.documentChapterEndIndex = String(entry.endIndex);
+    const isActive = applicationState.activeDocumentChapterIndex >= entry.startIndex
+      && applicationState.activeDocumentChapterIndex <= entry.endIndex;
+    tocButton.classList.toggle("is-active", isActive);
+    tocButton.setAttribute("aria-current", isActive ? "page" : "false");
+    tocButton.textContent = entry.title.slice(0, 100);
     tocButton.addEventListener("click", () => {
       /** continuousSection 存在时直接定位连续正文，不再重新加载单章。 */
       const continuousSection = dom.readerContent.querySelector(
-        `[data-document-chapter-index="${index}"]`,
+        `[data-document-chapter-index="${entry.startIndex}"]`,
       );
       if (continuousSection) {
-        applicationState.activeDocumentChapterIndex = index;
+        applicationState.activeDocumentChapterIndex = entry.startIndex;
         updateContinuousDocumentTocState();
         continuousSection.scrollIntoView({ behavior: "smooth", block: "start" });
         return;
       }
-      void renderDocumentChapter(index, { scrollToTop: true, saveProgress: true });
+      void renderDocumentChapter(entry.startIndex, { scrollToTop: true, saveProgress: true });
     });
     dom.readingToc.append(tocButton);
   });
@@ -1739,8 +1813,10 @@ function buildDocumentChapterTableOfContents() {
 function updateContinuousDocumentTocState() {
   const activeIndex = applicationState.activeDocumentChapterIndex;
   Array.from(dom.readingToc.querySelectorAll(".document-chapter-toc-button"))
-    .forEach((button, index) => {
-      const isActive = index === activeIndex;
+    .forEach((button) => {
+      const startIndex = Number(button.dataset.documentChapterStartIndex);
+      const endIndex = Number(button.dataset.documentChapterEndIndex);
+      const isActive = activeIndex >= startIndex && activeIndex <= endIndex;
       button.classList.toggle("is-active", isActive);
       button.setAttribute("aria-current", isActive ? "page" : "false");
     });
@@ -2008,7 +2084,7 @@ async function renderContinuousPdfDocument(options = {}) {
     try {
       const fragment = chapter.kind === "word"
         ? createWordDocument(chapter.content)
-        : createReadableDocument(chapter.content);
+        : createReadableDocument(chapter.content, { chapterTitle: chapter.title });
       section.append(fragment);
     } catch (error) {
       console.error("文档章节排版失败，已改用纯文本显示。", error);
@@ -2069,7 +2145,7 @@ async function renderDocumentChapter(requestedIndex, options = {}) {
   try {
     fragment = chapter.kind === "word"
       ? createWordDocument(chapter.content)
-      : createReadableDocument(chapter.content);
+      : createReadableDocument(chapter.content, { chapterTitle: chapter.title });
   } catch (error) {
     console.error("文档章节排版失败，已改用纯文本显示。", error);
     /** fallbackText 是不经过复杂排版的章节正文。 */
@@ -3965,6 +4041,33 @@ function removeLegacyArticlePromotionBlocks(root) {
   return removedCount;
 }
 
+/**
+ * 兼容旧文章中把 H1-H4 当作块级布局外壳或空白占位符的来源结构。
+ *
+ * @param {Element} root 隔离文章根节点。
+ * @returns {{ unwrapped: number, removedEmpty: number }} 结构修正数量。
+ */
+function normalizeLegacyArticleHeadingStructure(root) {
+  /** blockSelector 只匹配标题内容模型中不应出现的块级正文结构。 */
+  const blockSelector = "article, section, div, figure, table, ul, ol, blockquote, pre";
+  /** mediaSelector 防止把确实承载图片、表格或列表的无文字标题误删。 */
+  const mediaSelector = "img, video, iframe, table, pre, code, ul, ol";
+  let unwrapped = 0;
+  for (const heading of Array.from(root.querySelectorAll("h1, h2, h3, h4"))) {
+    if (!heading.querySelector(blockSelector)) continue;
+    heading.replaceWith(...Array.from(heading.childNodes));
+    unwrapped += 1;
+  }
+  let removedEmpty = 0;
+  for (const heading of Array.from(root.querySelectorAll("h1, h2, h3, h4"))) {
+    const text = (heading.textContent || "").replace(/\s+/g, " ").trim();
+    if (text || heading.querySelector(mediaSelector)) continue;
+    heading.remove();
+    removedEmpty += 1;
+  }
+  return { unwrapped, removedEmpty };
+}
+
 function createArticleOriginalContent(article) {
   /** parsedContent 是从服务端白名单 HTML 创建的隔离文档。 */
   const parsedContent = new DOMParser().parseFromString(
@@ -3981,6 +4084,8 @@ function createArticleOriginalContent(article) {
   }
   /** 旧记录在阅读时同样经过推广块识别，无需用户重新导入。 */
   removeLegacyArticlePromotionBlocks(safeArticleRoot);
+  /** 旧记录在阅读时拆掉错误标题外壳和纯空白标题，无需改写数据库。 */
+  normalizeLegacyArticleHeadingStructure(safeArticleRoot);
   /** emptyListItems 是旧文章记录中遗留的无文字、无媒体空项目。 */
   const emptyListItems = Array.from(safeArticleRoot.querySelectorAll("li")).filter(
     (listItem) =>

@@ -738,6 +738,38 @@ function hasVisibleArticleLength(properties, names) {
   });
 }
 
+/** articleHeadingBlockSelector 是标题元素不能承担的块级正文结构。 */
+const articleHeadingBlockSelector = "article, section, div, figure, table, ul, ol, blockquote, pre";
+/** articleHeadingMediaSelector 是空标题判断时必须保留的有效媒体结构。 */
+const articleHeadingMediaSelector = "img, video, iframe, table, pre, code, ul, ol";
+
+/**
+ * 清理富文本编辑器把标题当作布局外壳或空白占位符的结构。
+ *
+ * 部分公众号会输出 `<h2><section>...</section></h2>`，并用只含 `<br>` 的标题
+ * 拉开版面。知序会给真正标题增加间距和分隔线，因此必须拆掉错误外壳并删除
+ * 纯占位标题；文字、图片、表格和列表节点本身保持原顺序。
+ *
+ * @param {Element} root 原始正文根节点。
+ * @returns {{ unwrapped: number, removedEmpty: number }} 结构修正数量。
+ */
+export function normalizeArticleHeadingStructure(root) {
+  let unwrapped = 0;
+  for (const heading of Array.from(root.querySelectorAll("h1, h2, h3, h4"))) {
+    if (!heading.querySelector(articleHeadingBlockSelector)) continue;
+    heading.replaceWith(...Array.from(heading.childNodes));
+    unwrapped += 1;
+  }
+  let removedEmpty = 0;
+  for (const heading of Array.from(root.querySelectorAll("h1, h2, h3, h4"))) {
+    const text = String(heading.textContent || "").replace(/\s+/g, " ").trim();
+    if (text || heading.querySelector(articleHeadingMediaSelector)) continue;
+    heading.remove();
+    removedEmpty += 1;
+  }
+  return { unwrapped, removedEmpty };
+}
+
 /**
  * 修正富文本编辑器把普通长段落错误输出为 H1-H4 的情况。
  *
@@ -921,6 +953,8 @@ export function sanitizeArticleHtml(rawHtml, baseUrl) {
   /** root 是正文根节点。 */
   const root = parsedDocument.querySelector("article");
   if (!root) return { html: "", text: "" };
+  /** 先拆掉标题中的块级布局外壳和空白占位符，保留其内部真实内容。 */
+  normalizeArticleHeadingStructure(root);
   /** 先纠正来源编辑器的错误标题语义，避免普通正文被阅读页放成巨型标题。 */
   normalizeMisusedArticleHeadings(root);
   /** 推广块在原始容器层级仍完整时清理，避免样式移除后把关注素材展开成正文大图。 */

@@ -12,6 +12,7 @@ import { parseHTML } from "linkedom";
 import { normalizePaperReadingLayout } from "./public/paper-layout.js";
 import { parsePaperAssetUrl } from "./public/paper-assets.js";
 import { resolvePaperAsset } from "./lib/paper-assets.mjs";
+import { createPdfFigureRegions } from "./lib/pdf-reading-layout.mjs";
 import {
   articleImageDirectory,
   attachmentDirectory,
@@ -269,88 +270,6 @@ const browserPairingCodeLifetimeMilliseconds = 10 * 60 * 1000;
 const browserPairingCodes = new Map();
 /** pdfReadingTextCache 缓存少量 PDF 的逐页文字标记，避免每次打开都重新解析整本文件。 */
 const pdfReadingTextCache = new Map();
-/**
- * 合并文字坐标与内嵌插图，生成可复制的复杂页双栏结构。
- *
- * @param {Record<string, Record<string, unknown>>} pageLayouts PDF.js 页级版面特征。
- * @param {Record<string, Array<Record<string, unknown>>>} figuresByPage 内嵌图片列表。
- * @returns {Record<string, Record<string, unknown>>} 需要结构化显示的页面。
- */
-function createPdfFigureRegions(layout) {
-  const pageWidth = Number(layout?.pageWidth) || 0;
-  const pageHeight = Number(layout?.pageHeight) || 0;
-  if (pageWidth < 100 || pageHeight < 100) return [];
-  const regions = [];
-  for (const columnName of ["left", "right"]) {
-    const captions = (layout.structuredText?.columns?.[columnName] || [])
-      .filter((line) => /^图\s*\d+(?:\.\d+)?/.test(String(line.text || "")))
-      .sort((left, right) => Number(right.y) - Number(left.y));
-    captions.forEach((caption, captionIndex) => {
-      const previousCaption = captions[captionIndex - 1];
-      const defaultTopUserCoordinate = captionIndex === 0
-        ? pageHeight * 0.948
-        : Number(previousCaption.y) - Math.max(18, Number(previousCaption.fontSize) * 2.6);
-      const bottomUserCoordinate = Number(caption.y) - Math.max(14, Number(caption.fontSize) * 2.2);
-      const numericLabels = ["left", "right"].flatMap((candidateColumn) => (
-        (layout.structuredText?.columns?.[candidateColumn] || [])
-          .filter((line) => (
-            /^(?:\d{1,2}(?:\s+|$)){1,12}$/.test(String(line.text || "").trim())
-            && Number(line.y) > Number(caption.y) + 10
-            && Number(line.y) < defaultTopUserCoordinate
-          ))
-          .map((line) => ({ ...line, column: candidateColumn }))
-      ));
-      const labelColumns = new Set(numericLabels.map((line) => line.column));
-      const spansBothColumns = labelColumns.size > 1;
-      const figureTextColumns = spansBothColumns ? ["left", "right"] : [columnName];
-      const maximumFigureTextSize = Math.max(8, Number(caption.fontSize) * 1.25);
-      const nearbyFigureLines = figureTextColumns
-        .flatMap((candidateColumn) => layout.structuredText?.columns?.[candidateColumn] || [])
-        .filter((line) => (
-          Number(line.y) > Number(caption.y) + 8
-          && Number(line.y) < defaultTopUserCoordinate
-        ))
-        .sort((left, right) => Number(left.y) - Number(right.y));
-      const includedFigureLines = [];
-      for (const line of nearbyFigureLines) {
-        const text = String(line.text || "").trim();
-        const isNumericLabel = /^(?:\d{1,2}(?:\s+|$)){1,12}$/.test(text);
-        const isNumberedLegend = /^\d{1,2}[.、)]\s*\S/.test(text);
-        const isSmallFigureText = Number(line.fontSize) <= maximumFigureTextSize;
-        if (!isNumericLabel && !isNumberedLegend && !isSmallFigureText) break;
-        includedFigureLines.push(line);
-      }
-      const nearestNonFigureLine = nearbyFigureLines[includedFigureLines.length];
-      const detectedFigureTop = includedFigureLines.length > 0
-        ? Math.max(...includedFigureLines.map((line) => Number(line.y)))
-          + Math.max(16, pageHeight * 0.035)
-        : (numericLabels.length > 0
-          ? Math.max(...numericLabels.map((line) => Number(line.y))) + pageHeight * 0.06
-          : (nearestNonFigureLine
-            ? Number(nearestNonFigureLine.y)
-              - Math.max(12, Number(nearestNonFigureLine.fontSize) * 1.5)
-            : defaultTopUserCoordinate));
-      const topUserCoordinate = Math.min(defaultTopUserCoordinate, detectedFigureTop);
-      const x = spansBothColumns
-        ? pageWidth * 0.065
-        : (columnName === "left" ? pageWidth * 0.065 : pageWidth * 0.5);
-      const width = pageWidth * (spansBothColumns ? 0.87 : 0.435);
-      const height = topUserCoordinate - bottomUserCoordinate;
-      if (height < 45) return;
-      regions.push({
-        regionIndex: regions.length,
-        column: spansBothColumns ? "both" : columnName,
-        caption: String(caption.text || "").replace(/\s+/g, " ").trim(),
-        x: Number(x.toFixed(2)),
-        y: Number((pageHeight - topUserCoordinate).toFixed(2)),
-        width: Number(width.toFixed(2)),
-        height: Number(height.toFixed(2)),
-      });
-    });
-  }
-  return regions;
-}
-
 function createPdfStructuredPages(pageLayouts, figuresByPage) {
   const structuredPages = {};
   for (const [pageNumber, layout] of Object.entries(pageLayouts || {})) {
@@ -375,9 +294,11 @@ function createPdfStructuredPages(pageLayouts, figuresByPage) {
     structuredPages[pageNumber] = {
       presentationMode: useFacsimile ? "facsimile" : "reflow",
       reasons,
+      multiColumn: Boolean(layout.multiColumn),
       pageWidth: Number(layout.pageWidth) || 0,
       pageHeight: Number(layout.pageHeight) || 0,
       header: layout.structuredText?.header || [],
+      body: layout.structuredText?.body || [],
       columns: layout.structuredText?.columns || { left: [], right: [] },
       footer: layout.structuredText?.footer || [],
       figureRegions: useFacsimile ? createPdfPageFacsimileRegion(layout) : figureRegions,

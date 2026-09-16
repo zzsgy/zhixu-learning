@@ -337,7 +337,11 @@ export function createPdfStructuredTextColumns({ pageWidth, pageHeight, rows }) 
   const safePageWidth = Math.max(1, Number(pageWidth) || 1);
   const safePageHeight = Math.max(1, Number(pageHeight) || 1);
   const middleX = safePageWidth / 2;
-  const result = { header: [], columns: { left: [], right: [] }, footer: [] };
+  /**
+   * body 保留整行文字，供“单栏正文 + 跨栏插图”按原始纵向位置重排。
+   * columns 仍为真正的双栏文档保留左右阅读顺序。
+   */
+  const result = { header: [], body: [], columns: { left: [], right: [] }, footer: [] };
 
   function createLine(items) {
     const sortedItems = [...items].sort(
@@ -359,16 +363,21 @@ export function createPdfStructuredTextColumns({ pageWidth, pageHeight, rows }) 
   for (const row of Array.isArray(rows) ? rows : []) {
     const rowY = Number(row.y) || 0;
     const rowItems = Array.isArray(row.items) ? row.items : [];
-    if (rowY >= safePageHeight * 0.955) {
+    /** 某些书籍把“目录 / Contents”运行页眉放在约 93% 高度。 */
+    const isNamedRunningHeader = rowY >= safePageHeight * 0.925
+      && /^(?:目录|contents)$/i.test(String(row.text || "").replace(/\s+/g, "").trim());
+    if (rowY >= safePageHeight * 0.955 || isNamedRunningHeader) {
       const line = createLine(rowItems);
       if (line) result.header.push(line);
       continue;
     }
-    if (rowY <= safePageHeight * 0.04) {
+    if (rowY <= safePageHeight * 0.055) {
       const line = createLine(rowItems);
       if (line) result.footer.push(line);
       continue;
     }
+    const bodyLine = createLine(rowItems);
+    if (bodyLine) result.body.push(bodyLine);
     const leftItems = rowItems.filter((item) => {
       const x = Number(item.transform?.[4]) || 0;
       return x + (Number(item.width) || 0) / 2 < middleX;
@@ -479,7 +488,9 @@ async function renderPdfPageReadingData(pageData, pageNumber) {
   const insertedTables = new Set();
   const outputLines = [];
   for (const row of textRows) {
-    if (isPdfRunningMarginRow(row.y, viewport.height)) continue;
+    const isNamedRunningHeader = Number(row.y) >= viewport.height * 0.925
+      && /^(?:目录|contents)$/i.test(String(row.text || "").replace(/\s+/g, "").trim());
+    if (isPdfRunningMarginRow(row.y, viewport.height) || isNamedRunningHeader) continue;
     const rowItems = [];
     for (const item of row.items || []) {
       const itemX = Number(item.transform?.[4]);

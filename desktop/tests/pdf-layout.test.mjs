@@ -47,6 +47,12 @@ test("复杂页按坐标拆成可复制的左右栏，并过滤插图中的孤�
     "图 1.3 直行程控制阀",
   ]);
   assert.deepEqual(structured.columns.right.map((line) => line.text), ["波纹管密封型阀盖：说明"]);
+  assert.deepEqual(structured.body.map((line) => line.text), [
+    "1. 阀杆",
+    "1",
+    "波纹管密封型阀盖：说明",
+    "图 1.3 直行程控制阀",
+  ]);
   assert.deepEqual(structured.footer.map((line) => line.text), ["18"]);
 });
 

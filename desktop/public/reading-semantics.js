@@ -92,3 +92,54 @@ export function classifyReadableBlock(value, options = {}) {
   if (isDenseDataBlock(text)) return "data";
   return "paragraph";
 }
+
+/** 将 PDF 提取标题和目录标题规范成可比较的键。 */
+export function normalizeReadableHeadingKey(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/\s*[（(]\d+\s*\/\s*\d+[）)]\s*$/, "")
+    .replace(/\s+/g, "")
+    .replace(/[：:]/g, ":")
+    .trim();
+}
+
+/** 判断页首短行是否就是当前章节的权威目录标题。 */
+export function matchesReadableChapterHeading(line, chapterTitle) {
+  const lineKey = normalizeReadableHeadingKey(line);
+  const chapterKey = normalizeReadableHeadingKey(chapterTitle);
+  return Boolean(lineKey && chapterKey && lineKey === chapterKey);
+}
+
+/**
+ * 把因性能分块产生的“(1/4)…(4/4)”合并为一个目录入口。
+ * 正文仍保留所有分块，只精简导航噪声。
+ */
+export function createDocumentChapterTocEntries(chapters, maximumEntries = 500) {
+  const entries = [];
+  (Array.isArray(chapters) ? chapters : []).slice(0, maximumEntries)
+    .forEach((chapter, chapterIndex) => {
+      const rawTitle = String(chapter?.title || "").trim();
+      const chunkMatch = rawTitle.match(/^(.*?)\s*（(\d+)\s*\/\s*(\d+)）$/);
+      const title = (chunkMatch?.[1] || rawTitle).trim();
+      const chunkIndex = Number(chunkMatch?.[2] || 1);
+      const chunkCount = Number(chunkMatch?.[3] || 1);
+      const previous = entries.at(-1);
+      if (
+        chunkMatch
+        && chunkIndex > 1
+        && previous
+        && previous.title === title
+        && previous.chunkCount === chunkCount
+      ) {
+        previous.endIndex = chapterIndex;
+        return;
+      }
+      entries.push({
+        title,
+        startIndex: chapterIndex,
+        endIndex: chapterIndex,
+        chunkCount,
+      });
+    });
+  return entries;
+}

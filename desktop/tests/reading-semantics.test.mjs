@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   classifyReadableBlock,
+  createDocumentChapterTocEntries,
   isDenseDataBlock,
   joinReadableTextLines,
+  matchesReadableChapterHeading,
   normalizeReadableLines,
 } from "../public/reading-semantics.js";
 
@@ -39,4 +41,28 @@ test("英文换行在标点后补空格且保留连字符复合词", () => {
     joinReadableTextLines(["experience-", "acquisition autonomy"]),
     "experience-acquisition autonomy",
   );
+});
+
+test("权威目录标题可从页首恢复且忽略性能分块后缀", () => {
+  assert.equal(matchesReadableChapterHeading("引言", "引言"), true);
+  assert.equal(matchesReadableChapterHeading(
+    "1.1 现代 Agent = LLM + 上下文 + 工具",
+    "1.1 现代 Agent = LLM + 上下文 + 工具（1/4）",
+  ), true);
+  assert.equal(matchesReadableChapterHeading("目录", "引言"), false);
+});
+
+test("超长章节的多个性能分块只产生一个目录入口", () => {
+  assert.deepEqual(createDocumentChapterTocEntries([
+    { title: "引言" },
+    { title: "1.1 现代 Agent（1/4）" },
+    { title: "1.1 现代 Agent（2/4）" },
+    { title: "1.1 现代 Agent（3/4）" },
+    { title: "1.1 现代 Agent（4/4）" },
+    { title: "1.2 Harness 工程" },
+  ]), [
+    { title: "引言", startIndex: 0, endIndex: 0, chunkCount: 1 },
+    { title: "1.1 现代 Agent", startIndex: 1, endIndex: 4, chunkCount: 4 },
+    { title: "1.2 Harness 工程", startIndex: 5, endIndex: 5, chunkCount: 1 },
+  ]);
 });

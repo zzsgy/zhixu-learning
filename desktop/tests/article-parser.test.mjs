@@ -16,6 +16,7 @@ import {
   mergeArticleImagesByBlockPosition,
   normalizeLegacyHtmlImages,
   normalizeArticleMath,
+  normalizeArticleHeadingStructure,
   normalizeMisusedArticleHeadings,
   parseAndClassifyCapturedArticle,
   persistEmbeddedArticleImages,
@@ -252,6 +253,34 @@ test("保留正常短标题并只降级正文形状的错误标题", () => {
   assert.equal(root.querySelectorAll("h2").length, 1);
   assert.equal(root.querySelectorAll("h1").length, 0);
   assert.equal(root.querySelectorAll("p").length, 1);
+});
+
+test("删除空白占位标题并拆掉包裹块级正文的标题外壳", () => {
+  const { document } = parseHTML(`<article>
+    <h2><span><br></span></h2>
+    <h2 class="layout-shell"><span><section><h3>1.1 真实章节</h3><p>正文保持原位。</p></section></span></h2>
+    <h2>正常短标题</h2>
+    <h2><img src="/diagram.png" alt="架构图"></h2>
+  </article>`);
+  const root = document.querySelector("article");
+  const result = normalizeArticleHeadingStructure(root);
+  assert.deepEqual(result, { unwrapped: 1, removedEmpty: 1 });
+  assert.equal(root.querySelectorAll("h2").length, 2);
+  assert.equal(root.querySelector("h3")?.textContent, "1.1 真实章节");
+  assert.equal(root.querySelector("section p")?.textContent, "正文保持原位。");
+  assert.equal(root.querySelector('h2 img[alt="架构图"]')?.getAttribute("src"), "/diagram.png");
+  assert.match(root.textContent || "", /正常短标题/);
+});
+
+test("文章清洗不会把空标题和块级标题外壳写入新记录", () => {
+  const result = sanitizeArticleHtml(
+    `<h2><span><br></span></h2>
+     <h2><span><section><h3>2.1 核心目标</h3><p>需要保留的正文。</p></section></span></h2>`,
+    new URL("https://example.com/article"),
+  );
+  assert.doesNotMatch(result.html, /<h2/);
+  assert.match(result.html, /<h3>2\.1 核心目标<\/h3>/);
+  assert.match(result.html, /需要保留的正文/);
 });
 
 /**
