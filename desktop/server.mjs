@@ -65,6 +65,9 @@ import {
   getImportJob,
   getGitHubProject,
   getReadingWorkspace,
+  getNoteLibrarySummary,
+  getStandaloneNote,
+  getNoteOrganizationSettings,
   getContentOrganization,
   insertDocument,
   ensureFolderPath,
@@ -84,6 +87,8 @@ import {
   listPendingFullPaperTranslations,
   listPendingArticleTranslations,
   listPapers,
+  listAllNotes,
+  listNoteDigests,
   listContentTags,
   listTags,
   listTopicItems,
@@ -115,6 +120,11 @@ import {
   updateReadingAnnotation,
   updateReadingSession,
   updateReadingState,
+  updateNoteOrganizationSettings,
+  createStandaloneNote,
+  updateStandaloneNote,
+  deleteStandaloneNote,
+  createNoteDigest,
   upsertGitHubProject,
   removeContentTag,
   removeTopicItem,
@@ -137,6 +147,10 @@ import {
   extractWordHtml,
   isPdfTextLayerCorrupted,
 } from "./lib/extractor.mjs";
+import {
+  createPdfPageFacsimileRegion,
+  shouldUsePdfPageFacsimile,
+} from "./lib/pdf-page-presentation.mjs";
 import {
   detectArticleLanguage,
   fetchPublicImage,
@@ -179,6 +193,9 @@ import { createFileDeletionRunner } from "./lib/file-deletion-runner.mjs";
 import {
   listPendingFileDeletions, completePendingFileDeletion, failPendingFileDeletion, isPendingFileStillReferenced,
 } from "./lib/database.mjs";
+import { calculateNextNoteRun, createLocalNoteDigest } from "./lib/note-organizer.mjs";
+import { normalizeStandaloneNoteContent } from "./lib/note-content.mjs";
+import { createWordNoteDocument } from "./lib/note-docx.mjs";
 import {
   getOcrEngineStatus,
   isOcrSupportedExtension,
@@ -343,20 +360,23 @@ function createPdfStructuredPages(pageLayouts, figuresByPage) {
     }
     const figureRegions = createPdfFigureRegions(layout);
     if (figureRegions.length > 0) reasons.push("figure-regions");
+    const useFacsimile = shouldUsePdfPageFacsimile(layout, figures, figureRegions);
+    if (useFacsimile) reasons.push("low-confidence-facsimile");
     if (reasons.length === 0) continue;
     const leftCaptionCount = (layout.structuredText?.columns?.left || [])
       .filter((line) => /^图\s*\d+(?:\.\d+)?/.test(String(line.text || ""))).length;
     const rightCaptionCount = (layout.structuredText?.columns?.right || [])
       .filter((line) => /^图\s*\d+(?:\.\d+)?/.test(String(line.text || ""))).length;
     structuredPages[pageNumber] = {
+      presentationMode: useFacsimile ? "facsimile" : "reflow",
       reasons,
       pageWidth: Number(layout.pageWidth) || 0,
       pageHeight: Number(layout.pageHeight) || 0,
       header: layout.structuredText?.header || [],
       columns: layout.structuredText?.columns || { left: [], right: [] },
       footer: layout.structuredText?.footer || [],
-      figureRegions,
-      figures: figures.map((figure, figureIndex) => ({
+      figureRegions: useFacsimile ? createPdfPageFacsimileRegion(layout) : figureRegions,
+      figures: useFacsimile ? [] : figures.map((figure, figureIndex) => ({
         ...figure,
         column: leftCaptionCount + rightCaptionCount >= figures.length
           ? (figureIndex < leftCaptionCount ? "left" : "right")
@@ -845,6 +865,16 @@ function sanitizeFileName(rawName) {
   /** baseName 丢弃了任何目录部分。 */
   const baseName = path.basename(decodedName).replace(/[\u0000-\u001f]/g, "");
   return baseName.slice(0, 240) || "未命名文档";
+}
+
+/** 生成服务端导出文件名；这里接收的是标题而不是 URL 编码请求头。 */
+function createExportFileName(title, extension) {
+  const base = String(title || "知序笔记")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
+    .replace(/[. ]+$/g, "")
+    .trim()
+    .slice(0, 180) || "知序笔记";
+  return `${base}.${extension}`;
 }
 
 /**
@@ -2036,7 +2066,7 @@ async function handleApiRequest(request, response, url) {
 
   if (request.method === "PATCH" && url.pathname === "/api/reading-workspace") {
     /** requestBuffer 是阅读状态的 JSON 请求正文。 */
-    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
+    const requestBuffer = await readRequestBuffer(request, 8_500_000);
     /** payload 是浏览器提交的进度、状态或个人笔记。 */
     const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
     /** state 是写入数据库后的最新阅读状态。 */
@@ -2146,12 +2176,139 @@ async function handleApiRequest(request, response, url) {
     /** sourceType 是可选的论文来源过滤值。 */
     const sourceType = url.searchParams.get("source") ?? "";
     /** papers 是用户已经保存到统一论文库的论文。 */
-    const jobByPaper = new Map(getPaperImportStatuses().map(job => [job.target_id, { id: job.id, status: job.status, stage: job.stage, progressPercent: job.progress_percent, attemptCount: job.attempt_count, errorMessage: job.error_message }]));
+    const jobByPaper = new Map(getPaperImportStatuses().map(job => [job.target_id, {
+      id: job.id,
+      status: job.status,
+      stage: job.stage,
+      progressPercent: job.progress_percent,
+      attemptCount: job.attempt_count,
+      errorMessage: job.error_message,
+      nextAttemptAt: job.next_attempt_at || null,
+    }]));
     const duplicates = listPaperIdentityDuplicates();
     const duplicateIds = new Set(duplicates.flatMap(group => group.paperIds));
     const page = url.searchParams.has("page") ? getPaperLibraryPage(Object.fromEntries(url.searchParams), [...duplicateIds]) : null;
     const papers = (page?.papers || listPapers(sourceType)).map(paper => ({ ...toPaperListItem(paper), importJob: jobByPaper.get(paper.id) || null, hasDuplicateIdentity: duplicateIds.has(paper.id) }));
     sendJson(response, 200, { ...page, papers, duplicates });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/notes") {
+    const settings = ensureNoteOrganizationSchedule();
+    const notes = listAllNotes({
+      query: url.searchParams.get("query") || "",
+      targetType: url.searchParams.get("targetType") || "",
+      limit: Number(url.searchParams.get("limit") || 100),
+      offset: Number(url.searchParams.get("offset") || 0),
+    });
+    const pending = listAllNotes({ updatedAfter: settings.lastRunAt || "", limit: 5000 })
+      .items.filter((note) => String(note.noteText || "").trim()).length;
+    sendJson(response, 200, {
+      notes: notes.items,
+      total: notes.total,
+      hasMore: notes.hasMore,
+      summary: { ...getNoteLibrarySummary(), pendingCount: pending },
+      settings,
+      digests: listNoteDigests(12),
+    });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/notes") {
+    const payload = JSON.parse((await readRequestBuffer(request, 32 * 1024)).toString("utf8") || "{}");
+    const noteType = String(payload.noteType || "").trim().toLowerCase();
+    if (!["markdown", "text", "word"].includes(noteType)) {
+      sendJson(response, 400, { message: "不支持这种笔记类型。" });
+      return true;
+    }
+    const note = createStandaloneNote(noteType);
+    createDailyBackup();
+    sendJson(response, 201, { note });
+    return true;
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/notes/settings") {
+    const requestBuffer = await readRequestBuffer(request, 32 * 1024);
+    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
+    const base = updateNoteOrganizationSettings({
+      enabled: payload.enabled,
+      frequency: payload.frequency,
+      weekday: payload.weekday,
+      time: payload.time,
+      nextRunAt: null,
+    });
+    const settings = updateNoteOrganizationSettings({
+      nextRunAt: base.enabled ? calculateNextNoteRun(base) : null,
+    });
+    sendJson(response, 200, { settings });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/notes/organize") {
+    const result = runNoteOrganization({ manual: true });
+    sendJson(response, result.digest ? 201 : 200, {
+      organized: Boolean(result.digest),
+      message: result.digest ? "新笔记已完成本地整理。" : "没有需要整理的新笔记。",
+      ...result,
+    });
+    return true;
+  }
+
+  const noteExportMatch = url.pathname.match(/^\/api\/notes\/([^/]+)\/export$/);
+  if (request.method === "GET" && noteExportMatch) {
+    const note = getStandaloneNote(decodeURIComponent(noteExportMatch[1]));
+    if (!note) {
+      sendJson(response, 404, { message: "找不到这条独立笔记。" });
+      return true;
+    }
+    let body;
+    let extension;
+    let contentType;
+    if (note.noteType === "word") {
+      body = await createWordNoteDocument({ title: note.title, html: note.contentData?.html || "" });
+      extension = "docx";
+      contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    } else {
+      body = Buffer.from(note.contentText || "", "utf8");
+      extension = note.noteType === "markdown" ? "md" : "txt";
+      contentType = "text/plain; charset=utf-8";
+    }
+    const fileName = createExportFileName(note.title, extension);
+    response.writeHead(200, {
+      "Content-Type": contentType,
+      "Content-Length": body.length,
+      "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(body);
+    return true;
+  }
+
+  const standaloneNoteMatch = url.pathname.match(/^\/api\/notes\/([^/]+)$/);
+  if (standaloneNoteMatch && ["GET", "PATCH", "DELETE"].includes(request.method)) {
+    const id = decodeURIComponent(standaloneNoteMatch[1]);
+    if (request.method === "GET") {
+      const note = getStandaloneNote(id);
+      sendJson(response, note ? 200 : 404, note ? { note } : { message: "找不到这条独立笔记。" });
+      return true;
+    }
+    if (request.method === "DELETE") {
+      const deleted = deleteStandaloneNote(id);
+      if (deleted) createDailyBackup();
+      sendJson(response, deleted ? 200 : 404, deleted ? { deleted: true } : { message: "找不到这条独立笔记。" });
+      return true;
+    }
+    const current = getStandaloneNote(id);
+    if (!current) {
+      sendJson(response, 404, { message: "找不到这条独立笔记。" });
+      return true;
+    }
+    const payload = JSON.parse((await readRequestBuffer(request, 2_200_000)).toString("utf8") || "{}");
+    const normalized = normalizeStandaloneNoteContent(current.noteType, payload);
+    const note = updateStandaloneNote(id, { title: payload.title, ...normalized });
+    createDailyBackup();
+    sendJson(response, 200, { note });
     return true;
   }
 
@@ -3466,6 +3623,43 @@ async function runPaperSchedule() {
   }
 }
 
+/** 确保首次打开笔记库时生成未来的本地整理时间。 */
+function ensureNoteOrganizationSchedule() {
+  const settings = getNoteOrganizationSettings();
+  if (!settings.enabled || settings.nextRunAt) return settings;
+  return updateNoteOrganizationSettings({ nextRunAt: calculateNextNoteRun(settings) });
+}
+
+/** 整理上次成功检查后新增或修改的笔记；原始笔记不作任何改写。 */
+function runNoteOrganization({ manual = false } = {}) {
+  const settings = ensureNoteOrganizationSchedule();
+  const now = new Date();
+  const periodEnd = now.toISOString();
+  const notes = listAllNotes({ updatedAfter: settings.lastRunAt || "", limit: 5000 })
+    .items.filter((note) => String(note.noteText || "").trim());
+  const digest = notes.length
+    ? createNoteDigest({
+        periodStart: settings.lastRunAt || null,
+        periodEnd,
+        notes,
+        digest: createLocalNoteDigest(notes, now),
+      })
+    : null;
+  const nextSettings = updateNoteOrganizationSettings({
+    lastRunAt: periodEnd,
+    nextRunAt: settings.enabled ? calculateNextNoteRun(settings, now) : null,
+  });
+  if (digest && !manual) createDailyBackup();
+  return { digest, settings: nextSettings, summary: getNoteLibrarySummary(), digests: listNoteDigests(12) };
+}
+
+/** 每分钟只检查时间，不联网；到期且有新笔记时生成一份派生整理。 */
+function runScheduledNoteOrganization() {
+  const settings = ensureNoteOrganizationSchedule();
+  if (!settings.enabled || !settings.nextRunAt) return;
+  if (Date.now() >= Date.parse(settings.nextRunAt)) runNoteOrganization();
+}
+
 /** paperScheduleTimer 是服务运行期间每六小时执行一次的周任务。 */
 const paperScheduleTimer = setInterval(
   () => void runPaperSchedule(),
@@ -3473,6 +3667,10 @@ const paperScheduleTimer = setInterval(
 );
 paperScheduleTimer.unref();
 void runPaperSchedule();
+
+runScheduledNoteOrganization();
+const noteOrganizationTimer = setInterval(runScheduledNoteOrganization, 60 * 1000);
+noteOrganizationTimer.unref();
 
 /** codexWorkerTimer 定期检查登录恢复和未完成队列。 */
 const codexWorkerTimer = setInterval(

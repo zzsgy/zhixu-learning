@@ -10,8 +10,17 @@ import { normalizePaperReadingLayout } from "./paper-layout.js";
 import { parsePaperAssetUrl } from "./paper-assets.js";
 import { createPaperLibrary } from "./paper-library.js";
 import { renderStorageDashboard, renderStorageJobOverview, renderStorageBrowserOverview } from "./storage-dashboard.js";
+import { mountNotesCenter } from "./notes-center.js";
+import {
+  classifyReadableBlock,
+  joinReadableTextLines,
+  normalizeReadableLines,
+} from "./reading-semantics.js";
 
 let paperLibrary;
+import { mountReadingNotes } from "./reading-notes.js";
+let readingNotesEditor;
+let notesCenter;
 
 /** applicationState 保存当前筛选、文档列表和已打开文档。 */
 const applicationState = {
@@ -157,6 +166,10 @@ const applicationState = {
   documentChapters: [],
   /** activeDocumentChapterIndex 是当前只渲染的一章下标。 */
   activeDocumentChapterIndex: 0,
+  /** 连续阅读章节索引；仅用于目录定位和滚动章节识别，不卸载 DOM，也不改写章节高度。 */
+  documentContinuousIndex: null,
+  /** documentVirtualScrollFrame 合并连续滚动中的章节定位计算。 */
+  documentVirtualScrollFrame: null,
   /** uploadInProgress 防止两个大批次同时解析造成内存峰值。 */
   uploadInProgress: false,
   /** uploadBatchHideTimer 在整批成功后收起紧凑进度提示。 */
@@ -303,6 +316,7 @@ const dom = {
   readerBackButton: document.querySelector("#reader-back-button"),
   readerModeSwitch: document.querySelector("#reader-mode-switch"),
   originalDocumentLink: document.querySelector("#original-document-link"),
+  readerDocumentName: document.querySelector("#reader-document-name"),
   readerTitle: document.querySelector("#reader-title"),
   readerMeta: document.querySelector("#reader-meta"),
   readerSummary: document.querySelector("#reader-summary"),
@@ -1381,21 +1395,6 @@ function splitDenseText(text) {
   return outputBlocks;
 }
 
-/**
- * 判断文本块是否主要由统计数字、百分比和英文技能名称组成。
- *
- * @param {string} text 待判断文本。
- * @returns {boolean} 是否为高密度数据块。
- */
-function isDenseDataBlock(text) {
-  if (text.length < 90) return false;
-  /** numericCharacters 是数字和百分号数量。 */
-  const numericCharacters = (text.match(/[\d%+]/g) ?? []).length;
-  /** latinCharacters 是英文字符数量。 */
-  const latinCharacters = (text.match(/[A-Za-z]/g) ?? []).length;
-  return (numericCharacters + latinCharacters) / text.length > 0.42;
-}
-
 /** 清理 PDF 坐标文字中不必要的中文空格。 */
 function normalizeStructuredPdfText(value) {
   return String(value || "")
@@ -1509,22 +1508,35 @@ function createStructuredPdfPage(pageNumber, pageData) {
   const page = document.createElement("section");
   page.className = "readable-structured-page";
   page.dataset.pdfPage = String(pageNumber);
+  /** wasFacsimile 只保留低置信标记；HTML 阅读不再插入整页栅格图。 */
+  const wasFacsimile = pageData.presentationMode === "facsimile";
+  if (wasFacsimile) page.classList.add("is-text-fallback");
+  /** displayFigureRegions 排除后端为整页保真生成的全页区域，只留下真实局部图框。 */
+  const displayFigureRegions = wasFacsimile ? [] : (pageData.figureRegions || []);
+  const displayFigures = wasFacsimile ? [] : (pageData.figures || []);
   const headerText = (pageData.header || []).map((line) => normalizeStructuredPdfText(line.text)).join(" · ");
   if (headerText) page.append(createTextElement("div", "readable-structured-header", headerText));
+  if (wasFacsimile) {
+    page.append(createTextElement(
+      "p",
+      "readable-structured-fallback-note",
+      "本页包含复杂图示；HTML 阅读保留可复制文字，完整图示可从顶部打开原版 PDF。",
+    ));
+  }
   const columns = document.createElement("div");
   columns.className = "readable-structured-columns";
-  const hasFigureRegions = (pageData.figureRegions || []).length > 0;
+  const hasFigureRegions = displayFigureRegions.length > 0;
   for (const columnName of ["left", "right"]) {
     const column = document.createElement("div");
     column.className = `readable-structured-column is-${columnName}`;
-    const figureRegions = (pageData.figureRegions || [])
+    const figureRegions = displayFigureRegions
       .filter((region) => region.column === columnName);
     const parsed = parseStructuredPdfColumn(pageData.columns?.[columnName] || [], {
-      removeDiagramLabels: (pageData.figureRegions || []).length > 0 || (pageData.figures || []).length > 0,
+      removeDiagramLabels: wasFacsimile || displayFigureRegions.length > 0 || displayFigures.length > 0,
     });
     const figures = hasFigureRegions
       ? figureRegions
-      : (pageData.figures || []).filter((figure) => figure.column === columnName);
+      : displayFigures.filter((figure) => figure.column === columnName);
     const figureElements = figures.map((figureInfo, index) => createStructuredPdfFigure(
       pageNumber,
       figureInfo,
@@ -1571,7 +1583,7 @@ function createStructuredPdfPage(pageNumber, pageData) {
     columns.append(column);
   }
   page.append(columns);
-  const spanningRegions = (pageData.figureRegions || []).filter((region) => region.column === "both");
+  const spanningRegions = displayFigureRegions.filter((region) => region.column === "both");
   for (const [regionIndex, region] of spanningRegions.entries()) {
     page.append(createStructuredPdfFigure(
       pageNumber,
@@ -1581,7 +1593,11 @@ function createStructuredPdfPage(pageNumber, pageData) {
     ));
   }
   const footerText = (pageData.footer || []).map((line) => normalizeStructuredPdfText(line.text)).join(" ");
-  page.append(createTextElement("div", "readable-structured-footer", footerText || `原文第 ${pageNumber} 页`));
+  page.append(createTextElement(
+    "div",
+    "readable-structured-footer",
+    footerText || `原文第 ${pageNumber} 页${wasFacsimile ? " · 复杂版面文字模式" : ""}`,
+  ));
   return page;
 }
 
@@ -1595,10 +1611,7 @@ function createReadableDocument(text) {
   /** fragment 是最终插入阅读页的文档片段。 */
   const fragment = document.createDocumentFragment();
   /** normalizedLines 是保留空行但清理行内多余空白的正文行。 */
-  const normalizedLines = text
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .map((line) => line.replace(/[ \t]+/g, " ").trim());
+  const normalizedLines = normalizeReadableLines(text);
   /** paragraphLines 暂存属于同一自然段的连续行。 */
   let paragraphLines = [];
   /** skipPdfPageText 表示当前复杂页已由坐标文字重建，后续扁平副本不再重复显示。 */
@@ -1612,20 +1625,15 @@ function createReadableDocument(text) {
   function flushParagraph() {
     if (paragraphLines.length === 0) return;
     /** paragraphText 是修复 PDF 强制换行后的自然段正文。 */
-    const paragraphText = paragraphLines
-      .reduce((combinedText, currentLine) => {
-        if (!combinedText) return currentLine;
-        /** needsSpace 用于保留英文单词跨 PDF 行连接时的自然间隔。 */
-        const needsSpace =
-          /[A-Za-z0-9]$/.test(combinedText) && /^[A-Za-z0-9]/.test(currentLine);
-        return `${combinedText}${needsSpace ? " " : ""}${currentLine}`;
-      }, "")
-      .trim();
+    const paragraphText = joinReadableTextLines(paragraphLines);
     if (paragraphText) {
       /** readableBlocks 是从可能很长的 PDF 行中恢复出的短段落。 */
       const readableBlocks = splitDenseText(paragraphText);
       for (const block of readableBlocks) {
-        if (isReadableHeading(block, true, true)) {
+        const blockKind = classifyReadableBlock(block, {
+          heading: isReadableHeading(block, true, true),
+        });
+        if (blockKind === "heading") {
           /** markdownHeading 是当前标题可能携带的 Markdown 层级标记。 */
           const markdownHeading = block.match(/^(#{1,4})\s+(.+)$/);
           /** headingLevel 是在阅读页主标题之下使用的安全标题层级。 */
@@ -1635,7 +1643,13 @@ function createReadableDocument(text) {
           /** headingText 是移除 Markdown 井号后的干净标题。 */
           const headingText = markdownHeading?.[2]?.trim() || block;
           fragment.append(createTextElement(`h${headingLevel}`, "", headingText));
-        } else if (isDenseDataBlock(block)) {
+        } else if (blockKind === "list") {
+          fragment.append(createTextElement(
+            "div",
+            "readable-list-item",
+            block.replace(/^[•●▪◦]\s*/, ""),
+          ));
+        } else if (blockKind === "data") {
           fragment.append(createTextElement("div", "readable-data-block", block));
         } else {
           fragment.append(createTextElement("p", "", block));
@@ -1730,17 +1744,7 @@ function createReadableDocument(text) {
       fragment.append(createTextElement("div", "page-divider", `第 ${line} 页`));
       continue;
     }
-    if (/^[•●▪◦\-–—]\s+/.test(line)) {
-      flushParagraph();
-      /** listItem 是单独展示的项目符号内容。 */
-      const listItem = createTextElement(
-        "div",
-        "readable-list-item",
-        line.replace(/^[•●▪◦\-–—]\s+/, ""),
-      );
-      fragment.append(listItem);
-      continue;
-    }
+    if (/^[•●▪◦]\s*\S/.test(line) && paragraphLines.length > 0) flushParagraph();
     /** 连续数字部件标注属于图例清单，不应被误排成章节大标题。 */
     const numberedCalloutMatch = line.match(/^(\d{1,2})[.、)]\s*(\S.*)$/);
     const previousIsNumberedCallout = /^\d{1,2}[.、)]\s*\S/.test(previousLine);
@@ -1931,9 +1935,9 @@ function parseDocumentChapterHeading(sourceLine) {
 function splitOversizedTextChapter(chapter) {
   if (getReadableTextLength(chapter.content) <= progressiveReadableChunkSize) return [chapter];
   return splitReadableTextIntoChunks(chapter.content).map((content, index, chunks) => ({
+    ...chapter,
     title: chunks.length === 1 ? chapter.title : `${chapter.title}（${index + 1}/${chunks.length}）`,
     content,
-    kind: "text",
   }));
 }
 
@@ -2048,6 +2052,7 @@ function createPdfOutlineDocumentChapters(text, pdfOutline) {
       title: boundary.title,
       content,
       kind: "text",
+      level: boundary.level,
     }));
   });
   return chapters.length >= 2 ? chapters : null;
@@ -2408,8 +2413,10 @@ function updateDocumentChapterNavigation() {
   const chapters = applicationState.documentChapters;
   const chapterIndex = applicationState.activeDocumentChapterIndex;
   const hasMultipleChapters = chapters.length > 1;
-  dom.documentChapterNavigation.hidden = !hasMultipleChapters;
-  dom.documentChapterFooter.hidden = !hasMultipleChapters;
+  /** PDF 使用连续正文流，目录只负责定位，不再出现上一章/下一章分页。 */
+  const usesContinuousPdfReading = dom.reader.classList.contains("is-pdf-reader");
+  dom.documentChapterNavigation.hidden = !hasMultipleChapters || usesContinuousPdfReading;
+  dom.documentChapterFooter.hidden = !hasMultipleChapters || usesContinuousPdfReading;
   if (!hasMultipleChapters) return;
   const chapter = chapters[chapterIndex];
   const counterText = `第 ${chapterIndex + 1} / ${chapters.length} 章`;
@@ -2438,10 +2445,114 @@ function buildDocumentChapterTableOfContents() {
     tocButton.setAttribute("aria-current", index === applicationState.activeDocumentChapterIndex ? "page" : "false");
     tocButton.textContent = chapter.title.slice(0, 100);
     tocButton.addEventListener("click", () => {
+      /** continuousSection 存在时直接定位连续正文，不再重新加载单章。 */
+      const continuousSection = dom.readerContent.querySelector(
+        `[data-document-chapter-index="${index}"]`,
+      );
+      if (continuousSection) {
+        applicationState.activeDocumentChapterIndex = index;
+        updateContinuousDocumentTocState();
+        continuousSection.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
       void renderDocumentChapter(index, { scrollToTop: true, saveProgress: true });
     });
     dom.readingToc.append(tocButton);
   });
+}
+
+/**
+ * 同步连续文档目录中的当前章节高亮。
+ *
+ * @returns {void}
+ */
+function updateContinuousDocumentTocState() {
+  const activeIndex = applicationState.activeDocumentChapterIndex;
+  Array.from(dom.readingToc.querySelectorAll(".document-chapter-toc-button"))
+    .forEach((button, index) => {
+      const isActive = index === activeIndex;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-current", isActive ? "page" : "false");
+    });
+}
+
+/**
+ * 根据当前滚动位置更新连续 PDF 的目录高亮。
+ *
+ * @returns {void}
+ */
+function updateContinuousDocumentActiveChapter() {
+  if (dom.reader.hidden || !dom.reader.classList.contains("is-pdf-reader")) return;
+  if (applicationState.documentVirtualScrollFrame) return;
+  applicationState.documentVirtualScrollFrame = window.requestAnimationFrame(() => {
+    applicationState.documentVirtualScrollFrame = null;
+    const sections = applicationState.documentContinuousIndex?.sections || [];
+    if (sections.length === 0) return;
+    const focusLine = Math.min(220, window.innerHeight * 0.28);
+    let lowerIndex = 0;
+    let upperIndex = sections.length - 1;
+    let activeIndex = 0;
+    /** 二分定位替代每次滚动扫描全部章节，超长目录也只需少量布局读取。 */
+    while (lowerIndex <= upperIndex) {
+      const middleIndex = Math.floor((lowerIndex + upperIndex) / 2);
+      if (sections[middleIndex].getBoundingClientRect().top <= focusLine) {
+        activeIndex = middleIndex;
+        lowerIndex = middleIndex + 1;
+      } else {
+        upperIndex = middleIndex - 1;
+      }
+    }
+    if (activeIndex === applicationState.activeDocumentChapterIndex) return;
+    applicationState.activeDocumentChapterIndex = activeIndex;
+    updateContinuousDocumentTocState();
+  });
+}
+
+/**
+ * 为只有标题的 PDF 大章生成可直接继续阅读的小节入口。
+ *
+ * @param {number} chapterIndex 当前章节下标。
+ * @returns {HTMLElement | null} 大章导览卡；普通章节返回空。
+ */
+function createDocumentSectionOverview(chapterIndex) {
+  const chapters = applicationState.documentChapters;
+  const chapter = chapters[chapterIndex];
+  if (!chapter || chapter.kind !== "text" || chapter.level !== 0) return null;
+  /** compactContent 排除页码标记和空白，用于判断大章是否只有标题。 */
+  const compactContent = String(chapter.content || "")
+    .replace(/\[\[ZHIXU_PDF_PAGE:\d{1,4}\]\]/g, "")
+    .normalize("NFKC")
+    .replace(/\s+/g, "");
+  const compactTitle = String(chapter.title || "").normalize("NFKC").replace(/\s+/g, "");
+  const remainingContent = compactContent.startsWith(compactTitle)
+    ? compactContent.slice(compactTitle.length)
+    : compactContent;
+  if (remainingContent.length > 24) return null;
+  /** childIndexes 只收集当前大章之后、下一个同级章之前的直接小节。 */
+  const childIndexes = [];
+  for (let index = chapterIndex + 1; index < chapters.length; index += 1) {
+    const candidate = chapters[index];
+    if (Number.isInteger(candidate.level) && candidate.level <= chapter.level) break;
+    if (candidate.level === chapter.level + 1) childIndexes.push(index);
+  }
+  if (childIndexes.length === 0) return null;
+  const overview = document.createElement("section");
+  overview.className = "document-section-overview";
+  overview.append(
+    createTextElement("p", "eyebrow", "CHAPTER CONTENTS"),
+    createTextElement("h3", "", "本章内容"),
+  );
+  const links = document.createElement("div");
+  childIndexes.forEach((index) => {
+    const button = createTextElement("button", "", chapters[index].title);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      void renderDocumentChapter(index, { scrollToTop: true, saveProgress: true });
+    });
+    links.append(button);
+  });
+  overview.append(links);
+  return overview;
 }
 
 /** codeKeywords 是基础语法着色共同识别的保留字。 */
@@ -2582,6 +2693,86 @@ function enhanceReadingSemantics(readingSurface) {
   }
 }
 
+/** 释放连续文档的滚动定位状态。 */
+function resetContinuousDocumentIndex() {
+  if (applicationState.documentVirtualScrollFrame) {
+    window.cancelAnimationFrame(applicationState.documentVirtualScrollFrame);
+  }
+  applicationState.documentContinuousIndex = null;
+  applicationState.documentVirtualScrollFrame = null;
+}
+
+/**
+ * 把 PDF 组织为稳定的连续正文。
+ * 章节分批创建以避免长任务阻塞；离屏章节交给浏览器原生 content-visibility 跳过绘制，
+ * 不再动态卸载或修改占位高度，避免滚动锚定把页面反复拉回。
+ *
+ * @param {{ scrollToTop?: boolean }} options 打开行为。
+ * @returns {Promise<boolean>} 是否成功建立连续虚拟阅读流。
+ */
+async function renderContinuousPdfDocument(options = {}) {
+  const chapters = applicationState.documentChapters;
+  if (chapters.length === 0) return false;
+  resetContinuousDocumentIndex();
+  const renderSequence = applicationState.documentRenderSequence + 1;
+  applicationState.documentRenderSequence = renderSequence;
+  applicationState.activeDocumentChapterIndex = 0;
+  dom.documentChapterNavigation.hidden = true;
+  dom.documentChapterFooter.hidden = true;
+  dom.readerContent.replaceChildren(
+    createTextElement("div", "readable-render-status", "正在建立连续阅读视图…"),
+  );
+  await yieldDocumentRendering();
+  if (renderSequence !== applicationState.documentRenderSequence) return false;
+  dom.readerContent.replaceChildren();
+  const sections = [];
+  for (let index = 0; index < chapters.length; index += 1) {
+    const chapter = chapters[index];
+    const section = document.createElement("section");
+    section.className = "document-continuous-section";
+    section.id = `document-chapter-${index + 1}`;
+    section.dataset.documentChapterIndex = String(index);
+    section.dataset.documentChapterLevel = String(
+      Number.isInteger(chapter.level) ? chapter.level : 1,
+    );
+    try {
+      const fragment = chapter.kind === "word"
+        ? createWordDocument(chapter.content)
+        : createReadableDocument(chapter.content);
+      section.append(fragment);
+    } catch (error) {
+      console.error("文档章节排版失败，已改用纯文本显示。", error);
+      const fallbackText = chapter.kind === "word"
+        ? new DOMParser().parseFromString(chapter.content, "text/html").body.textContent
+        : chapter.content;
+      section.append(
+        createTextElement("div", "readable-render-warning", "本节排版失败，已切换为纯文本阅读。"),
+        createTextElement("pre", "readable-plain-fallback", fallbackText || "本节没有可显示的正文。"),
+      );
+    }
+    enhanceReadingSemantics(section);
+    sections.push(section);
+    dom.readerContent.append(section);
+    if ((index + 1) % 6 === 0) {
+      await yieldDocumentRendering();
+      if (renderSequence !== applicationState.documentRenderSequence) return false;
+    }
+  }
+  applicationState.activeReadingSurface = dom.readerContent;
+  applicationState.documentContinuousIndex = { renderSequence, sections };
+
+  if (applicationState.readingWorkspace) {
+    buildDocumentChapterTableOfContents();
+    applyReadingHighlights();
+    renderReadingAnnotations();
+  }
+  if (options.scrollToTop) {
+    const readerTop = window.scrollY + dom.readerContent.getBoundingClientRect().top - 24;
+    window.scrollTo({ top: Math.max(0, readerTop), behavior: "auto" });
+  }
+  return true;
+}
+
 /**
  * 只渲染当前选中的一个文档章节。
  *
@@ -2622,6 +2813,8 @@ async function renderDocumentChapter(requestedIndex, options = {}) {
     );
   }
   dom.readerContent.replaceChildren(fragment);
+  const sectionOverview = createDocumentSectionOverview(chapterIndex);
+  if (sectionOverview) dom.readerContent.append(sectionOverview);
   enhanceReadingSemantics(dom.readerContent);
   await yieldDocumentRendering();
   if (renderSequence !== applicationState.documentRenderSequence) return false;
@@ -2672,15 +2865,17 @@ function renderReadingProgress(progressPercent) {
  * @param {boolean} expanded 是否展开工作台。
  * @returns {void}
  */
-function setReadingWorkbenchExpanded(expanded) {
+function setReadingWorkbenchExpanded(expanded, persist = true) {
   dom.readingWorkbench.hidden = !expanded;
   dom.readingWorkbenchToggle.hidden = expanded;
   dom.readingWorkbenchToggle.setAttribute("aria-expanded", String(expanded));
   dom.readingWorkbenchClose.textContent = "⇥";
   document.body.classList.toggle("has-reading-workbench", expanded);
-  try {
-    window.localStorage.setItem("zhixu-reading-sidebar-expanded", String(expanded));
-  } catch (error) {}
+  if (persist) {
+    try {
+      window.localStorage.setItem("zhixu-reading-sidebar-expanded", String(expanded));
+    } catch (error) {}
+  }
 }
 
 /**
@@ -2689,7 +2884,7 @@ function setReadingWorkbenchExpanded(expanded) {
  * @param {boolean} expanded 是否完整显示文章目录。
  * @returns {void}
  */
-function setReadingTocExpanded(expanded) {
+function setReadingTocExpanded(expanded, persist = true) {
   applicationState.readingTocExpanded = Boolean(expanded);
   dom.readingTocSidebar.hidden = !expanded;
   dom.readingTocReopen.hidden = expanded;
@@ -2699,9 +2894,11 @@ function setReadingTocExpanded(expanded) {
   dom.readingTocToggle.setAttribute("aria-label", "收起文章目录");
   dom.readingTocToggle.title = "收起文章目录";
   document.body.classList.toggle("has-reading-toc", expanded);
-  try {
-    window.localStorage.setItem("zhixu-reading-toc-expanded", String(expanded));
-  } catch (error) {}
+  if (persist) {
+    try {
+      window.localStorage.setItem("zhixu-reading-toc-expanded", String(expanded));
+    } catch (error) {}
+  }
 }
 
 /** readingWorkbenchMinimumWidth 是桌面端侧栏允许的最小宽度。 */
@@ -2911,11 +3108,16 @@ async function startReadingActivitySession(targetType, targetId, progressPercent
 /**
  * 隐藏阅读工作台并清除当前阅读上下文。
  *
- * @returns {void}
+ * @returns {Promise<boolean> | null} 最后一次笔记保存；没有阅读上下文时为空。
  */
 function closeReadingWorkspace() {
+  readingNotesEditor?.close();
+  let noteSave = null;
   if (applicationState.readingWorkspace) {
-    void saveReadingState({ noteText: dom.readingNoteInput.value });
+    noteSave = saveReadingState(readingNotesEditor?.getContent() || {
+      noteHtml: dom.readingNoteInput.innerHTML,
+      noteText: dom.readingNoteInput.textContent || "",
+    });
     flushReadingActivitySession(true);
   }
   applicationState.readingActivitySequence += 1;
@@ -2931,6 +3133,7 @@ function closeReadingWorkspace() {
   applicationState.pendingReadingSelection = null;
   applicationState.readingAiSelection = null;
   applicationState.readingAiConversationId = "";
+  resetContinuousDocumentIndex();
   applicationState.documentChapters = [];
   applicationState.activeDocumentChapterIndex = 0;
   dom.documentChapterNavigation.hidden = true;
@@ -2944,7 +3147,7 @@ function closeReadingWorkspace() {
   dom.readingTagList.replaceChildren();
   dom.readingTopicList.replaceChildren();
   applicationState.contentOrganization = null;
-  dom.readingNoteInput.value = "";
+  readingNotesEditor?.clear();
   dom.readingAiMessages.replaceChildren(
     createTextElement("p", "reading-ai-empty", "你可以询问整篇内容，也可以先在正文中选择术语、句子或段落再提问。"),
   );
@@ -2952,6 +3155,7 @@ function closeReadingWorkspace() {
   setReadingWorkbenchTab("tools");
   document.body.classList.remove("has-reading-workbench");
   document.body.classList.remove("has-reading-toc");
+  return noteSave;
 }
 
 /** readingFontMinimum 是允许的最小正文字号。 */
@@ -3271,7 +3475,11 @@ function calculateReadingProgress() {
   const localProgress = Math.min(100, Math.max(0, (currentDistance / readableDistance) * 100));
   /** chapters 仅在本地文档章节阅读模式中存在。 */
   const chapters = applicationState.documentChapters;
-  if (!dom.reader.hidden && chapters.length > 1) {
+  if (
+    !dom.reader.hidden
+    && chapters.length > 1
+    && !dom.reader.classList.contains("is-pdf-reader")
+  ) {
     return ((applicationState.activeDocumentChapterIndex + localProgress / 100) / chapters.length) * 100;
   }
   return localProgress;
@@ -3308,8 +3516,10 @@ async function saveReadingState(changes) {
       dom.readingStatusSelect.value = payload.state.status;
       renderReadingProgress(payload.state.progressPercent);
     }
+    return true;
   } catch (error) {
     showToast(error.message);
+    return false;
   }
 }
 
@@ -3351,7 +3561,9 @@ function restoreReadingProgress(progressPercent) {
   if (!readingSurface || normalizedProgress < 1) return;
   /** localProgress 把整本文档进度还原为当前章节内部进度。 */
   const chapters = applicationState.documentChapters;
-  const localProgress = !dom.reader.hidden && chapters.length > 1
+  const localProgress = !dom.reader.hidden
+    && chapters.length > 1
+    && !dom.reader.classList.contains("is-pdf-reader")
     ? Math.min(100, Math.max(0,
       (normalizedProgress / 100 * chapters.length - applicationState.activeDocumentChapterIndex) * 100,
     ))
@@ -3837,7 +4049,11 @@ async function initializeReadingWorkspace(targetType, targetId, readingSurface) 
     applicationState.readingAiConversationId = "";
     readingSurface.classList.add("reading-surface");
     dom.readingStatusSelect.value = payload.workspace.state.status;
-    dom.readingNoteInput.value = payload.workspace.state.noteText;
+    readingNotesEditor?.setContent(
+      payload.workspace.state.noteHtml || "",
+      payload.workspace.state.noteText || "",
+    );
+    readingNotesEditor?.refresh();
     dom.readingNoteStatus.textContent = "自动保存到本地";
     dom.readingSelectionHint.textContent =
       "在正文中选中文字，然后选择一种高亮颜色。";
@@ -3856,7 +4072,8 @@ async function initializeReadingWorkspace(targetType, targetId, readingSurface) 
         chapterCount - 1,
         Math.floor((normalizedProgress / 100) * chapterCount),
       );
-      if (savedChapterIndex !== applicationState.activeDocumentChapterIndex) {
+      const usesContinuousPdfReading = dom.reader.classList.contains("is-pdf-reader");
+      if (!usesContinuousPdfReading && savedChapterIndex !== applicationState.activeDocumentChapterIndex) {
         await renderDocumentChapter(savedChapterIndex, { scrollToTop: false, saveProgress: false });
       }
       buildDocumentChapterTableOfContents();
@@ -3869,7 +4086,10 @@ async function initializeReadingWorkspace(targetType, targetId, readingSurface) 
     try {
       savedTocExpanded = window.localStorage.getItem("zhixu-reading-toc-expanded") !== "false";
     } catch (error) {}
-    setReadingTocExpanded(savedTocExpanded);
+    /** PDF 首先保证章节导航可见，不改写用户在其它阅读页的偏好。 */
+    const usesPdfReadingLayout =
+      targetType === "document" && dom.reader.classList.contains("is-pdf-reader");
+    setReadingTocExpanded(usesPdfReadingLayout ? true : savedTocExpanded, !usesPdfReadingLayout);
     applyReadingHighlights();
     renderReadingAnnotations();
     await loadContentOrganization();
@@ -3878,7 +4098,8 @@ async function initializeReadingWorkspace(targetType, targetId, readingSurface) 
     try {
       savedExpanded = window.localStorage.getItem("zhixu-reading-sidebar-expanded") !== "false";
     } catch (error) {}
-    setReadingWorkbenchExpanded(savedExpanded);
+    /** PDF 进入时优先展示正文，阅读工作台仍可由右侧按钮随时打开。 */
+    setReadingWorkbenchExpanded(usesPdfReadingLayout ? false : savedExpanded, !usesPdfReadingLayout);
     void loadLatestReadingAiConversation(targetType, targetId).catch((error) => {
       dom.readingAiStatus.textContent = error.message;
     });
@@ -4319,6 +4540,7 @@ async function returnToPreviousPage(fallbackView = "library") {
 /** importJobStageLabels 是后台阶段到中文状态的映射。 */
 const importJobStageLabels = Object.freeze({
   metadata: "正在读取论文信息",
+  waiting_retry: "来源暂时不可用，等待自动重试",
   extracting: "正在获取与提取全文",
   classifying: "正在分类",
   queued: "等待处理",
@@ -4438,7 +4660,10 @@ function renderImportJobs() {
   for (const job of visibleJobs) {
     /** item 是单项后台任务状态。 */
     const item = document.createElement("div");
-    item.className = `import-job-item is-${job.status}`;
+    item.className = `import-job-item is-${job.status}${job.stage === "waiting_retry" ? " is-waiting-retry" : ""}`;
+    const nextAttemptLabel = job.stage === "waiting_retry" && job.nextAttemptAt
+      ? ` · 预计 ${new Date(job.nextAttemptAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} 自动重试`
+      : "";
     /** copy 保存任务名称、阶段和错误信息。 */
     const copy = document.createElement("div");
     copy.append(
@@ -4446,7 +4671,7 @@ function renderImportJobs() {
       createTextElement(
         "small",
         "",
-        `${importJobStageLabels[job.stage] || job.stage} · ${Math.round(job.progressPercent || 0)}%`,
+        `${importJobStageLabels[job.stage] || job.stage} · ${Math.round(job.progressPercent || 0)}%${nextAttemptLabel}`,
       ),
     );
     if (job.location?.folderLabel) {
@@ -4454,7 +4679,7 @@ function renderImportJobs() {
         createTextElement("small", "import-job-location", `所在目录：${job.location.folderLabel}`),
       );
     }
-    if (job.errorMessage) copy.append(createTextElement("p", "", job.errorMessage));
+    if (job.errorMessage) copy.append(createTextElement("p", job.stage === "waiting_retry" ? "import-job-warning" : "", job.errorMessage));
     item.append(copy);
     if (job.stage === "awaiting_confirmation") {
       /** actions 提供重新检查、图文 PDF 和仅保存链接三个明确选择。 */
@@ -4710,7 +4935,6 @@ async function loadStorageStatus() {
 
 /** 从文档库进入导入页时，将当前目录同步为两种内容的默认保存位置。 */
 function openUploadFromCurrentLocation() {
-  void paperLibrary.prepareImport(applicationState.activeView === "papers");
   const folder = applicationState.activeView === "library"
     ? applicationState.folders.find((item) => item.id === applicationState.activeFolderId)
     : null;
@@ -4739,11 +4963,15 @@ function openUploadFromCurrentLocation() {
 }
 
 function showView(viewName) {
+  // Every upload entry (sidebar, header and library button) shares destination loading.
+  if (viewName === "upload") void paperLibrary.prepareImport(applicationState.activeView === "papers");
   if (viewName !== "storage") {
     window.clearTimeout(applicationState.importJobPollTimer);
   }
-  closeReadingWorkspace();
+  /** noteSave 保证从正文直接进入笔记库时，刚输入的内容先落盘再刷新列表。 */
+  const noteSave = closeReadingWorkspace();
   document.body.classList.remove("is-reading-page");
+  document.body.classList.remove("is-document-reader");
   applicationState.activeView = viewName;
   applicationState.selectedDocument = null;
   applicationState.selectedArticle = null;
@@ -4762,6 +4990,7 @@ function showView(viewName) {
   const viewTitles = {
     library: ["DOCUMENT LIBRARY", "我的文档库"],
     papers: ["PAPER LIBRARY", "我的论文库"],
+    notes: ["PERSONAL NOTES", "我的笔记"],
     activity: ["LEARNING ACTIVITY", "学习与资料统计"],
     topics: ["LEARNING PATHS", "我的专题"],
     cards: ["SOURCE CARDS", "卡片与今日复习"],
@@ -4780,6 +5009,9 @@ function showView(viewName) {
     void checkWeeklyPaperReminder();
   }
   if (viewName === "activity") void loadActivityDashboard().catch((error) => showToast(error.message));
+  if (viewName === "notes") {
+    void Promise.resolve(noteSave).then(() => notesCenter.load()).catch((error) => showToast(error.message));
+  }
   if (viewName === "github") void loadGitHubProjects().catch((error) => showToast(error.message));
   if (viewName === "topics") void loadTopics();
   if (viewName === "cards") void loadKnowledgeCards();
@@ -5350,6 +5582,7 @@ async function openArticle(articleId, options = {}) {
     dom.paperReader.hidden = true;
     dom.articleReader.hidden = false;
     document.body.classList.add("is-reading-page");
+    document.body.classList.remove("is-document-reader");
     updateFloatingReaderBackButton();
     dom.pageEyebrow.textContent = "ARTICLE READER";
     dom.pageTitle.textContent = "文章阅读";
@@ -7445,9 +7678,9 @@ function renderPapers() {
         createPaperLink("英文 PDF", paper.pdfUrl, "secondary-button"),
       );
     }
-    if (paper.extractionError) {
+    if (paper.extractionError && !hasActiveImport) {
       /** retryButton 是远程下载或 PDF 提取失败后的显式恢复操作。 */
-      const retryButton = createTextElement("button", "secondary-button", "重试解析");
+      const retryButton = createTextElement("button", "secondary-button paper-retry-button", "重试解析");
       retryButton.type = "button";
       retryButton.addEventListener("click", () => void retryPaperExtraction(paper, retryButton));
       footer.append(retryButton);
@@ -7481,8 +7714,13 @@ function renderPapers() {
       );
     }
     /** processingLabel 是论文从下载、解析到 Codex 翻译的当前可读状态。 */
+    const nextRetryTime = paper.importJob?.nextAttemptAt
+      ? new Date(paper.importJob.nextAttemptAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+      : "";
     const processingLabel = hasActiveImport
-      ? `${importJobStageLabels[paper.importJob.stage] || "正在导入"} · ${Math.round(paper.importJob.progressPercent)}% · 第 ${Math.max(1, paper.importJob.attemptCount)} 次`
+      ? paper.importJob.stage === "waiting_retry"
+        ? `${importJobStageLabels.waiting_retry}${nextRetryTime ? ` · 预计 ${nextRetryTime}` : ""} · 已尝试 ${Math.max(1, paper.importJob.attemptCount)} 次`
+        : `${importJobStageLabels[paper.importJob.stage] || "正在导入"} · ${Math.round(paper.importJob.progressPercent)}% · 第 ${Math.max(1, paper.importJob.attemptCount)} 次`
       : paper.extractionError
       ? `全文导入失败：${paper.extractionError}`
       : hasFullPaperTranslation
@@ -7832,6 +8070,7 @@ async function openPaper(paperId, options = {}) {
     dom.articleReader.hidden = true;
     dom.paperReader.hidden = false;
     document.body.classList.add("is-reading-page");
+    document.body.classList.remove("is-document-reader");
     updateFloatingReaderBackButton();
     dom.pageEyebrow.textContent = "PAPER READER";
     dom.pageTitle.textContent =
@@ -8121,7 +8360,9 @@ async function pollDocumentOcr(documentId) {
       documentItem.pdfOutline || [],
     );
     applicationState.activeDocumentChapterIndex = 0;
-    const rendered = await renderDocumentChapter(0, { scrollToTop: false, saveProgress: false });
+    const rendered = dom.reader.classList.contains("is-pdf-reader")
+      ? await renderContinuousPdfDocument({ scrollToTop: false })
+      : await renderDocumentChapter(0, { scrollToTop: false, saveProgress: false });
     if (!rendered) return;
     buildDocumentChapterTableOfContents();
     showToast("OCR 已完成，清爽阅读正文和全文索引已更新。");
@@ -8188,17 +8429,24 @@ async function openDocument(documentId, options = {}) {
     dom.articleReader.hidden = true;
     dom.paperReader.hidden = true;
     document.body.classList.add("is-reading-page");
+    document.body.classList.add("is-document-reader");
     updateFloatingReaderBackButton();
     dom.pageEyebrow.textContent = "DOCUMENT READER";
     dom.pageTitle.textContent = "文档阅读";
     dom.topUploadButton.hidden = true;
     dom.readerTitle.textContent = documentItem.title;
+    dom.readerDocumentName.textContent = documentItem.title;
+    dom.readerDocumentName.title = documentItem.title;
     dom.readerMeta.textContent = `${documentItem.category} · ${formatDate(documentItem.createdAt)}`;
     dom.readerSummary.textContent = documentItem.summary;
     /** isWordDocument 表示当前正文可采用保留结构的 Word HTML 视图。 */
     const isWordDocument =
       documentItem.extension === ".docx" && Boolean(documentItem.renderedHtml);
+    /** isPdfDocument 只控制 PDF 的语义章节阅读布局，原版仍可从顶部入口查看。 */
+    const isPdfDocument =
+      documentItem.extension === ".pdf" || documentItem.mimeType === "application/pdf";
     dom.reader.classList.toggle("is-word-reader", isWordDocument);
+    dom.reader.classList.toggle("is-pdf-reader", isPdfDocument);
     dom.readerContent.classList.toggle("is-word-document", isWordDocument);
     dom.readerContent.replaceChildren(
       createTextElement("div", "readable-render-status", "正在打开文档…"),
@@ -8230,7 +8478,9 @@ async function openDocument(documentId, options = {}) {
       ? createWordDocumentChapters(documentItem.renderedHtml)
       : createTextDocumentChapters(documentItem.extractedText || "", documentItem.pdfOutline || []);
     applicationState.activeDocumentChapterIndex = 0;
-    const rendered = await renderDocumentChapter(0, { scrollToTop: false, saveProgress: false });
+    const rendered = isPdfDocument
+      ? await renderContinuousPdfDocument({ scrollToTop: false })
+      : await renderDocumentChapter(0, { scrollToTop: false, saveProgress: false });
     if (!rendered) return;
     await initializeReadingWorkspace("document", documentItem.id, dom.readerContent);
     if (documentItem.ocrStatus === "queued" || documentItem.ocrStatus === "running") {
@@ -8776,6 +9026,13 @@ function setupPaperViewMode() {
 }
 
 async function initializeApplication() {
+  readingNotesEditor = mountReadingNotes({ document, getTitle: getCurrentReadingTitle });
+  notesCenter = mountNotesCenter({
+    document,
+    request: requestJson,
+    notify: showToast,
+    openSource: openActivityTarget,
+  });
   paperLibrary = createPaperLibrary({ request: requestJson, notify: showToast, reload: loadPapers });
   setupThemeToggle();
   setupViewMode();
@@ -9191,9 +9448,12 @@ async function initializeApplication() {
     window.clearTimeout(applicationState.readingNoteTimer);
     applicationState.readingNoteTimer = window.setTimeout(async () => {
       dom.readingNoteStatus.textContent = "正在保存…";
-      await saveReadingState({ noteText: dom.readingNoteInput.value });
-      if (applicationState.readingWorkspace) {
-        dom.readingNoteStatus.textContent = "已保存到本地";
+      const workspace = applicationState.readingWorkspace;
+      const noteContent = readingNotesEditor.getContent();
+      const saved = await saveReadingState(noteContent);
+      const currentContent = readingNotesEditor.getContent();
+      if (applicationState.readingWorkspace === workspace && currentContent.noteHtml === noteContent.noteHtml) {
+        dom.readingNoteStatus.textContent = saved ? "已保存到本地" : "保存失败，内容仍保留在编辑框；继续编辑可重试。";
       }
     }, 700);
   });
@@ -9272,6 +9532,7 @@ async function initializeApplication() {
   });
   window.addEventListener("scroll", () => {
     markReadingActivity();
+    updateContinuousDocumentActiveChapter();
     scheduleReadingProgressSave();
   }, { passive: true });
   await loadLibrary();

@@ -14,6 +14,12 @@ import { initializeReadingSessionDays, recordReadingDayIncrement } from "./readi
 import { createDatabaseSnapshot, createFullBackup, getStorageStatus } from "./backup-service.mjs";
 import { getPaperIdentityKey, parseArxivIdentity } from "./paper-identity.mjs";
 import { createPaperFolderStore } from "./paper-folders.mjs";
+import { normalizeStandaloneNoteContent, readingNotePlainText, sanitizeReadingNoteHtml } from "./note-content.mjs";
+import {
+  analyzePaperHtmlStructure,
+  paperStructureMetricVersion,
+  validatePaperTranslationStructure,
+} from "./paper-structure.mjs";
 import {
   backupDirectory,
   dataDirectory,
@@ -191,6 +197,7 @@ database.exec(`
     full_translation_structure_json TEXT NOT NULL DEFAULT '{}',
     full_translation_fidelity TEXT NOT NULL DEFAULT 'unknown',
     full_translation_fidelity_message TEXT,
+    full_translation_validation_source TEXT NOT NULL DEFAULT 'legacy',
     extraction_error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -276,12 +283,40 @@ database.exec(`
       CHECK(reading_status IN ('unread', 'reading', 'completed')),
     progress_percent REAL NOT NULL DEFAULT 0,
     note_text TEXT NOT NULL DEFAULT '',
+    note_html TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
     PRIMARY KEY(target_type, target_id)
   );
 
   CREATE INDEX IF NOT EXISTS reading_states_updated_idx
     ON reading_states(updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS standalone_notes (
+    id TEXT PRIMARY KEY,
+    note_type TEXT NOT NULL
+      CHECK(note_type IN ('markdown', 'text', 'word', 'mindmap')),
+    title TEXT NOT NULL DEFAULT '',
+    content_text TEXT NOT NULL DEFAULT '',
+    content_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS standalone_notes_updated_idx
+    ON standalone_notes(updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS note_digests (
+    id TEXT PRIMARY KEY,
+    period_start TEXT,
+    period_end TEXT NOT NULL,
+    note_count INTEGER NOT NULL DEFAULT 0,
+    source_count INTEGER NOT NULL DEFAULT 0,
+    digest_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS note_digests_created_idx
+    ON note_digests(created_at DESC);
 
   CREATE TABLE IF NOT EXISTS reading_sessions (
     id TEXT PRIMARY KEY,
@@ -460,6 +495,8 @@ database.exec(`
     target_id TEXT,
     error_message TEXT NOT NULL DEFAULT '',
     attempt_count INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     started_at TEXT,
@@ -523,6 +560,9 @@ ensureTableColumn("documents", "display_title", "TEXT NOT NULL DEFAULT ''");
 ensureTableColumn("documents", "document_kind", "TEXT NOT NULL DEFAULT 'imported'");
 ensureTableColumn("articles", "display_title", "TEXT NOT NULL DEFAULT ''");
 ensureTableColumn("articles", "videos_json", "TEXT NOT NULL DEFAULT '[]'");
+ensureTableColumn("reading_states", "note_html", "TEXT NOT NULL DEFAULT ''");
+ensureTableColumn("import_jobs", "next_attempt_at", "TEXT");
+ensureTableColumn("import_jobs", "retry_count", "INTEGER NOT NULL DEFAULT 0");
 
 /** 兼容此前由原生编辑器创建、但尚未带类型标记的工作记录。 */
 database.prepare(`
@@ -620,6 +660,7 @@ const paperLibraryColumns = Object.freeze([
   ["full_translation_structure_json", "TEXT NOT NULL DEFAULT '{}'"],
   ["full_translation_fidelity", "TEXT NOT NULL DEFAULT 'unknown'"],
   ["full_translation_fidelity_message", "TEXT"],
+  ["full_translation_validation_source", "TEXT NOT NULL DEFAULT 'legacy'"],
 ]);
 for (const [columnName, columnDefinition] of paperLibraryColumns) {
   ensureTableColumn("papers", columnName, columnDefinition);
@@ -932,6 +973,8 @@ function mapImportJobRow(row) {
     targetId: row.target_id || null,
     errorMessage: row.error_message || "",
     attemptCount: Number(row.attempt_count) || 0,
+    retryCount: Number(row.retry_count) || 0,
+    nextAttemptAt: row.next_attempt_at || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     startedAt: row.started_at,
@@ -1047,8 +1090,9 @@ export function claimNextImportJob(jobTypes) {
     const candidate = database.prepare(`
       SELECT id FROM import_jobs
       WHERE status = 'queued' AND job_type IN (${placeholders})
+        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
       ORDER BY created_at ASC LIMIT 1
-    `).get(...normalizedTypes);
+    `).get(...normalizedTypes, new Date().toISOString());
     if (!candidate) {
       database.exec("COMMIT;");
       return null;
@@ -1059,7 +1103,7 @@ export function claimNextImportJob(jobTypes) {
       UPDATE import_jobs SET
         status = 'running', stage = 'starting', progress_percent = MAX(progress_percent, 1),
         error_message = '', attempt_count = attempt_count + 1,
-        started_at = ?, completed_at = NULL, updated_at = ?
+        next_attempt_at = NULL, started_at = ?, completed_at = NULL, updated_at = ?
       WHERE id = ? AND status = 'queued'
     `).run(now, now, candidate.id);
     database.exec("COMMIT;");
@@ -1106,7 +1150,7 @@ export function completeImportJob(jobId, result = {}) {
     UPDATE import_jobs SET
       status = 'completed', stage = 'completed', progress_percent = 100,
       result_json = ?, target_type = ?, target_id = ?, error_message = '',
-      completed_at = ?, updated_at = ?
+      next_attempt_at = NULL, completed_at = ?, updated_at = ?
     WHERE id = ?
   `).run(
     JSON.stringify(result && typeof result === "object" ? result : {}),
@@ -1140,10 +1184,66 @@ export function failImportJob(jobId, error) {
     : "failed";
   database.prepare(`
     UPDATE import_jobs SET
-      status = 'failed', stage = ?, error_message = ?, completed_at = ?, updated_at = ?
+      status = 'failed', stage = ?, error_message = ?, next_attempt_at = NULL,
+      completed_at = ?, updated_at = ?
     WHERE id = ?
   `).run(stage, message || "导入失败。", now, now, String(jobId || ""));
   return getImportJob(jobId);
+}
+
+/**
+ * 临时错误不结束任务，而是持久化为等待重试；服务重启后仍可按期继续。
+ *
+ * @param {string} jobId 运行中的任务 ID。
+ * @param {unknown} error 本轮临时错误。
+ * @param {number} delayMilliseconds 延迟毫秒数。
+ * @returns {Record<string, unknown> | null} 已重新排队的任务。
+ */
+export function deferImportJob(jobId, error, delayMilliseconds) {
+  const now = new Date();
+  const safeDelay = Math.min(
+    Math.max(Number(delayMilliseconds) || 1_000, 10),
+    60 * 60 * 1000,
+  );
+  const nextAttemptAt = new Date(now.getTime() + safeDelay).toISOString();
+  const message = String(error instanceof Error ? error.message : error || "来源暂时不可用。")
+    .trim()
+    .slice(0, 2000);
+  const result = database.prepare(`
+    UPDATE import_jobs SET
+      status = 'queued', stage = 'waiting_retry', error_message = ?,
+      retry_count = retry_count + 1, next_attempt_at = ?,
+      started_at = NULL, completed_at = NULL, updated_at = ?
+    WHERE id = ? AND status = 'running'
+  `).run(
+    message || "来源暂时不可用。",
+    nextAttemptAt,
+    now.toISOString(),
+    String(jobId || ""),
+  );
+  return Number(result.changes) > 0 ? getImportJob(jobId) : null;
+}
+
+/**
+ * 返回已注册任务中最早的未来唤醒时间，供执行器安排持久化重试。
+ *
+ * @param {Array<string>} jobTypes 已注册处理器的任务类型。
+ * @returns {string | null} ISO 时间或空值。
+ */
+export function getNextImportJobAttemptAt(jobTypes) {
+  const normalizedTypes = [...new Set(
+    (Array.isArray(jobTypes) ? jobTypes : [])
+      .map((value) => String(value || "").trim())
+      .filter((value) => /^[a-z][a-z0-9_-]*$/i.test(value)),
+  )];
+  if (!normalizedTypes.length) return null;
+  const placeholders = normalizedTypes.map(() => "?").join(", ");
+  const row = database.prepare(`
+    SELECT MIN(next_attempt_at) AS next_attempt_at FROM import_jobs
+    WHERE status = 'queued' AND next_attempt_at IS NOT NULL
+      AND job_type IN (${placeholders})
+  `).get(...normalizedTypes);
+  return row?.next_attempt_at || null;
 }
 
 /**
@@ -1157,7 +1257,8 @@ export function resetInterruptedImportJobs() {
   const result = database.prepare(`
     UPDATE import_jobs SET
       status = 'queued', stage = 'queued', progress_percent = 0,
-      error_message = '', started_at = NULL, completed_at = NULL, updated_at = ?
+      error_message = '', next_attempt_at = NULL, started_at = NULL,
+      completed_at = NULL, updated_at = ?
     WHERE status = 'running'
   `).run(now);
   return Number(result.changes) || 0;
@@ -1175,7 +1276,8 @@ export function retryImportJob(jobId) {
   const result = database.prepare(`
     UPDATE import_jobs SET
       status = 'queued', stage = 'queued', progress_percent = 0,
-      error_message = '', started_at = NULL, completed_at = NULL, updated_at = ?
+      error_message = '', retry_count = 0, next_attempt_at = NULL, started_at = NULL,
+      completed_at = NULL, updated_at = ?
     WHERE id = ? AND status = 'failed'
   `).run(now, String(jobId || ""));
   return Number(result.changes) > 0 ? getImportJob(jobId) : null;
@@ -1210,7 +1312,8 @@ export function confirmVideoImportJob(jobId, action) {
   database.prepare(`
     UPDATE import_jobs SET
       status = 'queued', stage = 'queued', progress_percent = 0,
-      payload_json = ?, error_message = '', started_at = NULL,
+      payload_json = ?, error_message = '', retry_count = 0,
+      next_attempt_at = NULL, started_at = NULL,
       completed_at = NULL, updated_at = ?
     WHERE id = ? AND status = 'failed' AND stage = 'awaiting_confirmation'
   `).run(JSON.stringify(nextPayload), now, String(jobId || ""));
@@ -2583,6 +2686,7 @@ function mapPaperRow(row) {
     fullTranslationStructure: JSON.parse(row.full_translation_structure_json || "{}"),
     fullTranslationFidelity: row.full_translation_fidelity || "unknown",
     fullTranslationFidelityMessage: row.full_translation_fidelity_message,
+    fullTranslationValidationSource: row.full_translation_validation_source || "legacy",
     extractionError: row.extraction_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -2838,7 +2942,7 @@ export function recoverPendingPaperImports() {
 }
 
 export function getPaperImportStatuses() {
-  return database.prepare(`SELECT id, target_id, status, stage, progress_percent, attempt_count, error_message FROM import_jobs j
+  return database.prepare(`SELECT id, target_id, status, stage, progress_percent, attempt_count, error_message, next_attempt_at FROM import_jobs j
     WHERE job_type = 'paper_import' AND id = (SELECT id FROM import_jobs WHERE job_type = 'paper_import' AND target_id = j.target_id ORDER BY created_at DESC, id DESC LIMIT 1)`).all();
 }
 
@@ -2905,6 +3009,10 @@ export function updatePaperSourceText(paperId, extraction) {
           full_translation_structure_json = CASE WHEN ? THEN '{}' ELSE full_translation_structure_json END,
           full_translation_fidelity = CASE WHEN ? THEN 'unknown' ELSE full_translation_fidelity END,
           full_translation_fidelity_message = CASE WHEN ? THEN NULL ELSE full_translation_fidelity_message END,
+          full_translation_validation_source = CASE
+            WHEN ? THEN 'auto'
+            ELSE full_translation_validation_source
+          END,
           extraction_error = NULL,
           updated_at = ?
       WHERE id = ?
@@ -2920,6 +3028,7 @@ export function updatePaperSourceText(paperId, extraction) {
       extraction.resetTranslation ? 1 : 0,
       extraction.resetTranslation ? 1 : 0,
       extraction.resetTranslation ? 1 : 0,
+      extraction.resetTranslation ? 1 : 0,
       updatedAt,
       paperId,
     );
@@ -2930,11 +3039,13 @@ export function updatePaperSourceText(paperId, extraction) {
     database.prepare(`
       UPDATE papers
       SET full_translation_fidelity = CASE
-            WHEN COALESCE(TRIM(full_translation_html), '') <> '' THEN 'degraded'
+            WHEN COALESCE(TRIM(full_translation_html), '') <> ''
+              AND full_translation_validation_source = 'auto' THEN 'degraded'
             ELSE full_translation_fidelity
           END,
           full_translation_fidelity_message = CASE
-            WHEN COALESCE(TRIM(full_translation_html), '') <> '' THEN ?
+            WHEN COALESCE(TRIM(full_translation_html), '') <> ''
+              AND full_translation_validation_source = 'auto' THEN ?
             ELSE full_translation_fidelity_message
           END
       WHERE id = ?
@@ -3106,6 +3217,7 @@ export function retryPaperFullTranslation(paperId) {
       SET full_translation_status = 'pending', full_translation_error = NULL,
           full_translation_html = '', full_translation_structure_json = '{}',
           full_translation_fidelity = 'unknown', full_translation_fidelity_message = NULL,
+          full_translation_validation_source = 'auto',
           updated_at = ?
       WHERE id = ?
     `)
@@ -3134,6 +3246,8 @@ export function updatePaperFullTranslation(paperId, translatedHtml, structure = 
     : "unknown";
   const fidelityMessage = String(structure.message || "").trim() || null;
   const translatedStructureJson = JSON.stringify(structure.translation || {});
+  /** 人工核验必须显式声明；普通工作器产生的结果始终属于自动校验。 */
+  const validationSource = structure.validationSource === "manual" ? "manual" : "auto";
   database
     .prepare(`
       UPDATE papers
@@ -3141,7 +3255,8 @@ export function updatePaperFullTranslation(paperId, translatedHtml, structure = 
           full_translation_source = 'codex', full_translated_at = ?,
           full_translation_error = NULL,
           full_translation_structure_json = ?, full_translation_fidelity = ?,
-          full_translation_fidelity_message = ?, updated_at = ?
+          full_translation_fidelity_message = ?, full_translation_validation_source = ?,
+          updated_at = ?
       WHERE id = ?
     `)
     .run(
@@ -3150,6 +3265,7 @@ export function updatePaperFullTranslation(paperId, translatedHtml, structure = 
       translatedStructureJson,
       fidelity,
       fidelityMessage,
+      validationSource,
       translatedAt,
       paperId,
     );
@@ -3227,6 +3343,93 @@ export function upsertCuratedPaper(paper) {
     );
   database.prepare("UPDATE papers SET identity_key = ? WHERE id = ?").run(getPaperIdentityKey(paper), paperId);
   return getPaperById(paperId);
+}
+
+/**
+ * 按当前计数口径重检旧版已完成译文。只更新结构清单与校验结论，不重新
+ * 翻译、不改正文，也不改论文排序时间。版本一致时不会重复扫描正文。
+ *
+ * @returns {{ checkedCount: number, updatedCount: number, completeCount: number, degradedCount: number, items: Array<Record<string, string>> }} 重检摘要。
+ */
+export function revalidateReadyPaperTranslationStructures(paperIds = []) {
+  const parseStructure = (value) => {
+    try {
+      const parsed = JSON.parse(value || "{}");
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+  const normalizedPaperIds = [...new Set(
+    (Array.isArray(paperIds) ? paperIds : [paperIds])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  )];
+  const summary = {
+    checkedCount: 0,
+    updatedCount: 0,
+    completeCount: 0,
+    degradedCount: 0,
+    items: [],
+  };
+  /** 禁止无目标的全库重检；结构迁移必须明确列出经过审查的论文。 */
+  if (!normalizedPaperIds.length) return summary;
+  const placeholders = normalizedPaperIds.map(() => "?").join(", ");
+  const rows = database.prepare(`
+    SELECT id, source_html, source_structure_json, full_translation_html,
+           full_translation_structure_json, full_translation_fidelity,
+           full_translation_fidelity_message
+    FROM papers
+    WHERE full_translation_status = 'ready'
+      AND full_translation_validation_source = 'auto'
+      AND TRIM(source_html) <> ''
+      AND TRIM(full_translation_html) <> ''
+      AND id IN (${placeholders})
+  `).all(...normalizedPaperIds);
+  const update = database.prepare(`
+    UPDATE papers
+    SET source_structure_json = ?, full_translation_structure_json = ?,
+        full_translation_fidelity = ?, full_translation_fidelity_message = ?
+    WHERE id = ?
+  `);
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    for (const row of rows) {
+      const previousSource = parseStructure(row.source_structure_json);
+      const previousTranslation = parseStructure(row.full_translation_structure_json);
+      if (
+        Number(previousSource.structureMetricVersion) >= paperStructureMetricVersion
+        && Number(previousTranslation.structureMetricVersion) >= paperStructureMetricVersion
+      ) {
+        continue;
+      }
+      summary.checkedCount += 1;
+      const sourceStructure = {
+        ...previousSource,
+        ...analyzePaperHtmlStructure(row.source_html),
+      };
+      const validation = validatePaperTranslationStructure(
+        sourceStructure,
+        row.full_translation_html,
+      );
+      const sourceJson = JSON.stringify(sourceStructure);
+      const translationJson = JSON.stringify(validation.translation);
+      const message = String(validation.message || "").trim() || null;
+      update.run(sourceJson, translationJson, validation.fidelity, message, row.id);
+      summary.updatedCount += 1;
+      summary[validation.fidelity === "complete" ? "completeCount" : "degradedCount"] += 1;
+      summary.items.push({
+        paperId: row.id,
+        previousFidelity: row.full_translation_fidelity || "unknown",
+        fidelity: validation.fidelity,
+      });
+    }
+    database.exec("COMMIT;");
+    return summary;
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
 }
 
 /**
@@ -3663,6 +3866,7 @@ function mapReadingStateRow(row) {
     status: row?.reading_status ?? "unread",
     progressPercent: Number(row?.progress_percent ?? 0),
     noteText: row?.note_text ?? "",
+    noteHtml: row?.note_html ?? "",
     updatedAt: row?.updated_at ?? null,
   };
 }
@@ -3700,7 +3904,7 @@ export function getReadingWorkspace(targetType, targetId) {
   /** stateRow 是已经保存的阅读状态；首次阅读时为空。 */
   const stateRow = database
     .prepare(`
-      SELECT reading_status, progress_percent, note_text, updated_at
+      SELECT reading_status, progress_percent, note_text, note_html, updated_at
       FROM reading_states
       WHERE target_type = ? AND target_id = ?
       LIMIT 1
@@ -3735,7 +3939,7 @@ export function updateReadingState(targetType, targetId, changes) {
   /** existingRow 是合并局部更新所需的旧状态。 */
   const existingRow = database
     .prepare(`
-      SELECT reading_status, progress_percent, note_text, updated_at
+      SELECT reading_status, progress_percent, note_text, note_html, updated_at
       FROM reading_states
       WHERE target_type = ? AND target_id = ?
       LIMIT 1
@@ -3753,22 +3957,27 @@ export function updateReadingState(targetType, targetId, changes) {
     100,
     Math.max(0, Number(changes.progressPercent ?? existingState.progressPercent) || 0),
   );
-  /** requestedNoteText 是限制长度后的个人阅读笔记。 */
-  const requestedNoteText = String(changes.noteText ?? existingState.noteText).slice(
-    0,
-    100000,
-  );
+  /** 富文本提交在服务端清洗，并同步生成搜索与整理使用的纯文本。 */
+  const hasRichNote = changes.noteHtml !== undefined;
+  const hasLegacyTextNote = !hasRichNote && changes.noteText !== undefined;
+  const requestedNoteHtml = hasRichNote
+    ? sanitizeReadingNoteHtml(changes.noteHtml)
+    : hasLegacyTextNote ? "" : existingState.noteHtml;
+  const requestedNoteText = hasRichNote
+    ? readingNotePlainText(requestedNoteHtml)
+    : String(changes.noteText ?? existingState.noteText).slice(0, 100000);
   /** updatedAt 是本次阅读状态保存时间。 */
   const updatedAt = new Date().toISOString();
   database
     .prepare(`
       INSERT INTO reading_states(
-        target_type, target_id, reading_status, progress_percent, note_text, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
+        target_type, target_id, reading_status, progress_percent, note_text, note_html, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(target_type, target_id) DO UPDATE SET
         reading_status = excluded.reading_status,
         progress_percent = excluded.progress_percent,
         note_text = excluded.note_text,
+        note_html = excluded.note_html,
         updated_at = excluded.updated_at
     `)
     .run(
@@ -3777,12 +3986,14 @@ export function updateReadingState(targetType, targetId, changes) {
       requestedStatus,
       requestedProgress,
       requestedNoteText,
+      requestedNoteHtml,
       updatedAt,
     );
   return mapReadingStateRow({
     reading_status: requestedStatus,
     progress_percent: requestedProgress,
     note_text: requestedNoteText,
+    note_html: requestedNoteHtml,
     updated_at: updatedAt,
   });
 }
@@ -3827,6 +4038,264 @@ export function startReadingSession(targetType, targetId, progressPercent = 0) {
   database.prepare(`INSERT INTO reading_session_days(session_id,local_day,active_seconds,updated_at)
     VALUES (?,?,0,?)`).run(session.id, toLocalDateKey(now), now);
   return session;
+}
+
+/** 读取全部非空伴读笔记，供独立笔记库与本地整理任务使用。 */
+export function listReadingNotes({ query = "", targetType = "", updatedAfter = "", limit = 100, offset = 0 } = {}) {
+  const normalizedQuery = String(query || "").trim().toLocaleLowerCase("zh-CN");
+  const normalizedType = ["document", "article", "paper"].includes(targetType) ? targetType : "";
+  const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 100));
+  const safeOffset = Math.max(0, Number(offset) || 0);
+  const rows = database.prepare(`
+    SELECT rs.target_type, rs.target_id, rs.note_text, rs.note_html, rs.updated_at,
+      CASE rs.target_type
+        WHEN 'document' THEN COALESCE(NULLIF(d.display_title, ''), d.title)
+        WHEN 'article' THEN COALESCE(NULLIF(a.display_title, ''), NULLIF(a.translated_title, ''), a.title)
+        WHEN 'paper' THEN COALESCE(NULLIF(p.title_zh, ''), p.title)
+      END AS title,
+      CASE rs.target_type
+        WHEN 'document' THEN d.category
+        WHEN 'article' THEN a.category
+        WHEN 'paper' THEN p.category
+      END AS category,
+      (SELECT COUNT(*) FROM reading_annotations ra
+        WHERE ra.target_type = rs.target_type AND ra.target_id = rs.target_id
+          AND (TRIM(ra.quote_text) <> '' OR TRIM(ra.note_text) <> '')) AS annotation_count
+    FROM reading_states rs
+    LEFT JOIN documents d ON rs.target_type = 'document' AND rs.target_id = d.id
+    LEFT JOIN articles a ON rs.target_type = 'article' AND rs.target_id = a.id
+    LEFT JOIN papers p ON rs.target_type = 'paper' AND rs.target_id = p.id
+    WHERE TRIM(rs.note_text) <> ''
+      AND (d.id IS NOT NULL OR a.id IS NOT NULL OR p.id IS NOT NULL)
+      AND (? = '' OR rs.target_type = ?)
+      AND (? = '' OR rs.updated_at > ?)
+      AND (? = '' OR LOWER(rs.note_text || ' ' || COALESCE(
+        CASE rs.target_type
+          WHEN 'document' THEN COALESCE(NULLIF(d.display_title, ''), d.title)
+          WHEN 'article' THEN COALESCE(NULLIF(a.display_title, ''), NULLIF(a.translated_title, ''), a.title)
+          WHEN 'paper' THEN COALESCE(NULLIF(p.title_zh, ''), p.title)
+        END, '') || ' ' || COALESCE(
+        CASE rs.target_type WHEN 'document' THEN d.category WHEN 'article' THEN a.category WHEN 'paper' THEN p.category END, ''
+      )) LIKE ?)
+    ORDER BY rs.updated_at DESC, rs.target_id
+  `).all(
+    normalizedType, normalizedType,
+    String(updatedAfter || ""), String(updatedAfter || ""),
+    normalizedQuery, `%${normalizedQuery}%`,
+  );
+  const items = rows.slice(safeOffset, safeOffset + safeLimit).map((row) => ({
+    targetType: row.target_type,
+    targetId: row.target_id,
+    title: row.title || "未命名资料",
+    category: row.category || "未分类",
+    noteText: row.note_text,
+    noteHtml: row.note_html || "",
+    annotationCount: Number(row.annotation_count) || 0,
+    updatedAt: row.updated_at,
+  }));
+  return { items, total: rows.length, hasMore: safeOffset + items.length < rows.length };
+}
+
+// 数据库约束保留旧类型兼容，但当前产品只开放这三种轻量笔记。
+const standaloneNoteTypes = new Set(["markdown", "text", "word"]);
+
+function normalizeStandaloneNoteType(value) {
+  const type = String(value || "").trim().toLowerCase();
+  if (!standaloneNoteTypes.has(type)) throw new TypeError("不支持这种笔记类型。");
+  return type;
+}
+
+function standaloneNoteTitle(type) {
+  return {
+    markdown: "未命名 Markdown 笔记",
+    text: "未命名纯文本笔记",
+    word: "未命名 Word 笔记",
+  }[type];
+}
+
+function mapStandaloneNote(row) {
+  if (!row) return null;
+  let contentData = {};
+  try { contentData = JSON.parse(row.content_json || "{}"); } catch {}
+  return {
+    id: row.id,
+    targetType: "standalone",
+    targetId: row.id,
+    noteType: row.note_type,
+    title: row.title || standaloneNoteTitle(row.note_type),
+    category: "独立笔记",
+    noteText: row.content_text || "",
+    contentText: row.content_text || "",
+    contentData,
+    annotationCount: 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** 新建一条可独立编辑的本地笔记。 */
+export function createStandaloneNote(noteType) {
+  const type = normalizeStandaloneNoteType(noteType);
+  const id = `note_${crypto.randomUUID()}`;
+  const now = new Date().toISOString();
+  const contentText = type === "markdown" ? "# 新笔记\n\n" : "";
+  const contentData = type === "word" ? { html: "<p><br></p>" } : {};
+  database.prepare(`
+    INSERT INTO standalone_notes(id, note_type, title, content_text, content_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, type, standaloneNoteTitle(type), contentText, JSON.stringify(contentData), now, now);
+  return getStandaloneNote(id);
+}
+
+/** 按稳定 ID 读取独立笔记。 */
+export function getStandaloneNote(id) {
+  return mapStandaloneNote(database.prepare("SELECT * FROM standalone_notes WHERE id = ? LIMIT 1").get(String(id || "")));
+}
+
+/** 更新标题、正文和编辑器结构；类型一旦创建便保持稳定。 */
+export function updateStandaloneNote(id, changes = {}) {
+  const current = getStandaloneNote(id);
+  if (!current) return null;
+  const safeChanges = current.noteType === "word" && changes.contentData !== undefined
+    ? { ...changes, ...normalizeStandaloneNoteContent(current.noteType, changes) }
+    : changes;
+  const title = safeChanges.title === undefined
+    ? current.title
+    : String(safeChanges.title || "").replace(/\s+/g, " ").trim().slice(0, 240) || standaloneNoteTitle(current.noteType);
+  const contentText = safeChanges.contentText === undefined
+    ? current.contentText
+    : String(safeChanges.contentText || "").slice(0, 2_000_000);
+  const contentData = safeChanges.contentData === undefined
+    ? current.contentData
+    : safeChanges.contentData && typeof safeChanges.contentData === "object" && !Array.isArray(safeChanges.contentData)
+      ? safeChanges.contentData
+      : {};
+  const serialized = JSON.stringify(contentData);
+  if (Buffer.byteLength(serialized, "utf8") > 2_000_000) throw new TypeError("笔记结构数据过大。");
+  const updatedAt = new Date().toISOString();
+  database.prepare(`UPDATE standalone_notes
+    SET title = ?, content_text = ?, content_json = ?, updated_at = ? WHERE id = ?`)
+    .run(title, contentText, serialized, updatedAt, current.id);
+  return getStandaloneNote(current.id);
+}
+
+/** 删除一条独立笔记；伴读笔记不经过此接口。 */
+export function deleteStandaloneNote(id) {
+  return Number(database.prepare("DELETE FROM standalone_notes WHERE id = ?").run(String(id || "")).changes) > 0;
+}
+
+/** 读取独立笔记，并转换为与伴读笔记一致的列表结构。 */
+export function listStandaloneNotes({ query = "", noteType = "", updatedAfter = "", limit = 100, offset = 0 } = {}) {
+  const normalizedQuery = String(query || "").trim().toLocaleLowerCase("zh-CN");
+  const normalizedType = standaloneNoteTypes.has(noteType) ? noteType : "";
+  const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 100));
+  const safeOffset = Math.max(0, Number(offset) || 0);
+  const rows = database.prepare(`SELECT * FROM standalone_notes
+    WHERE note_type IN ('markdown', 'text', 'word')
+      AND (? = '' OR note_type = ?)
+      AND (? = '' OR updated_at > ?)
+      AND (? = '' OR LOWER(title || ' ' || content_text) LIKE ?)
+    ORDER BY updated_at DESC, id`).all(
+    normalizedType, normalizedType,
+    String(updatedAfter || ""), String(updatedAfter || ""),
+    normalizedQuery, `%${normalizedQuery}%`,
+  );
+  const items = rows.slice(safeOffset, safeOffset + safeLimit).map(mapStandaloneNote);
+  return { items, total: rows.length, hasMore: safeOffset + items.length < rows.length };
+}
+
+/** 合并伴读笔记和三种独立笔记，统一供搜索、展示和定时整理使用。 */
+export function listAllNotes({ query = "", targetType = "", updatedAfter = "", limit = 100, offset = 0 } = {}) {
+  const isReadingFilter = ["document", "article", "paper"].includes(targetType);
+  const isStandaloneFilter = standaloneNoteTypes.has(targetType);
+  const readingItems = isStandaloneFilter ? [] : listReadingNotes({
+    query, targetType: isReadingFilter ? targetType : "", updatedAfter, limit: 5000,
+  }).items;
+  const standaloneItems = isReadingFilter ? [] : listStandaloneNotes({
+    query, noteType: isStandaloneFilter ? targetType : "", updatedAfter, limit: 5000,
+  }).items;
+  const rows = [...readingItems, ...standaloneItems]
+    .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)) || left.targetId.localeCompare(right.targetId));
+  const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 100));
+  const safeOffset = Math.max(0, Number(offset) || 0);
+  const items = rows.slice(safeOffset, safeOffset + safeLimit);
+  return { items, total: rows.length, hasMore: safeOffset + items.length < rows.length };
+}
+
+/** 返回笔记库总数和最近一次整理时间。 */
+export function getNoteLibrarySummary() {
+  const reading = database.prepare(`
+    SELECT COUNT(*) AS note_count, COUNT(DISTINCT target_type || ':' || target_id) AS source_count,
+      MAX(updated_at) AS latest_note_at
+    FROM reading_states WHERE TRIM(note_text) <> ''
+  `).get();
+  const standalone = database.prepare(`SELECT COUNT(*) AS note_count, MAX(updated_at) AS latest_note_at
+    FROM standalone_notes WHERE note_type IN ('markdown', 'text', 'word')`).get();
+  const digest = database.prepare("SELECT created_at FROM note_digests ORDER BY created_at DESC LIMIT 1").get();
+  const latestNoteAt = [reading?.latest_note_at, standalone?.latest_note_at].filter(Boolean).sort().at(-1) || null;
+  return {
+    noteCount: (Number(reading?.note_count) || 0) + (Number(standalone?.note_count) || 0),
+    sourceCount: (Number(reading?.source_count) || 0) + (Number(standalone?.note_count) || 0),
+    latestNoteAt,
+    lastOrganizedAt: digest?.created_at || null,
+  };
+}
+
+/** 读取笔记整理计划；首次使用默认每周日 21:00 在本机整理。 */
+export function getNoteOrganizationSettings() {
+  const row = database.prepare("SELECT value FROM settings WHERE key = ? LIMIT 1").get("notes.organization.schedule");
+  const defaults = { enabled: true, frequency: "weekly", weekday: 0, time: "21:00", lastRunAt: null, nextRunAt: null };
+  try {
+    const saved = JSON.parse(row?.value || "{}");
+    return { ...defaults, ...saved };
+  } catch {
+    return defaults;
+  }
+}
+
+/** 更新笔记整理计划与运行游标。 */
+export function updateNoteOrganizationSettings(changes = {}) {
+  const current = getNoteOrganizationSettings();
+  const frequency = ["daily", "weekly"].includes(changes.frequency) ? changes.frequency : current.frequency;
+  const weekday = Math.min(6, Math.max(0, Number(changes.weekday ?? current.weekday) || 0));
+  const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(changes.time || "")) ? String(changes.time) : current.time;
+  const next = {
+    enabled: changes.enabled === undefined ? Boolean(current.enabled) : Boolean(changes.enabled),
+    frequency,
+    weekday,
+    time,
+    lastRunAt: changes.lastRunAt === undefined ? current.lastRunAt : changes.lastRunAt,
+    nextRunAt: changes.nextRunAt === undefined ? current.nextRunAt : changes.nextRunAt,
+  };
+  database.prepare(`INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`)
+    .run("notes.organization.schedule", JSON.stringify(next), new Date().toISOString());
+  return next;
+}
+
+/** 保存一份不会改写原始笔记的本地整理结果。 */
+export function createNoteDigest({ periodStart = null, periodEnd, notes, digest }) {
+  const createdAt = new Date().toISOString();
+  const id = `note_digest_${crypto.randomUUID()}`;
+  const sourceCount = new Set(notes.map((item) => `${item.targetType}:${item.targetId}`)).size;
+  database.prepare(`
+    INSERT INTO note_digests(id, period_start, period_end, note_count, source_count, digest_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, periodStart, periodEnd, notes.length, sourceCount, JSON.stringify(digest), createdAt);
+  return { id, periodStart, periodEnd, noteCount: notes.length, sourceCount, digest, createdAt };
+}
+
+/** 读取最近的笔记整理结果。 */
+export function listNoteDigests(limit = 12) {
+  return database.prepare("SELECT * FROM note_digests ORDER BY created_at DESC LIMIT ?")
+    .all(Math.min(100, Math.max(1, Number(limit) || 12)))
+    .map((row) => {
+      let digest = {};
+      try { digest = JSON.parse(row.digest_json || "{}"); } catch {}
+      return { id: row.id, periodStart: row.period_start, periodEnd: row.period_end,
+        noteCount: Number(row.note_count) || 0, sourceCount: Number(row.source_count) || 0,
+        digest, createdAt: row.created_at };
+    });
 }
 
 /**

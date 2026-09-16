@@ -20,4 +20,9 @@
       : prefersDark
         ? "dark"
         : "light";
+  // Restore the independent reading style before first paint; keep existing IDs.
+  var savedReadingTheme = "classic";
+  try { savedReadingTheme = window.localStorage.getItem("zhixu-reading-theme"); } catch (error) {}
+  document.documentElement.dataset.readingTheme =
+    ["classic", "immersive", "paper"].includes(savedReadingTheme) ? savedReadingTheme : "classic";
 })();

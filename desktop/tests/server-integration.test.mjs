@@ -119,7 +119,7 @@ test("上传成功后自动收起状态行且空队列不占版面", () => {
 /**
  * 本地文档默认使用站内章节阅读，PDF 原文件在新标签页交给浏览器阅读器。
  */
-test("本地文档默认按章节阅读且在新标签页打开 PDF 原版", () => {
+test("本地 PDF 文档连续阅读且在新标签页打开原版", () => {
   /** projectDirectory 是桌面版本项目根目录。 */
   const projectDirectory = path.resolve(import.meta.dirname, "..");
   /** applicationSource 是文档阅读模式的浏览器端实现。 */
@@ -134,6 +134,8 @@ test("本地文档默认按章节阅读且在新标签页打开 PDF 原版", () 
   const extractorSource = fs.readFileSync(path.join(projectDirectory, "lib", "extractor.mjs"), "utf8");
 
   assert.match(pageSource, /<span class="is-active" aria-current="page">HTML 阅读<\/span>/);
+  assert.match(pageSource, /styles\.css\?v=20260916-reading-6/);
+  assert.match(pageSource, /app\.js\?v=20260916-reading-6/);
   assert.match(pageSource, /id="original-document-link"[\s\S]*target="_blank"[\s\S]*rel="noopener"/);
   assert.match(pageSource, /↗ 新标签页查看原版/);
   assert.doesNotMatch(pageSource, /id="original-preview-frame"/);
@@ -149,6 +151,28 @@ test("本地文档默认按章节阅读且在新标签页打开 PDF 原版", () 
   assert.match(applicationSource, /documentItem\.pdfOutline \|\| \[\]/);
   assert.match(applicationSource, /function createWordDocumentChapters\(rawHtml\)/);
   assert.match(applicationSource, /async function renderDocumentChapter\(requestedIndex, options = \{\}\)/);
+  assert.match(applicationSource, /async function renderContinuousPdfDocument\(options = \{\}\)/);
+  assert.match(applicationSource, /className = "document-continuous-section"/);
+  assert.match(applicationSource, /continuousSection\.scrollIntoView\(\{ behavior: "smooth", block: "start" \}\)/);
+  assert.doesNotMatch(applicationSource, /function mountContinuousDocumentSection\(chapterIndex\)/);
+  assert.doesNotMatch(applicationSource, /function unmountContinuousDocumentSection\(chapterIndex\)/);
+  assert.doesNotMatch(applicationSource, /new IntersectionObserver\(\(entries\) =>/);
+  assert.match(applicationSource, /function createDocumentSectionOverview\(chapterIndex\)/);
+  assert.match(applicationSource, /className = "document-section-overview"/);
+  assert.match(applicationSource, /if \(sectionOverview\) dom\.readerContent\.append\(sectionOverview\)/);
+  assert.match(styleSource, /\.document-section-overview\s*\{/);
+  assert.match(applicationSource, /classList\.toggle\("is-pdf-reader", isPdfDocument\)/);
+  assert.match(applicationSource, /usesContinuousPdfReading/);
+  assert.match(applicationSource, /setReadingTocExpanded\(usesPdfReadingLayout \? true : savedTocExpanded, !usesPdfReadingLayout\)/);
+  assert.match(applicationSource, /setReadingWorkbenchExpanded\(usesPdfReadingLayout \? false : savedExpanded, !usesPdfReadingLayout\)/);
+  assert.match(applicationSource, /classList\.add\("is-document-reader"\)/);
+  assert.match(styleSource, /\.reader\.is-pdf-reader \.reader-layout\s*\{/);
+  assert.match(styleSource, /:root\[data-reading-theme\] body\.is-document-reader \.reader\.is-pdf-reader \.reader-aside\s*\{/);
+  assert.match(styleSource, /\.reader\.is-pdf-reader \.document-chapter-footer\s*\{/);
+  assert.match(styleSource, /\.reader\.is-pdf-reader \.document-continuous-section \+ \.document-continuous-section/);
+  assert.match(styleSource, /\.reader\.is-pdf-reader \.reader-article > :is\(\.eyebrow, h1, \.reader-summary\)/);
+  assert.match(styleSource, /body\.is-document-reader \.topbar/);
+  assert.match(styleSource, /body\.is-document-reader \.reading-toc-sidebar/);
   assert.match(applicationSource, /if \(normalizedText\.length <= 260\) return \[normalizedText\]/);
   assert.match(applicationSource, /const readableSentenceSegmenter = typeof Intl\.Segmenter/);
   assert.match(applicationSource, /validOffsets\.length > 0 \? Math\.max\(\.\.\.validOffsets\) : 150/);
@@ -158,6 +182,9 @@ test("本地文档默认按章节阅读且在新标签页打开 PDF 原版", () 
   assert.match(applicationSource, /className = "readable-document-figure"/);
   assert.match(applicationSource, /function createStructuredPdfPage\(pageNumber, pageData\)/);
   assert.match(applicationSource, /pdfStructuredPages/);
+  assert.match(applicationSource, /pageData\.presentationMode === "facsimile"/);
+  assert.match(applicationSource, /const displayFigureRegions = wasFacsimile \? \[\] : \(pageData\.figureRegions \|\| \[\]\)/);
+  assert.doesNotMatch(applicationSource, /pageRegion[\s\S]{0,200}createStructuredPdfFigure\(pageNumber, pageRegion/);
   assert.match(applicationSource, /className = "readable-structured-columns"/);
   assert.match(applicationSource, /\/page-figure-region\?page=\$\{pageNumber\}&region=\$\{figureInfo\.regionIndex\}/);
   assert.match(applicationSource, /removeDiagramLabels/);
@@ -165,10 +192,19 @@ test("本地文档默认按章节阅读且在新标签页打开 PDF 原版", () 
   assert.match(applicationSource, /className = "readable-document-table"/);
   assert.match(styleSource, /\.readable-document-figure\s*\{/);
   assert.match(styleSource, /\.readable-structured-page\s*\{/);
+  assert.match(styleSource, /\.readable-structured-page\.is-facsimile\s*\{/);
+  assert.match(styleSource, /\.reader\.is-pdf-reader \.readable-structured-columns\s*\{[\s\S]*?display: block/);
+  assert.match(styleSource, /\.reader\.is-pdf-reader \.document-continuous-section\s*\{[\s\S]*?content-visibility: auto/);
   assert.match(styleSource, /\.readable-structured-columns\s*\{/);
   assert.match(styleSource, /\.readable-document-table\s*\{/);
   assert.match(serverSource, /pageFigureMatch/);
   assert.match(serverSource, /createPdfStructuredPages/);
+  assert.match(serverSource, /shouldUsePdfPageFacsimile/);
+  assert.ok(
+    serverSource.indexOf("const useFacsimile = shouldUsePdfPageFacsimile")
+      < serverSource.indexOf("if (reasons.length === 0) continue;"),
+    "低置信图页必须先完成原页保真判断，不能因双栏信号收紧而被提前跳过",
+  );
   assert.match(serverSource, /createPdfFigureRegions/);
   assert.match(serverSource, /pageFigureRegionMatch/);
   assert.match(serverSource, /pageTableMatch/);
@@ -659,6 +695,40 @@ test("上传、分类、搜索、修改分类与下载原件", async () => {
     const statePayload = await stateResponse.json();
     assert.equal(statePayload.state.status, "reading");
     assert.equal(statePayload.state.progressPercent, 37.5);
+
+    /** notesResponse 验证阅读侧栏笔记会出现在独立笔记库。 */
+    const notesResponse = await fetch(`${integrationBaseUrl}/api/notes?query=MVCC&targetType=document`);
+    assert.equal(notesResponse.status, 200);
+    const notesPayload = await notesResponse.json();
+    assert.equal(notesPayload.total, 1);
+    assert.equal(notesPayload.notes[0].targetId, documentId);
+    assert.match(notesPayload.notes[0].noteText, /快照可见性/);
+    assert.equal(notesPayload.summary.pendingCount, 1);
+    assert.equal(notesPayload.settings.frequency, "weekly");
+
+    /** noteSettingsResponse 验证用户可调整自动整理频率和时间。 */
+    const noteSettingsResponse = await fetch(`${integrationBaseUrl}/api/notes/settings`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: true, frequency: "daily", weekday: 0, time: "20:30" }),
+    });
+    assert.equal(noteSettingsResponse.status, 200);
+    const noteSettingsPayload = await noteSettingsResponse.json();
+    assert.equal(noteSettingsPayload.settings.frequency, "daily");
+    assert.equal(noteSettingsPayload.settings.time, "20:30");
+    assert.ok(Date.parse(noteSettingsPayload.settings.nextRunAt) > Date.now());
+
+    /** organizeNotesResponse 本地生成派生摘要，不改写原始伴读笔记。 */
+    const organizeNotesResponse = await fetch(`${integrationBaseUrl}/api/notes/organize`, { method: "POST" });
+    assert.equal(organizeNotesResponse.status, 201);
+    const organizeNotesPayload = await organizeNotesResponse.json();
+    assert.equal(organizeNotesPayload.organized, true);
+    assert.match(organizeNotesPayload.digest.digest.overview, /1 条笔记/);
+    const notesAfterOrganizeResponse = await fetch(`${integrationBaseUrl}/api/notes`);
+    const notesAfterOrganizePayload = await notesAfterOrganizeResponse.json();
+    assert.equal(notesAfterOrganizePayload.summary.pendingCount, 0);
+    assert.equal(notesAfterOrganizePayload.digests.length, 1);
+    assert.equal(notesAfterOrganizePayload.notes[0].noteText, "重点理解 MVCC 的快照可见性规则。");
 
     /** readingSessionResponse 创建一次可幂等累计的活跃阅读会话。 */
     const readingSessionResponse = await fetch(`${integrationBaseUrl}/api/reading-sessions`, {

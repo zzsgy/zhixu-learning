@@ -19,12 +19,49 @@ test("论文结构清单区分引用上标和公式上下标", () => {
   assert.equal(structure.imageCount, 1);
   assert.equal(structure.uniqueImageCount, 1);
   assert.equal(structure.tableCount, 1);
-  assert.equal(structure.formulaCount, 2);
+  assert.equal(structure.formulaCount, 0);
+  assert.equal(structure.semanticSubscriptCount, 1);
+  assert.equal(structure.semanticSuperscriptCount, 1);
+  assert.equal(structure.structureMetricVersion, 3);
   assert.equal(structure.declaredFigureCount, 1);
   assert.equal(structure.figureCaptionCount, 1);
   assert.equal(structure.imageFigureCount, 1);
   assert.equal(structure.tableFigureCount, 0);
   assert.equal(structure.emptyFigureCount, 0);
+});
+
+test("来源与译文采用相同规则折叠 MathML 后备层的重复上下标", () => {
+  const structure = analyzePaperHtmlStructure(`
+    <p>x<sup>1</sup><sup>1</sup> y<sup>2</sup><sup>2</sup></p>
+    <p>z<sub>3</sub><sub>3</sub> 与公式 $E=mc^2$。</p>
+  `);
+  assert.equal(structure.formulaCount, 1);
+  assert.equal(structure.semanticSuperscriptCount, 2);
+  assert.equal(structure.semanticSubscriptCount, 1);
+});
+
+test("ar5iv 多层 span 脚注后备标记只计一次", () => {
+  const structure = analyzePaperHtmlStructure(`
+    <p><span><sup>1</sup><span><span><sup>1</sup><span>1</span>脚注正文。</span></span></span></p>
+    <p><span><sup>2</sup><span><span><sup>2</sup><span>2</span>另一条脚注。</span></span></span></p>
+  `);
+  assert.equal(structure.semanticSuperscriptCount, 2);
+});
+
+test("旧版清单不会把上下标再次当作公式缺失", () => {
+  const validation = validatePaperTranslationStructure(
+    {
+      imageCount: 0,
+      tableCount: 0,
+      formulaCount: 191,
+      semanticSubscriptCount: 0,
+      semanticSuperscriptCount: 16,
+      headingCount: 0,
+    },
+    `${"<p>$x$</p>".repeat(175)}${"<sup>1</sup>".repeat(8)}`,
+  );
+  assert.equal(validation.missing.filter((item) => item.startsWith("公式结构")).length, 0);
+  assert.deepEqual(validation.missing, ["上标结构 1/16"]);
 });
 
 test("嵌套图形只统计各自直接拥有的资产并区分重复图片引用", () => {

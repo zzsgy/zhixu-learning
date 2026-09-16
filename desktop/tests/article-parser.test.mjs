@@ -21,9 +21,52 @@ import {
   persistEmbeddedArticleImages,
   readNetworkErrorCode,
   restoreReadableFigureImages,
+  restoreOmittedSiblingArticleSections,
   restoreMarkedArticleImages,
   sanitizeArticleHtml,
 } from "../lib/article-parser.mjs";
+
+test("补回 Readability 因同级长章节评分而遗漏的第一章和结论", () => {
+  const { document } = parseHTML(`
+    <main><div class="report-sections">
+      <section><h2>1. Introduction</h2><p>${"Opening context and purpose. ".repeat(20)}</p></section>
+      <section><h3>1.1 The Landscape</h3><p>${"Landscape evidence and observations. ".repeat(20)}</p></section>
+      <section><h2>2. Guiding Principles</h2><p>${"Principles and details. ".repeat(35)}</p></section>
+      <section><h2>3. Recommendations</h2><p>${"Recommendations and implementation. ".repeat(45)}</p></section>
+      <section><h2>4. Conclusion</h2><p>${"Closing findings and next steps. ".repeat(20)}</p></section>
+    </div></main>
+  `);
+  const readableHtml = `<h2>2. Guiding Principles</h2><p>${"Principles and details. ".repeat(35)}</p>
+    <h2>3. Recommendations</h2><p>${"Recommendations and implementation. ".repeat(45)}</p>`;
+  const restored = restoreOmittedSiblingArticleSections(readableHtml, document);
+  assert.ok(restored.indexOf("1. Introduction") < restored.indexOf("2. Guiding Principles"));
+  assert.ok(restored.indexOf("1.1 The Landscape") < restored.indexOf("2. Guiding Principles"));
+  assert.ok(restored.indexOf("4. Conclusion") > restored.indexOf("3. Recommendations"));
+  assert.equal((restored.match(/2\. Guiding Principles/g) || []).length, 1);
+});
+
+test("正文已经从第一章开始时不重复补章", () => {
+  const { document } = parseHTML(`
+    <main><div><section><h2>1. Introduction</h2><p>${"Opening body. ".repeat(20)}</p></section>
+      <section><h2>2. Methods</h2><p>${"Method body. ".repeat(30)}</p></section></div></main>
+  `);
+  const readableHtml = `<h2>1. Introduction</h2><p>${"Opening body. ".repeat(20)}</p>
+    <h2>2. Methods</h2><p>${"Method body. ".repeat(30)}</p>`;
+  const restored = restoreOmittedSiblingArticleSections(readableHtml, document);
+  assert.equal(restored, readableHtml);
+  assert.equal((restored.match(/1\. Introduction/g) || []).length, 1);
+});
+
+test("不把导航栏中的编号标题补进正文", () => {
+  const { document } = parseHTML(`
+    <body><nav><h2>1. Start here</h2><p>${"Navigation copy. ".repeat(30)}</p></nav>
+      <main><article><h2>2. Independent article</h2><p>${"Article body. ".repeat(40)}</p></article></main></body>
+  `);
+  const readableHtml = `<h2>2. Independent article</h2><p>${"Article body. ".repeat(40)}</p>`;
+  const restored = restoreOmittedSiblingArticleSections(readableHtml, document);
+  assert.equal(restored, readableHtml);
+  assert.doesNotMatch(restored, /Start here/);
+});
 
 test("补回 Readability 丢失的出版商正文主图并保留图注位置", () => {
   const { document: originalDocument } = parseHTML(`

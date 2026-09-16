@@ -17,6 +17,11 @@ export function arrangePaperCard(card, { paper, checkbox, location, readingStatu
   const reading = make("span", "paper-card-reading-status", readingStatus);
   reading.dataset.status = paper.readingStatus || "unread";
   metadata.append(location, reading);
+  const authors = content.querySelector(".paper-authors");
+  if (authors) {
+    authors.title = authors.textContent;
+    metadata.append(authors);
+  }
   content.prepend(metadata);
 
   const selection = make("label", "paper-card-select");
@@ -42,11 +47,14 @@ export function arrangePaperCard(card, { paper, checkbox, location, readingStatu
   // Keep existing elements and listeners: moving an action must not rebind it.
   const actions = make("div", "paper-card-actions");
   const reader = footer.firstElementChild;
+  const retry = footer.querySelector(".paper-retry-button");
   const more = make("details", "paper-card-more");
   const summary = make("summary", "paper-card-more-trigger", "更多");
   summary.setAttribute("aria-label", `更多操作：${paper.titleZh || paper.title}`);
   const menu = make("div", "paper-card-more-panel");
-  for (const action of [...footer.children].slice(1)) menu.append(action);
+  for (const action of [...footer.children].slice(1)) {
+    if (action !== retry) menu.append(action);
+  }
   more.append(summary, menu);
   more.addEventListener("toggle", () => {
     if (!more.open) return;
@@ -61,6 +69,7 @@ export function arrangePaperCard(card, { paper, checkbox, location, readingStatu
     if (event.target.closest("a, button")) more.open = false;
   });
   if (reader) actions.append(reader);
+  if (retry) actions.append(retry);
   actions.append(moveButton, more);
   footer.replaceChildren(states, actions);
   content.append(footer);

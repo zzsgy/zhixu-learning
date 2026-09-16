@@ -142,14 +142,71 @@ async function renderPdfPageText(pageData) {
     normalizeWhitespace: false,
     disableCombineTextItems: false,
   });
-  let lastY;
+  return groupPdfTextRows(textContent.items)
+    .map((row) => joinPdfTextItems(row.items))
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * 按坐标连接同一视觉行的 PDF.js 文字项。
+ *
+ * 某些 PDF 把逗号前后的英文拆成不同文字项；直接拼接会产生 `actions,while`。
+ * 本函数只在可见水平间距或英文标点边界明确时补空格，不改中文连续文字。
+ *
+ * @param {Array<Record<string, unknown>>} items 同一视觉行的文字项。
+ * @returns {string} 恢复后的单行文本。
+ */
+export function joinPdfTextItems(items) {
+  const sortedItems = [...(Array.isArray(items) ? items : [])].sort(
+    (left, right) => Number(left.transform?.[4]) - Number(right.transform?.[4]),
+  );
   let text = "";
-  for (const item of textContent.items) {
-    const currentY = item.transform?.[5];
-    text += lastY === undefined || lastY === currentY ? item.str : `\n${item.str}`;
-    lastY = currentY;
+  let previousItem = null;
+  for (const item of sortedItems) {
+    const itemText = String(item.str || "");
+    if (!itemText) continue;
+    if (!previousItem) {
+      text = itemText;
+      previousItem = item;
+      continue;
+    }
+    const previousText = String(previousItem.str || "");
+    const previousRight = Number(previousItem.transform?.[4]) + (Number(previousItem.width) || 0);
+    const currentX = Number(item.transform?.[4]);
+    const fontSize = Math.max(
+      1,
+      Math.abs(Number(previousItem.transform?.[3]) || Number(previousItem.height) || 0),
+      Math.abs(Number(item.transform?.[3]) || Number(item.height) || 0),
+    );
+    const horizontalGap = Number.isFinite(previousRight) && Number.isFinite(currentX)
+      ? currentX - previousRight
+      : 0;
+    const hasExistingSpace = /\s$/.test(text) || /^\s/.test(itemText);
+    const punctuationBoundary = /[,;:!?)]$/.test(previousText)
+      && /^[A-Za-z0-9([]/.test(itemText);
+    const wordGap = /[A-Za-z0-9]$/.test(previousText)
+      && /^[A-Za-z0-9]/.test(itemText)
+      && horizontalGap >= Math.max(0.7, fontSize * 0.1);
+    if (!hasExistingSpace && (punctuationBoundary || wordGap)) text += " ";
+    text += itemText;
+    previousItem = item;
   }
-  return text;
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * 判断视觉行是否落在常见 PDF 页眉或页脚边距内。
+ *
+ * @param {number} rowY PDF 用户坐标中的行位置。
+ * @param {number} pageHeight 页面高度。
+ * @returns {boolean} 是否为阅读正文之外的页边距行。
+ */
+export function isPdfRunningMarginRow(rowY, pageHeight) {
+  const y = Number(rowY);
+  const height = Number(pageHeight);
+  if (!Number.isFinite(y) || !Number.isFinite(height) || height < 100) return false;
+  return y >= height * 0.945 || y <= height * 0.055;
 }
 
 /**
@@ -177,7 +234,7 @@ function groupPdfTextRows(items) {
       return {
         y: Number(rowKey),
         items: sortedItems,
-        text: sortedItems.map((item) => String(item.str || "")).join("").replace(/\s+/g, " ").trim(),
+        text: joinPdfTextItems(sortedItems),
       };
     })
     .sort((left, right) => right.y - left.y);
@@ -189,12 +246,15 @@ function groupPdfTextRows(items) {
  * 这里只记录页级结构信号；是否使用原页保真模式还会在服务端结合内嵌图片数量判断。
  *
  * @param {{ pageWidth: number, pageHeight: number, rows: Array<Record<string, unknown>>, pageText: string }} input 页面结构。
- * @returns {{ pageWidth: number, pageHeight: number, textRowCount: number, splitRowCount: number, multiColumn: boolean, numberedCalloutCount: number, isolatedNumberCount: number }} 页级版面特征。
+ * @returns {{ pageWidth: number, pageHeight: number, textRowCount: number, splitRowCount: number, strongSplitRowCount: number, continuousWideRowCount: number, shortRowCount: number, multiColumn: boolean, numberedCalloutCount: number, isolatedNumberCount: number }} 页级版面特征。
  */
 export function detectPdfPageLayoutComplexity({ pageWidth, pageHeight, rows, pageText }) {
   const safePageWidth = Math.max(1, Number(pageWidth) || 1);
   const safeRows = Array.isArray(rows) ? rows : [];
   let splitRowCount = 0;
+  let strongSplitRowCount = 0;
+  let continuousWideRowCount = 0;
+  let shortRowCount = 0;
   let leftColumnRowCount = 0;
   let rightColumnRowCount = 0;
   for (const row of safeRows) {
@@ -205,11 +265,15 @@ export function detectPdfPageLayoutComplexity({ pageWidth, pageHeight, rows, pag
     const firstX = Number(items[0].transform?.[4]) || 0;
     const lastItem = items.at(-1);
     const lastRight = (Number(lastItem.transform?.[4]) || 0) + (Number(lastItem.width) || 0);
+    const compactTextLength = [...String(row.text || "").replace(/\s+/g, "")].length;
+    if (compactTextLength > 0 && compactTextLength <= 24) shortRowCount += 1;
     if (firstX < safePageWidth * 0.42 && lastRight < safePageWidth * 0.61) {
       leftColumnRowCount += 1;
     }
     if (firstX > safePageWidth * 0.39) rightColumnRowCount += 1;
     let previousRight = firstX + (Number(items[0].width) || 0);
+    let rowHasSplit = false;
+    let rowHasStrongSplit = false;
     for (const item of items.slice(1)) {
       const itemX = Number(item.transform?.[4]) || 0;
       const gap = itemX - previousRight;
@@ -218,21 +282,44 @@ export function detectPdfPageLayoutComplexity({ pageWidth, pageHeight, rows, pag
         && previousRight < safePageWidth * 0.66
         && itemX > safePageWidth * 0.34
       ) {
-        splitRowCount += 1;
+        rowHasSplit = true;
+        rowHasStrongSplit = previousRight - firstX >= safePageWidth * 0.22
+          && lastRight - itemX >= safePageWidth * 0.22;
         break;
       }
       previousRight = Math.max(previousRight, itemX + (Number(item.width) || 0));
+    }
+    if (rowHasSplit) splitRowCount += 1;
+    if (rowHasStrongSplit) strongSplitRowCount += 1;
+    if (
+      !rowHasSplit
+      && firstX < safePageWidth * 0.25
+      && lastRight > safePageWidth * 0.75
+    ) {
+      continuousWideRowCount += 1;
     }
   }
   const textLines = String(pageText || "").replace(/\r\n?/g, "\n").split("\n");
   const numberedCalloutCount = textLines.filter((line) => /^\s*\d{1,2}[.、)]\s*\S/.test(line)).length;
   const isolatedNumberCount = textLines.filter((line) => /^\s*\d{1,2}\s*$/.test(line)).length;
+  /**
+   * 真双栏需要两侧都有足够宽的连续阅读流。单栏正文横跨页面、宽表格的短单元格
+   * 以及居中流程图也会在中线两侧产生文字，但不能据此把整页拆成左右栏。
+   */
+  const hasTwoColumnFlow = strongSplitRowCount >= 3
+    || (leftColumnRowCount >= 5 && rightColumnRowCount >= 5);
+  const hasWideSingleColumnFlow = continuousWideRowCount >= 2;
+  const looksLikeSparseTableOrDiagram = safeRows.length <= 50
+    && shortRowCount >= Math.max(12, Math.ceil(safeRows.length * 0.55));
   return {
     pageWidth: Number(safePageWidth.toFixed(2)),
     pageHeight: Number((Number(pageHeight) || 0).toFixed(2)),
     textRowCount: safeRows.length,
     splitRowCount,
-    multiColumn: splitRowCount >= 3 || (leftColumnRowCount >= 5 && rightColumnRowCount >= 5),
+    strongSplitRowCount,
+    continuousWideRowCount,
+    shortRowCount,
+    multiColumn: hasTwoColumnFlow && !hasWideSingleColumnFlow && !looksLikeSparseTableOrDiagram,
     numberedCalloutCount,
     isolatedNumberCount,
   };
@@ -256,11 +343,7 @@ export function createPdfStructuredTextColumns({ pageWidth, pageHeight, rows }) 
     const sortedItems = [...items].sort(
       (left, right) => Number(left.transform?.[4]) - Number(right.transform?.[4]),
     );
-    const text = sortedItems
-      .map((item) => String(item.str || ""))
-      .join("")
-      .replace(/\s+/g, " ")
-      .trim();
+    const text = joinPdfTextItems(sortedItems);
     if (!text) return null;
     return {
       text,
@@ -391,33 +474,36 @@ async function renderPdfPageReadingData(pageData, pageNumber) {
     disableCombineTextItems: false,
   });
   const tables = detectPdfTableRegions(pageData, textContent.items);
-  const insertedTables = new Set();
-  let lastY;
-  let text = "";
-  for (const item of textContent.items) {
-    const itemX = Number(item.transform?.[4]);
-    const itemY = Number(item.transform?.[5]);
-    const itemCenterX = itemX + (Number(item.width) || 0) / 2;
-    const table = tables.find((candidate) => (
-      itemY >= candidate.sourceTop
-      && itemY <= candidate.sourceBottom
-      && itemCenterX >= candidate.x
-      && itemCenterX <= candidate.x + candidate.width
-    ));
-    if (table) {
-      if (!insertedTables.has(table.tableIndex)) {
-        text += `\n[[ZHIXU_PDF_TABLE:${pageNumber}:${table.tableIndex}]]\n`;
-        insertedTables.add(table.tableIndex);
-      }
-      lastY = undefined;
-      continue;
-    }
-    const currentY = item.transform?.[5];
-    text += lastY === undefined || lastY === currentY ? item.str : `\n${item.str}`;
-    lastY = currentY;
-  }
   const viewport = pageData.getViewport(1);
   const textRows = groupPdfTextRows(textContent.items);
+  const insertedTables = new Set();
+  const outputLines = [];
+  for (const row of textRows) {
+    if (isPdfRunningMarginRow(row.y, viewport.height)) continue;
+    const rowItems = [];
+    for (const item of row.items || []) {
+      const itemX = Number(item.transform?.[4]);
+      const itemY = Number(item.transform?.[5]);
+      const itemCenterX = itemX + (Number(item.width) || 0) / 2;
+      const table = tables.find((candidate) => (
+        itemY >= candidate.sourceTop
+        && itemY <= candidate.sourceBottom
+        && itemCenterX >= candidate.x
+        && itemCenterX <= candidate.x + candidate.width
+      ));
+      if (table) {
+        if (!insertedTables.has(table.tableIndex)) {
+          outputLines.push(`[[ZHIXU_PDF_TABLE:${pageNumber}:${table.tableIndex}]]`);
+          insertedTables.add(table.tableIndex);
+        }
+        continue;
+      }
+      rowItems.push(item);
+    }
+    const rowText = joinPdfTextItems(rowItems);
+    if (rowText) outputLines.push(rowText);
+  }
+  const text = outputLines.join("\n");
   const layout = detectPdfPageLayoutComplexity({
     pageWidth: viewport.width,
     pageHeight: viewport.height,

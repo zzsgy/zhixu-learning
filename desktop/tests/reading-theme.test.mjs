@@ -64,6 +64,8 @@ test("超长标题、推广块和异常媒体不会破坏阅读页比例", () =>
 
 test("三类阅读正文统一增强代码块、行内代码和特殊提示字段", () => {
   assert.match(script, /function enhanceReadingSemantics\(readingSurface\)/);
+  assert.match(script, /classifyReadableBlock/);
+  assert.match(script, /normalizeReadableLines\(text\)/);
   assert.match(script, /function normalizeReadingPreformattedLines\(preElement\)/);
   assert.match(script, /normalizeReadingPreformattedLines\(preElement\)/);
   assert.match(script, /inferReadingCodeLanguage/);
