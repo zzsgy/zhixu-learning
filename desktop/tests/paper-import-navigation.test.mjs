@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
-const controller = fs.readFileSync(new URL('../public/paper-library.js', import.meta.url), 'utf8');
+const controller = fs
+  .readFileSync(new URL('../public/paper-library.js', import.meta.url), 'utf8')
+  .replace(/\r\n?/g, '\n');
 
 test('所有导入入口在切换页面前统一刷新论文目录，保留来源页面上下文', () => {
   const body = app.slice(app.indexOf('function showView(viewName)'), app.indexOf('function showView(viewName)') + 700);
@@ -22,7 +24,8 @@ function fixture(request, folder = '') {
     return {children,value:children.some(c=>c.value===id)?id:''};
   }});
   const start = controller.indexOf('  let importRequestSequence');
-  const end = controller.indexOf('\n  return {\n    changed,', start);
+  const end = controller.indexOf('\n  return {', start);
+  assert.ok(start >= 0 && end > start, '论文目录控制器测试片段定位失败');
   vm.runInContext(controller.slice(start,end)+'\nglobalThis.prepare = prepareImport; globalThis.ready = () => importDestinationReady;',context);
   return {context,state,importSelect,messages};
 }
