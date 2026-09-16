@@ -559,7 +559,8 @@ export async function ensureDailyClassicPaperCandidate(currentDate = new Date())
     titleZh: catalogItem.titleZh,
     abstractZh: catalogItem.abstractZh,
     translationSource: "codex",
-    translatedAt: new Date().toISOString(),
+    // 每次启动都会同步经典目录元数据，但已完成翻译的时间属于历史事实，不能随启动漂移。
+    translatedAt: cachedCandidate?.translatedAt || new Date().toISOString(),
   };
   /** savePaperCandidates 会同步目录修正，避免旧候选永久保留失效 PDF 地址。 */
   return savePaperCandidates(dailyKey, [candidate]);

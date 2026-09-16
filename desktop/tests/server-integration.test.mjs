@@ -19,6 +19,8 @@ test("学习统计默认首页并展示资料库目录层级", () => {
   const projectDirectory = path.resolve(import.meta.dirname, "..");
   const pageSource = fs.readFileSync(path.join(projectDirectory, "public", "index.html"), "utf8");
   const applicationSource = fs.readFileSync(path.join(projectDirectory, "public", "app.js"), "utf8");
+  const activitySource = fs.readFileSync(path.join(projectDirectory, "public", "activity-dashboard.js"), "utf8");
+  const githubSource = fs.readFileSync(path.join(projectDirectory, "public", "github-projects.js"), "utf8");
   const activityNavigationIndex = pageSource.indexOf('data-view="activity"');
   const libraryNavigationIndex = pageSource.indexOf('data-view="library"');
   assert.ok(activityNavigationIndex >= 0 && activityNavigationIndex < libraryNavigationIndex);
@@ -36,14 +38,16 @@ test("学习统计默认首页并展示资料库目录层级", () => {
   assert.match(pageSource, /id="activity-github-statistics"/);
   assert.doesNotMatch(pageSource, /资料入库节奏/);
   assert.match(applicationSource, /activeView: "activity"/);
-  assert.match(applicationSource, /function renderLibraryCompositionChart\(composition\)/);
-  assert.match(applicationSource, /activityShowSecondaryFolders: false/);
-  assert.match(applicationSource, /points\.length <= 31 \? 1/);
-  assert.match(applicationSource, /classList\.toggle\("is-expanded"/);
-  assert.match(applicationSource, /activity-library-group-label/);
-  assert.match(applicationSource, /group\.level === 0 \? "论文库 · 独立统计" : group\.name/);
-  assert.match(applicationSource, /function renderGitHubStatistics\(statistics\)/);
-  assert.match(applicationSource, /function analyzeGitHubProject\(\)/);
+  assert.match(applicationSource, /mountActivityDashboard/);
+  assert.match(applicationSource, /mountGitHubProjects/);
+  assert.match(activitySource, /const renderLibraryComposition = \(composition\) =>/);
+  assert.match(activitySource, /showSecondaryFolders: false/);
+  assert.match(activitySource, /points\.length <= 31 \? 1/);
+  assert.match(activitySource, /classList\.toggle\("is-expanded"/);
+  assert.match(activitySource, /activity-library-group-label/);
+  assert.match(activitySource, /group\.level === 0 \? "论文库 · 独立统计" : group\.name/);
+  assert.match(activitySource, /const renderGitHubStatistics = \(statistics\) =>/);
+  assert.match(githubSource, /async function analyze\(\)/);
   assert.doesNotMatch(applicationSource, /renderImportActivityChart/);
 });
 
@@ -729,6 +733,52 @@ test("上传、分类、搜索、修改分类与下载原件", async () => {
     assert.equal(notesAfterOrganizePayload.summary.pendingCount, 0);
     assert.equal(notesAfterOrganizePayload.digests.length, 1);
     assert.equal(notesAfterOrganizePayload.notes[0].noteText, "重点理解 MVCC 的快照可见性规则。");
+
+    /** standaloneNoteResponse 验证独立笔记路由拆分后仍保留原 API 契约。 */
+    const standaloneNoteResponse = await fetch(`${integrationBaseUrl}/api/notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ noteType: "markdown" }),
+    });
+    assert.equal(standaloneNoteResponse.status, 201);
+    const standaloneNotePayload = await standaloneNoteResponse.json();
+    const standaloneNoteId = standaloneNotePayload.note.id;
+    assert.equal(standaloneNotePayload.note.noteType, "markdown");
+
+    const updateStandaloneNoteResponse = await fetch(
+      `${integrationBaseUrl}/api/notes/${encodeURIComponent(standaloneNoteId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "接口契约笔记", contentText: "# 路由拆分\n\n正文保持不变。" }),
+      },
+    );
+    assert.equal(updateStandaloneNoteResponse.status, 200);
+    const updateStandaloneNotePayload = await updateStandaloneNoteResponse.json();
+    assert.equal(updateStandaloneNotePayload.note.title, "接口契约笔记");
+
+    const standaloneNoteDetailResponse = await fetch(
+      `${integrationBaseUrl}/api/notes/${encodeURIComponent(standaloneNoteId)}`,
+    );
+    assert.equal(standaloneNoteDetailResponse.status, 200);
+    assert.match((await standaloneNoteDetailResponse.json()).note.contentText, /正文保持不变/);
+
+    const standaloneNoteExportResponse = await fetch(
+      `${integrationBaseUrl}/api/notes/${encodeURIComponent(standaloneNoteId)}/export`,
+    );
+    assert.equal(standaloneNoteExportResponse.status, 200);
+    assert.match(standaloneNoteExportResponse.headers.get("content-disposition"), /\.md/i);
+    assert.match(await standaloneNoteExportResponse.text(), /路由拆分/);
+
+    const deleteStandaloneNoteResponse = await fetch(
+      `${integrationBaseUrl}/api/notes/${encodeURIComponent(standaloneNoteId)}`,
+      { method: "DELETE" },
+    );
+    assert.equal(deleteStandaloneNoteResponse.status, 200);
+    const deletedStandaloneNoteResponse = await fetch(
+      `${integrationBaseUrl}/api/notes/${encodeURIComponent(standaloneNoteId)}`,
+    );
+    assert.equal(deletedStandaloneNoteResponse.status, 404);
 
     /** readingSessionResponse 创建一次可幂等累计的活跃阅读会话。 */
     const readingSessionResponse = await fetch(`${integrationBaseUrl}/api/reading-sessions`, {

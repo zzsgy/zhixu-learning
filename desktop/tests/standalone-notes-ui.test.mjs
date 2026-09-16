@@ -7,7 +7,10 @@ import { applyMarkdownAction, mountNotesCenter } from "../public/notes-center.js
 
 test("Markdown 编辑器提供可操作工具栏且不再提供思维导图", () => {
   const html = fs.readFileSync(path.resolve(import.meta.dirname, "../public/index.html"), "utf8");
-  const serverSource = fs.readFileSync(path.resolve(import.meta.dirname, "../server.mjs"), "utf8");
+  const noteRouteSource = fs.readFileSync(
+    path.resolve(import.meta.dirname, "../lib/http/routes/note-routes.mjs"),
+    "utf8",
+  );
   const { document } = parseHTML(html);
   const actions = new Set(
     [...document.querySelectorAll("#notes-markdown-toolbar [data-markdown-action]")]
@@ -19,8 +22,8 @@ test("Markdown 编辑器提供可操作工具栏且不再提供思维导图", ()
   assert.equal(document.querySelector('[data-create-note="mindmap"]'), null);
   assert.equal(document.querySelector('#notes-type-filter option[value="mindmap"]'), null);
   assert.equal(document.querySelector("#notes-mindmap-workspace"), null);
-  assert.match(serverSource, /!\["markdown", "text", "word"\]\.includes\(noteType\)/);
-  assert.match(serverSource, /sendJson\(response, 400, \{ message: "不支持这种笔记类型。" \}\)/);
+  assert.match(noteRouteSource, /!\["markdown", "text", "word"\]\.includes\(noteType\)/);
+  assert.match(noteRouteSource, /sendJson\(response, 400, \{ message: "不支持这种笔记类型。" \}\)/);
 });
 
 test("Markdown 工具动作包裹选区并把空光标放在继续输入的位置", () => {
