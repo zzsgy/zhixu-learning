@@ -9,6 +9,46 @@ import { parsePaperAssetUrl } from "../public/paper-assets.js";
 /** LaTeX 定界符匹配器，与阅读页 KaTeX 支持范围保持一致。 */
 const latexPattern = /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$(?!\s)(?:\\.|[^$\r\n])+?\$/g;
 
+/** 当前结构计数口径：公式只统计 LaTeX，上下标各自单独统计。 */
+export const paperStructureMetricVersion = 3;
+const separatedFormulaMetricVersion = 2;
+
+/**
+ * 去除 arXiv MathML 后备层常见的相邻重复上下标。来源页和译文必须使用
+ * 同一套规范，否则来源中的重复节点会被错误当成译文丢失。
+ *
+ * @param {Element} root HTML 根节点。
+ */
+function removeAdjacentDuplicateScripts(root) {
+  for (const script of Array.from(root.querySelectorAll("sup, sub"))) {
+    let sibling = script.nextElementSibling;
+    while (
+      sibling
+      && sibling.tagName === script.tagName
+      && String(sibling.textContent || "").trim() === String(script.textContent || "").trim()
+    ) {
+      const duplicate = sibling;
+      sibling = sibling.nextElementSibling;
+      duplicate.remove();
+    }
+    /**
+     * ar5iv 的脚注后备层还会把第二个相同标记放进紧随其后的多层 span
+     * 包装中：<sup>1</sup><span><span><sup>1</sup>...。只沿连续首子
+     * span 查找，避免把后文中恰好同号的合法脚注当成重复节点。
+     */
+    let nestedCandidate = script.nextElementSibling;
+    while (nestedCandidate?.tagName === "SPAN") {
+      nestedCandidate = nestedCandidate.firstElementChild;
+    }
+    if (
+      nestedCandidate?.tagName === script.tagName
+      && String(nestedCandidate.textContent || "").trim() === String(script.textContent || "").trim()
+    ) {
+      nestedCandidate.remove();
+    }
+  }
+}
+
 /**
  * 把纯文本转换为最低限度的安全语义 HTML；不会伪造图片或公式。
  *
@@ -42,6 +82,7 @@ export function analyzePaperHtmlStructure(sourceHtml) {
   const root = document.querySelector("main");
   if (!root) {
     return {
+      structureMetricVersion: paperStructureMetricVersion,
       imageCount: 0,
       uniqueImageCount: 0,
       tableCount: 0,
@@ -56,6 +97,7 @@ export function analyzePaperHtmlStructure(sourceHtml) {
       emptyFigureCount: 0,
     };
   }
+  removeAdjacentDuplicateScripts(root);
   /** citationSuperscripts 不属于数学公式，不纳入公式完整性门禁。 */
   const citationSuperscripts = Array.from(root.querySelectorAll("sup")).filter(
     (element) => element.querySelector("a"),
@@ -66,7 +108,7 @@ export function analyzePaperHtmlStructure(sourceHtml) {
     allSuperscripts.length - citationSuperscripts.length,
   );
   const semanticSubscriptCount = root.querySelectorAll("sub").length;
-  const latexCount = (html.match(latexPattern) || []).length;
+  const latexCount = (root.innerHTML.match(latexPattern) || []).length;
   const figureCaptions = root.querySelectorAll("figcaption").length;
   const figures = Array.from(root.querySelectorAll("figure"));
   const images = Array.from(root.querySelectorAll("img"));
@@ -86,11 +128,12 @@ export function analyzePaperHtmlStructure(sourceHtml) {
       (match) => match[1].toLowerCase()),
   );
   return {
+    structureMetricVersion: paperStructureMetricVersion,
     imageCount: images.length,
     uniqueImageCount: uniqueImageSources.size,
     tableCount: root.querySelectorAll("table").length,
     headingCount: root.querySelectorAll("h1,h2,h3,h4,h5,h6").length,
-    formulaCount: latexCount + semanticSubscriptCount + semanticSuperscriptCount,
+    formulaCount: latexCount,
     semanticSubscriptCount,
     semanticSuperscriptCount,
     declaredFigureCount: figureCaptions > 0 ? figureCaptions : declaredFigures.size,
@@ -156,18 +199,7 @@ export function normalizePaperTranslationHtml(translatedHtml) {
   const { document } = parseHTML(`<main>${String(translatedHtml || "")}</main>`);
   const root = document.querySelector("main");
   if (!root) return "";
-  for (const script of Array.from(root.querySelectorAll("sup, sub"))) {
-    let sibling = script.nextElementSibling;
-    while (
-      sibling
-      && sibling.tagName === script.tagName
-      && String(sibling.textContent || "").trim() === String(script.textContent || "").trim()
-    ) {
-      const duplicate = sibling;
-      sibling = sibling.nextElementSibling;
-      duplicate.remove();
-    }
-  }
+  removeAdjacentDuplicateScripts(root);
   for (const cell of Array.from(root.querySelectorAll("td, th"))) {
     for (const attributeName of ["colspan", "rowspan"]) {
       const value = Number(cell.getAttribute(attributeName));
@@ -216,7 +248,6 @@ export function validatePaperTranslationStructure(source, translatedHtml) {
   for (const [field, label] of [
     [expectedImageField, "图片"],
     ["tableCount", "表格"],
-    ["formulaCount", "公式结构"],
     ["semanticSubscriptCount", "下标结构"],
     ["semanticSuperscriptCount", "上标结构"],
   ]) {
@@ -225,6 +256,21 @@ export function validatePaperTranslationStructure(source, translatedHtml) {
     if (translatedCount < sourceCount) {
       missing.push(`${label} ${translatedCount}/${sourceCount}`);
     }
+  }
+  /**
+   * v1 曾把上下标重复计入 formulaCount。读取旧清单时先扣除单独统计的
+   * 上下标，避免同一个差异同时报告为“公式缺失”和“上下标缺失”。
+   */
+  const expectedFormulaCount = Number(expected.structureMetricVersion) >= separatedFormulaMetricVersion
+    ? Math.max(0, Number(expected.formulaCount) || 0)
+    : Math.max(
+      0,
+      (Number(expected.formulaCount) || 0)
+        - (Number(expected.semanticSubscriptCount) || 0)
+        - (Number(expected.semanticSuperscriptCount) || 0),
+    );
+  if (translation.formulaCount < expectedFormulaCount) {
+    missing.push(`公式结构 ${translation.formulaCount}/${expectedFormulaCount}`);
   }
   /*
    * declaredFigureCount 只用于诊断来源页是否可能漏抓正文图，不能拿来和

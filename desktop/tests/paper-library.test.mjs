@@ -205,6 +205,13 @@ test("每周候选经用户确认后进入论文库", async () => {
     assert.equal(dailyCandidates.length, 1);
     assert.equal(dailyCandidates[0].title, "A Neural Probabilistic Language Model");
     assert.equal(dailyCandidates[0].translationSource, "codex");
+    /** repeatedDailyCandidates 验证服务重复启动不会改写已经完成的翻译时间。 */
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const repeatedDailyCandidates = await paperServiceModule.ensureDailyClassicPaperCandidate(
+      new Date("2026-08-18T12:00:00+08:00"),
+    );
+    assert.equal(repeatedDailyCandidates[0].id, dailyCandidates[0].id);
+    assert.equal(repeatedDailyCandidates[0].translatedAt, dailyCandidates[0].translatedAt);
     /** dailyPaper 是用户确认后以“每日经典”来源进入论文库的记录。 */
     const dailyPaper = databaseModule.selectPaperCandidate(dailyCandidates[0].id);
     assert.equal(dailyPaper.sourceType, "classic");

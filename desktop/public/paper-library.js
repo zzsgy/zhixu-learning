@@ -151,21 +151,37 @@ export function createPaperLibrary({ request, notify, reload }) {
   $("paper-clear-selection").addEventListener("click", () => { state.selected.clear(); selection(); });
   $("paper-move-selected").addEventListener("click", () => move([...state.selected.values()]));
   const importSelect = folderSelect("未归档", ""); importSelect.id = "paper-import-folder";
-  $("paper-import-form").before(label("论文保存目录", importSelect));
+  const importDestination = label("论文保存目录", importSelect);
+  importDestination.className = "paper-import-destination";
+  $("paper-import-form").prepend(importDestination);
+  let importRequestSequence = 0;
+  let importDestinationReady = false;
   async function prepareImport(fromPapers) {
+    const sequence = ++importRequestSequence;
+    importDestinationReady = false;
     const desiredId = fromPapers && state.folder !== "unfiled" ? state.folder : "";
     const update = () => { const select = folderSelect("未归档", desiredId); const selectedId = select.value; importSelect.replaceChildren(...select.children); importSelect.value = selectedId; };
     update(); importSelect.disabled = true;
-    try { const payload = await request("/api/paper-folders"); state.folders = payload.folders; update(); }
-    catch (error) { notify(error.message); }
-    finally { importSelect.disabled = false; }
+    try {
+      const payload = await request("/api/paper-folders");
+      if (sequence !== importRequestSequence) return;
+      state.folders = payload.folders;
+      update();
+      importDestinationReady = true;
+      if (desiredId && importSelect.value !== desiredId) notify("原论文目录已不存在，请重新选择保存目录。");
+    }
+    catch (error) { if (sequence === importRequestSequence) notify(`论文目录加载失败：${error.message}。请重新进入导入页重试。`); }
+    finally { if (sequence === importRequestSequence) importSelect.disabled = !importDestinationReady; }
   }
   return {
     changed, decorate, prepareImport,
     query(source) { return new URLSearchParams({ page: String(state.page), folder: state.folder, q: $("paper-search").value, source, quality: $("paper-quality-filter").value, reading: $("paper-reading-filter").value, sort: $("paper-sort").value, descendants: $("paper-descendants").checked ? "1" : "0" }).toString(); },
     setData(data) { Object.assign(state, { folders: data.folders, papers: data.papers, page: data.page, total: data.total, libraryTotal: data.libraryTotal, unfiledCount: data.unfiledCount }); render(); },
     async recoverFolder() { const result = await request("/api/paper-folders"); if (state.folder && state.folder !== "unfiled" && !result.folders.some(f => f.id === state.folder)) { state.folder = ""; changed(); return true; } return false; },
-    importFolderId() { return importSelect.value; },
+    importFolderId() {
+      if (!importDestinationReady) throw new Error("论文保存目录尚未加载完成，请稍后重试；加载失败时请重新进入导入页。");
+      return importSelect.value;
+    },
     libraryTotal() { return state.libraryTotal; },
   };
 }

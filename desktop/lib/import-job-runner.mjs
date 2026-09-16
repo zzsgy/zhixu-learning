@@ -6,10 +6,13 @@
 import {
   claimNextImportJob,
   completeImportJob,
+  deferImportJob,
   failImportJob,
+  getNextImportJobAttemptAt,
   resetInterruptedImportJobs,
   updateImportJobProgress,
 } from "./database.mjs";
+import { getImportRetryDelay, isTransientImportError } from "./import-retry.mjs";
 
 /**
  * 创建顺序执行、可重复唤醒的本地导入任务执行器。
@@ -22,13 +25,32 @@ export function createImportJobRunner(options = {}) {
   const handlers = new Map(
     Object.entries(options.handlers || {}).filter(([, handler]) => typeof handler === "function"),
   );
+  const calculateRetryDelay = typeof options.getRetryDelay === "function"
+    ? options.getRetryDelay
+    : getImportRetryDelay;
   /** state 保存执行器单实例运行状态。 */
   const state = {
     active: false,
     started: false,
     currentJobId: "",
     lastError: "",
+    retryTimer: null,
+    nextWakeAt: null,
   };
+
+  function scheduleNextWake() {
+    if (state.retryTimer) clearTimeout(state.retryTimer);
+    state.retryTimer = null;
+    state.nextWakeAt = getNextImportJobAttemptAt([...handlers.keys()]);
+    if (!state.started || !state.nextWakeAt) return;
+    const delay = Math.max(0, Math.min(Date.parse(state.nextWakeAt) - Date.now(), 2_147_000_000));
+    state.retryTimer = setTimeout(() => {
+      state.retryTimer = null;
+      state.nextWakeAt = null;
+      void drainQueue();
+    }, delay);
+    state.retryTimer.unref?.();
+  }
 
   /**
    * 顺序领取并处理任务，避免重任务抢占本机资源。
@@ -36,7 +58,7 @@ export function createImportJobRunner(options = {}) {
    * @returns {Promise<void>}
    */
   async function drainQueue() {
-    if (state.active || handlers.size === 0) return;
+    if (!state.started || state.active || handlers.size === 0) return;
     state.active = true;
     try {
       while (true) {
@@ -56,15 +78,23 @@ export function createImportJobRunner(options = {}) {
           completeImportJob(job.id, result || {});
           state.lastError = "";
         } catch (error) {
-          failImportJob(job.id, error);
           state.lastError = error instanceof Error ? error.message : String(error || "导入失败。");
-          console.error(`后台导入任务 ${job.id} 失败：${state.lastError}`);
+          const maxAttempts = Math.min(Math.max(Number(error?.maxAttempts) || 5, 2), 8);
+          if (isTransientImportError(error) && job.retryCount < maxAttempts - 1) {
+            const delay = calculateRetryDelay(error, job.attemptCount);
+            const deferred = deferImportJob(job.id, error, delay);
+            console.warn(`后台导入任务 ${job.id} 暂时失败：${state.lastError}；将在 ${deferred?.nextAttemptAt || "稍后"} 自动重试。`);
+          } else {
+            failImportJob(job.id, error);
+            console.error(`后台导入任务 ${job.id} 失败：${state.lastError}`);
+          }
         } finally {
           state.currentJobId = "";
         }
       }
     } finally {
       state.active = false;
+      scheduleNextWake();
     }
   }
 
@@ -89,7 +119,18 @@ export function createImportJobRunner(options = {}) {
      * @returns {void}
      */
     trigger() {
+      if (state.retryTimer) clearTimeout(state.retryTimer);
+      state.retryTimer = null;
+      state.nextWakeAt = null;
       queueMicrotask(() => void drainQueue());
+    },
+
+    /** 停止未来唤醒计时器；运行中的处理器会自然结束。 */
+    stop() {
+      state.started = false;
+      if (state.retryTimer) clearTimeout(state.retryTimer);
+      state.retryTimer = null;
+      state.nextWakeAt = null;
     },
 
     /**
@@ -101,6 +142,7 @@ export function createImportJobRunner(options = {}) {
       return {
         status: state.active ? "running" : "idle",
         currentJobId: state.currentJobId || null,
+        nextWakeAt: state.nextWakeAt,
         supportedJobTypes: [...handlers.keys()],
         lastError: state.lastError,
       };

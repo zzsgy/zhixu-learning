@@ -11,9 +11,11 @@
     <script src="/theme-init.js?v=20260818-2"></script>
     <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
     <link rel="stylesheet" href="/vendor/lxgw-wenkai/lxgwwenkai-regular.css" />
-    <link rel="stylesheet" href="/styles.css?v=20260910-1" />
+    <link rel="stylesheet" href="/styles.css?v=20260916-reading-6" />
     <link rel="stylesheet" href="/paper-library.css" />
     <link rel="stylesheet" href="/storage-dashboard.css" />
+    <link rel="stylesheet" href="/reading-notes.css" />
+    <link rel="stylesheet" href="/notes-center.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -32,6 +34,9 @@
           </button>
           <button class="nav-item" data-view="papers" type="button">
             <span>PAPERS</span><strong>论文库</strong>
+          </button>
+          <button class="nav-item" data-view="notes" type="button">
+            <span>NOTES</span><strong>笔记</strong>
           </button>
           <button class="nav-item" data-view="topics" type="button" hidden>
             <span>TOPICS</span><strong>专题</strong>
@@ -397,6 +402,180 @@
           </div>
         </section>
 
+        <section class="view" id="notes-view">
+          <div class="notes-hero">
+            <div>
+              <p class="eyebrow">PERSONAL NOTES</p>
+              <h2>阅读时写下的内容，在这里沉淀成线索。</h2>
+              <p>集中查看文档、网页文章和论文的伴读笔记；整理结果独立保存，不改写原文。</p>
+            </div>
+            <div class="notes-hero-actions">
+              <button class="primary-button" id="notes-create" type="button">＋ 新建笔记</button>
+              <button class="secondary-button" id="notes-organize-now" type="button">立即整理新笔记</button>
+            </div>
+          </div>
+
+          <div class="notes-summary" aria-label="笔记概况">
+            <article><span>全部笔记</span><strong id="notes-total">0</strong><small>有内容的资料</small></article>
+            <article><span>等待整理</span><strong id="notes-pending">0</strong><small>新增或有修改</small></article>
+            <article><span>最近记录</span><strong id="notes-latest">—</strong><small>笔记更新时间</small></article>
+            <article><span>最近整理</span><strong id="notes-organized">尚未整理</strong><small>本地派生摘要</small></article>
+          </div>
+
+          <div class="notes-layout">
+            <section class="notes-library-panel" aria-labelledby="notes-library-heading">
+              <header class="notes-panel-heading">
+                <div><span>NOTE LIBRARY</span><h3 id="notes-library-heading">我的全部笔记</h3></div>
+                <small id="notes-result-status" aria-live="polite">正在读取…</small>
+              </header>
+              <div class="notes-toolbar">
+                <label class="notes-search" for="notes-search">
+                  <span>搜索笔记</span>
+                  <input id="notes-search" type="search" placeholder="搜索标题、分类或笔记内容" autocomplete="off" />
+                </label>
+                <label for="notes-type-filter">
+                  <span>笔记类型</span>
+                  <select id="notes-type-filter">
+                    <option value="">全部类型</option>
+                    <optgroup label="独立笔记">
+                      <option value="markdown">Markdown</option>
+                      <option value="text">TXT 纯文本</option>
+                      <option value="word">Word</option>
+                    </optgroup>
+                    <optgroup label="阅读笔记">
+                    <option value="document">文档</option>
+                    <option value="article">网页文章</option>
+                    <option value="paper">论文</option>
+                    </optgroup>
+                  </select>
+                </label>
+              </div>
+              <div class="notes-list" id="notes-list"></div>
+              <div class="notes-empty" id="notes-empty" hidden>
+                <span>NOTE</span><h3>还没有笔记</h3>
+                <p>新建 Markdown、TXT 或 Word 笔记，也可以在阅读资料时随手记录。</p>
+              </div>
+            </section>
+
+            <aside class="notes-organizer-panel" aria-labelledby="notes-organizer-heading">
+              <header class="notes-panel-heading">
+                <div><span>LOCAL ORGANIZER</span><h3 id="notes-organizer-heading">定时整理</h3></div>
+                <span class="notes-local-badge">仅本机</span>
+              </header>
+              <form class="notes-schedule-form" id="notes-schedule-form">
+                <label class="notes-schedule-switch"><input id="notes-schedule-enabled" type="checkbox" checked /><span><strong>自动整理新笔记</strong><small>到期时只处理上次整理后新增或修改的内容</small></span></label>
+                <div class="notes-schedule-fields">
+                  <label for="notes-schedule-frequency"><span>频率</span><select id="notes-schedule-frequency"><option value="weekly">每周</option><option value="daily">每天</option></select></label>
+                  <label id="notes-schedule-weekday-field" for="notes-schedule-weekday"><span>星期</span><select id="notes-schedule-weekday"><option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="0">周日</option></select></label>
+                  <label for="notes-schedule-time"><span>时间</span><input id="notes-schedule-time" type="time" value="21:00" /></label>
+                </div>
+                <p class="notes-next-run" id="notes-next-run">正在读取下次整理时间…</p>
+                <button class="secondary-button" type="submit">保存整理计划</button>
+              </form>
+              <p class="notes-privacy">当前使用本地规则按主题、重点、疑问和下一步行动归纳，不上传笔记，也不修改原始内容。</p>
+
+              <div class="notes-digest-section">
+                <div class="notes-digest-title"><strong>整理记录</strong><small id="notes-digest-count">0 份</small></div>
+                <div class="notes-digests" id="notes-digests"></div>
+              </div>
+            </aside>
+          </div>
+
+          <div class="notes-overlay" id="notes-type-dialog" hidden>
+            <section class="notes-type-dialog" role="dialog" aria-modal="true" aria-labelledby="notes-type-title">
+              <header><div><span>NEW NOTE</span><h3 id="notes-type-title">选择笔记形式</h3><p>三种笔记保存在同一本地库中，都能搜索、编辑和定时整理。</p></div><button class="notes-icon-button" id="notes-type-close" type="button" aria-label="关闭">×</button></header>
+              <div class="notes-type-grid">
+                <button type="button" data-create-note="markdown"><span class="notes-type-icon">MD</span><strong>Markdown</strong><small>结构化写作、代码与技术记录，支持实时预览。</small></button>
+                <button type="button" data-create-note="text"><span class="notes-type-icon">TXT</span><strong>纯文本</strong><small>最轻量的快速记录，没有多余格式。</small></button>
+                <button type="button" data-create-note="word"><span class="notes-type-icon">W</span><strong>Word 笔记</strong><small>所见即所得排版，可导出真正的 .docx。</small></button>
+              </div>
+            </section>
+          </div>
+
+          <div class="notes-overlay notes-reader-overlay" id="notes-reader" hidden>
+            <section class="notes-reader-shell" role="dialog" aria-modal="true" aria-labelledby="notes-reader-title">
+              <header class="notes-reader-header">
+                <div class="notes-reader-identity">
+                  <button class="notes-icon-button" id="notes-reader-close" type="button" aria-label="返回笔记列表">←</button>
+                  <span class="notes-editor-type" id="notes-reader-type">Markdown</span>
+                  <span class="notes-reader-mode">只读预览</span>
+                </div>
+                <div class="notes-reader-actions">
+                  <button class="secondary-button" id="notes-reader-export" type="button">导出</button>
+                  <button class="primary-button" id="notes-reader-open" type="button">编辑这条笔记</button>
+                </div>
+              </header>
+              <main class="notes-reader-stage">
+                <article class="notes-reader-paper">
+                  <div class="notes-reader-meta" id="notes-reader-meta">独立笔记</div>
+                  <h1 id="notes-reader-title">未命名笔记</h1>
+                  <div class="notes-reader-rule" aria-hidden="true"><span></span></div>
+                  <div class="notes-reader-content" id="notes-reader-content"></div>
+                  <footer>知序笔记 · 只读预览</footer>
+                </article>
+              </main>
+            </section>
+          </div>
+
+          <div class="notes-overlay notes-editor-overlay" id="notes-editor" hidden>
+            <section class="notes-editor-shell" role="dialog" aria-modal="true" aria-labelledby="notes-editor-title-label">
+              <header class="notes-editor-header">
+                <div class="notes-editor-identity"><button class="notes-icon-button" id="notes-editor-close" type="button" aria-label="返回笔记库">←</button><span class="notes-editor-type" id="notes-editor-type">Markdown</span><span class="notes-save-status" id="notes-save-status" aria-live="polite">已保存</span></div>
+                <div class="notes-editor-actions"><button class="secondary-button" id="notes-export" type="button">导出</button><button class="primary-button" id="notes-save" type="button">保存</button><button class="notes-danger-button" id="notes-delete" type="button">删除</button></div>
+              </header>
+              <div class="notes-title-row"><label id="notes-editor-title-label" for="notes-editor-title">标题</label><input id="notes-editor-title" maxlength="240" autocomplete="off" /></div>
+              <main class="notes-editor-body">
+                <section class="notes-plain-workspace" id="notes-plain-workspace" hidden>
+                  <div class="notes-markdown-toolbar" id="notes-markdown-toolbar" role="toolbar" aria-label="Markdown 格式" hidden>
+                    <span class="notes-markdown-toolbar-label">Markdown</span>
+                    <button type="button" data-markdown-action="heading" title="当前行设为标题"><strong>H</strong> 标题</button>
+                    <button type="button" data-markdown-action="bold" title="加粗选中文字或接下来输入的文字"><strong>B</strong> 加粗</button>
+                    <button type="button" data-markdown-action="italic" title="斜体选中文字或接下来输入的文字"><em>I</em> 斜体</button>
+                    <button type="button" data-markdown-action="bullet" title="当前行或选中多行添加项目符号">• 项目符号</button>
+                    <button type="button" data-markdown-action="ordered" title="当前行或选中多行添加编号">1. 编号</button>
+                    <button type="button" data-markdown-action="quote" title="当前行或选中多行设为引用">❝ 引用</button>
+                    <button type="button" data-markdown-action="inline-code" title="插入行内代码"><code>&lt;/&gt;</code> 行内代码</button>
+                    <button type="button" data-markdown-action="code-block" title="插入多行代码块"><code>{ }</code> 代码块</button>
+                    <button type="button" data-markdown-action="link" title="插入链接">↗ 链接</button>
+                  </div>
+                  <label for="notes-plain-editor">正文</label><textarea id="notes-plain-editor" spellcheck="true"></textarea>
+                  <section class="notes-markdown-preview" id="notes-markdown-preview" aria-label="Markdown 预览"></section>
+                </section>
+                <section class="notes-word-workspace" id="notes-word-workspace" hidden>
+                  <div class="notes-format-toolbar" aria-label="文字格式">
+                    <span class="notes-format-group" role="group" aria-label="段落样式">
+                      <button type="button" data-rich-command="formatBlock" data-rich-value="p">正文</button>
+                      <button type="button" data-rich-command="formatBlock" data-rich-value="h2">标题</button>
+                      <button type="button" data-rich-command="formatBlock" data-rich-value="h3">小标题</button>
+                    </span>
+                    <span class="notes-format-group" role="group" aria-label="文字样式">
+                      <button type="button" data-rich-command="bold" aria-label="加粗" title="加粗"><strong>B</strong></button>
+                      <button type="button" data-rich-command="italic" aria-label="斜体" title="斜体"><em>I</em></button>
+                      <button type="button" data-rich-command="underline" aria-label="下划线" title="下划线"><u>U</u></button>
+                    </span>
+                    <span class="notes-format-group" role="group" aria-label="段落对齐">
+                      <button type="button" data-rich-command="justifyLeft">左对齐</button>
+                      <button type="button" data-rich-command="justifyCenter">居中</button>
+                      <button type="button" data-rich-command="justifyRight">右对齐</button>
+                      <button type="button" data-rich-command="justifyFull">两端</button>
+                    </span>
+                    <span class="notes-format-group" role="group" aria-label="缩进">
+                      <button type="button" data-rich-command="outdent" aria-label="减少缩进" title="减少缩进">← 缩进</button>
+                      <button type="button" data-rich-command="indent" aria-label="增加缩进" title="增加缩进">缩进 →</button>
+                    </span>
+                    <span class="notes-format-group" role="group" aria-label="列表和引用">
+                      <button type="button" data-rich-command="insertUnorderedList">• 项目符号</button>
+                      <button type="button" data-rich-command="insertOrderedList">1. 编号</button>
+                      <button type="button" data-rich-command="formatBlock" data-rich-value="blockquote">引用</button>
+                    </span>
+                  </div>
+                  <div class="notes-rich-editor" id="notes-rich-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="从这里开始写 Word 笔记…"></div>
+                </section>
+              </main>
+            </section>
+          </div>
+        </section>
+
         <section class="view is-active" id="activity-view">
           <div class="activity-hero">
             <div>
@@ -728,6 +907,7 @@
             <button class="back-button" id="reader-back-button" type="button">
               ← 返回文档库
             </button>
+            <p class="reader-document-name" id="reader-document-name"></p>
             <div class="reader-header-actions">
               <div class="reader-mode-switch" id="reader-mode-switch" hidden>
                 <span class="is-active" aria-current="page">HTML 阅读</span>
@@ -950,12 +1130,13 @@
                   <strong>知序经典</strong><small>原有布局</small>
                 </button>
                 <button data-reading-theme="immersive" type="button" role="radio" aria-checked="false">
-                  <strong>沉浸夜读</strong><small>霞鹜文楷</small>
+                  <strong>沉浸阅读</strong><small>文楷 · 宽幅</small>
                 </button>
                 <button data-reading-theme="paper" type="button" role="radio" aria-checked="false">
-                  <strong>柔和纸张</strong><small>暖白文楷</small>
+                  <strong>纸感阅读</strong><small>文楷 · 暖调</small>
                 </button>
               </div>
+              <p class="reading-theme-hint">三种样式均跟随左下角的深浅色模式；切换明暗不会更换阅读样式。</p>
             </fieldset>
             <div class="reading-font-control" aria-label="阅读正文字号">
               <span>正文字号</span>
@@ -1006,11 +1187,15 @@
 
           <section class="reading-tool-section reading-notes-section">
             <header><span>03</span><h3>我的笔记</h3></header>
-            <textarea
+            <div
+              class="reading-note-editor"
               id="reading-note-input"
-              rows="9"
-              placeholder="记录理解、疑问、结论或下一步行动……"
-            ></textarea>
+              contenteditable="true"
+              role="textbox"
+              aria-multiline="true"
+              spellcheck="true"
+              data-placeholder="记录理解、疑问、结论或下一步行动……"
+            ></div>
             <small id="reading-note-status">自动保存到本地</small>
           </section>
           </div>
@@ -1158,6 +1343,6 @@
         <div class="toast" id="toast" hidden role="status"></div>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260910-1"></script>
+    <script type="module" src="/app.js?v=20260916-reading-6"></script>
   </body>
 </html>

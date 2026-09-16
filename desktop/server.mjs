@@ -12,6 +12,7 @@ import { parseHTML } from "linkedom";
 import { normalizePaperReadingLayout } from "./public/paper-layout.js";
 import { parsePaperAssetUrl } from "./public/paper-assets.js";
 import { resolvePaperAsset } from "./lib/paper-assets.mjs";
+import { createPdfFigureRegions } from "./lib/pdf-reading-layout.mjs";
 import {
   articleImageDirectory,
   attachmentDirectory,
@@ -65,6 +66,8 @@ import {
   getImportJob,
   getGitHubProject,
   getReadingWorkspace,
+  getNoteLibrarySummary,
+  getNoteOrganizationSettings,
   getContentOrganization,
   insertDocument,
   ensureFolderPath,
@@ -84,6 +87,8 @@ import {
   listPendingFullPaperTranslations,
   listPendingArticleTranslations,
   listPapers,
+  listAllNotes,
+  listNoteDigests,
   listContentTags,
   listTags,
   listTopicItems,
@@ -115,6 +120,8 @@ import {
   updateReadingAnnotation,
   updateReadingSession,
   updateReadingState,
+  updateNoteOrganizationSettings,
+  createNoteDigest,
   upsertGitHubProject,
   removeContentTag,
   removeTopicItem,
@@ -137,6 +144,10 @@ import {
   extractWordHtml,
   isPdfTextLayerCorrupted,
 } from "./lib/extractor.mjs";
+import {
+  createPdfPageFacsimileRegion,
+  shouldUsePdfPageFacsimile,
+} from "./lib/pdf-page-presentation.mjs";
 import {
   detectArticleLanguage,
   fetchPublicImage,
@@ -179,6 +190,18 @@ import { createFileDeletionRunner } from "./lib/file-deletion-runner.mjs";
 import {
   listPendingFileDeletions, completePendingFileDeletion, failPendingFileDeletion, isPendingFileStillReferenced,
 } from "./lib/database.mjs";
+import { calculateNextNoteRun, createLocalNoteDigest } from "./lib/note-organizer.mjs";
+import { createActivityDashboardRouteHandler } from "./lib/http/routes/activity-dashboard-routes.mjs";
+import { createAiHistoryRouteHandler } from "./lib/http/routes/ai-history-routes.mjs";
+import { createAiQuestionRouteHandler } from "./lib/http/routes/ai-question-routes.mjs";
+import { createContentOrganizationRouteHandler } from "./lib/http/routes/content-organization-routes.mjs";
+import { createGitHubProjectRouteHandler } from "./lib/http/routes/github-project-routes.mjs";
+import { createImportJobRouteHandler } from "./lib/http/routes/import-job-routes.mjs";
+import { createKnowledgeCardRouteHandler } from "./lib/http/routes/knowledge-card-routes.mjs";
+import { createKnowledgeSearchRouteHandler } from "./lib/http/routes/knowledge-search-routes.mjs";
+import { createNoteRouteHandler } from "./lib/http/routes/note-routes.mjs";
+import { createReadingRouteHandler } from "./lib/http/routes/reading-routes.mjs";
+import { createTopicRouteHandler } from "./lib/http/routes/topic-routes.mjs";
 import {
   getOcrEngineStatus,
   isOcrSupportedExtension,
@@ -247,88 +270,6 @@ const browserPairingCodeLifetimeMilliseconds = 10 * 60 * 1000;
 const browserPairingCodes = new Map();
 /** pdfReadingTextCache 缓存少量 PDF 的逐页文字标记，避免每次打开都重新解析整本文件。 */
 const pdfReadingTextCache = new Map();
-/**
- * 合并文字坐标与内嵌插图，生成可复制的复杂页双栏结构。
- *
- * @param {Record<string, Record<string, unknown>>} pageLayouts PDF.js 页级版面特征。
- * @param {Record<string, Array<Record<string, unknown>>>} figuresByPage 内嵌图片列表。
- * @returns {Record<string, Record<string, unknown>>} 需要结构化显示的页面。
- */
-function createPdfFigureRegions(layout) {
-  const pageWidth = Number(layout?.pageWidth) || 0;
-  const pageHeight = Number(layout?.pageHeight) || 0;
-  if (pageWidth < 100 || pageHeight < 100) return [];
-  const regions = [];
-  for (const columnName of ["left", "right"]) {
-    const captions = (layout.structuredText?.columns?.[columnName] || [])
-      .filter((line) => /^图\s*\d+(?:\.\d+)?/.test(String(line.text || "")))
-      .sort((left, right) => Number(right.y) - Number(left.y));
-    captions.forEach((caption, captionIndex) => {
-      const previousCaption = captions[captionIndex - 1];
-      const defaultTopUserCoordinate = captionIndex === 0
-        ? pageHeight * 0.948
-        : Number(previousCaption.y) - Math.max(18, Number(previousCaption.fontSize) * 2.6);
-      const bottomUserCoordinate = Number(caption.y) - Math.max(14, Number(caption.fontSize) * 2.2);
-      const numericLabels = ["left", "right"].flatMap((candidateColumn) => (
-        (layout.structuredText?.columns?.[candidateColumn] || [])
-          .filter((line) => (
-            /^(?:\d{1,2}(?:\s+|$)){1,12}$/.test(String(line.text || "").trim())
-            && Number(line.y) > Number(caption.y) + 10
-            && Number(line.y) < defaultTopUserCoordinate
-          ))
-          .map((line) => ({ ...line, column: candidateColumn }))
-      ));
-      const labelColumns = new Set(numericLabels.map((line) => line.column));
-      const spansBothColumns = labelColumns.size > 1;
-      const figureTextColumns = spansBothColumns ? ["left", "right"] : [columnName];
-      const maximumFigureTextSize = Math.max(8, Number(caption.fontSize) * 1.25);
-      const nearbyFigureLines = figureTextColumns
-        .flatMap((candidateColumn) => layout.structuredText?.columns?.[candidateColumn] || [])
-        .filter((line) => (
-          Number(line.y) > Number(caption.y) + 8
-          && Number(line.y) < defaultTopUserCoordinate
-        ))
-        .sort((left, right) => Number(left.y) - Number(right.y));
-      const includedFigureLines = [];
-      for (const line of nearbyFigureLines) {
-        const text = String(line.text || "").trim();
-        const isNumericLabel = /^(?:\d{1,2}(?:\s+|$)){1,12}$/.test(text);
-        const isNumberedLegend = /^\d{1,2}[.、)]\s*\S/.test(text);
-        const isSmallFigureText = Number(line.fontSize) <= maximumFigureTextSize;
-        if (!isNumericLabel && !isNumberedLegend && !isSmallFigureText) break;
-        includedFigureLines.push(line);
-      }
-      const nearestNonFigureLine = nearbyFigureLines[includedFigureLines.length];
-      const detectedFigureTop = includedFigureLines.length > 0
-        ? Math.max(...includedFigureLines.map((line) => Number(line.y)))
-          + Math.max(16, pageHeight * 0.035)
-        : (numericLabels.length > 0
-          ? Math.max(...numericLabels.map((line) => Number(line.y))) + pageHeight * 0.06
-          : (nearestNonFigureLine
-            ? Number(nearestNonFigureLine.y)
-              - Math.max(12, Number(nearestNonFigureLine.fontSize) * 1.5)
-            : defaultTopUserCoordinate));
-      const topUserCoordinate = Math.min(defaultTopUserCoordinate, detectedFigureTop);
-      const x = spansBothColumns
-        ? pageWidth * 0.065
-        : (columnName === "left" ? pageWidth * 0.065 : pageWidth * 0.5);
-      const width = pageWidth * (spansBothColumns ? 0.87 : 0.435);
-      const height = topUserCoordinate - bottomUserCoordinate;
-      if (height < 45) return;
-      regions.push({
-        regionIndex: regions.length,
-        column: spansBothColumns ? "both" : columnName,
-        caption: String(caption.text || "").replace(/\s+/g, " ").trim(),
-        x: Number(x.toFixed(2)),
-        y: Number((pageHeight - topUserCoordinate).toFixed(2)),
-        width: Number(width.toFixed(2)),
-        height: Number(height.toFixed(2)),
-      });
-    });
-  }
-  return regions;
-}
-
 function createPdfStructuredPages(pageLayouts, figuresByPage) {
   const structuredPages = {};
   for (const [pageNumber, layout] of Object.entries(pageLayouts || {})) {
@@ -343,20 +284,25 @@ function createPdfStructuredPages(pageLayouts, figuresByPage) {
     }
     const figureRegions = createPdfFigureRegions(layout);
     if (figureRegions.length > 0) reasons.push("figure-regions");
+    const useFacsimile = shouldUsePdfPageFacsimile(layout, figures, figureRegions);
+    if (useFacsimile) reasons.push("low-confidence-facsimile");
     if (reasons.length === 0) continue;
     const leftCaptionCount = (layout.structuredText?.columns?.left || [])
       .filter((line) => /^图\s*\d+(?:\.\d+)?/.test(String(line.text || ""))).length;
     const rightCaptionCount = (layout.structuredText?.columns?.right || [])
       .filter((line) => /^图\s*\d+(?:\.\d+)?/.test(String(line.text || ""))).length;
     structuredPages[pageNumber] = {
+      presentationMode: useFacsimile ? "facsimile" : "reflow",
       reasons,
+      multiColumn: Boolean(layout.multiColumn),
       pageWidth: Number(layout.pageWidth) || 0,
       pageHeight: Number(layout.pageHeight) || 0,
       header: layout.structuredText?.header || [],
+      body: layout.structuredText?.body || [],
       columns: layout.structuredText?.columns || { left: [], right: [] },
       footer: layout.structuredText?.footer || [],
-      figureRegions,
-      figures: figures.map((figure, figureIndex) => ({
+      figureRegions: useFacsimile ? createPdfPageFacsimileRegion(layout) : figureRegions,
+      figures: useFacsimile ? [] : figures.map((figure, figureIndex) => ({
         ...figure,
         column: leftCaptionCount + rightCaptionCount >= figures.length
           ? (figureIndex < leftCaptionCount ? "left" : "right")
@@ -847,6 +793,16 @@ function sanitizeFileName(rawName) {
   return baseName.slice(0, 240) || "未命名文档";
 }
 
+/** 生成服务端导出文件名；这里接收的是标题而不是 URL 编码请求头。 */
+function createExportFileName(title, extension) {
+  const base = String(title || "知序笔记")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
+    .replace(/[. ]+$/g, "")
+    .trim()
+    .slice(0, 180) || "知序笔记";
+  return `${base}.${extension}`;
+}
+
 /**
  * 将文件夹选择器提供的相对文件路径转换为安全的知识库目录层级。
  * 最后一段是文件名，因此只返回其父目录；普通文件上传返回空数组。
@@ -1105,6 +1061,113 @@ async function generateChinesePaperPdf(paper) {
   }
 }
 
+/** 笔记路由使用现有 HTTP 帮助函数，保持旧 API 契约不变。 */
+const handleNoteRoute = createNoteRouteHandler({
+  createExportFileName,
+  ensureNoteOrganizationSchedule,
+  readRequestBuffer,
+  runNoteOrganization,
+  sendJson,
+});
+
+/** 项目研读与统计首页沿用统一 HTTP 帮助函数，业务依赖由各自模块封装。 */
+const handleGitHubProjectRoute = createGitHubProjectRouteHandler({
+  analyzeRepository: analyzeGitHubRepository,
+  config: serverConfig,
+  createBackup: createDailyBackup,
+  getProject: getGitHubProject,
+  listProjects: listGitHubProjects,
+  readRequestBuffer,
+  saveProject: upsertGitHubProject,
+  sendJson,
+});
+const handleActivityDashboardRoute = createActivityDashboardRouteHandler({
+  getDashboard: getActivityDashboard,
+  sendJson,
+});
+const handleReadingRoute = createReadingRouteHandler({
+  createAnnotation: createReadingAnnotation,
+  createBackup: createDailyBackup,
+  deleteAnnotation: deleteReadingAnnotation,
+  getWorkspace: getReadingWorkspace,
+  readRequestBuffer,
+  sendJson,
+  startSession: startReadingSession,
+  updateAnnotation: updateReadingAnnotation,
+  updateSession: updateReadingSession,
+  updateState: updateReadingState,
+});
+const handleContentOrganizationRoute = createContentOrganizationRouteHandler({
+  addTag: addContentTag,
+  assignContent: assignContentToFolder,
+  assignContents: assignContentsToFolder,
+  createBackup: createDailyBackup,
+  createFolder,
+  deleteFolder: deleteEmptyFolder,
+  getOrganization: getContentOrganization,
+  listFolders,
+  listTags,
+  moveFolder,
+  readRequestBuffer,
+  removeTag: removeContentTag,
+  renameFolder,
+  sendJson,
+});
+const handleTopicRoute = createTopicRouteHandler({
+  addItem: addTopicItem,
+  createBackup: createDailyBackup,
+  createTopic,
+  listItems: listTopicItems,
+  listTopics,
+  readRequestBuffer,
+  removeItem: removeTopicItem,
+  sendJson,
+});
+const handleKnowledgeCardRoute = createKnowledgeCardRouteHandler({
+  createBackup: createDailyBackup,
+  createCard: createKnowledgeCard,
+  deleteCard: deleteKnowledgeCard,
+  listCards: listKnowledgeCards,
+  readRequestBuffer,
+  reviewCard: reviewKnowledgeCard,
+  sendJson,
+});
+const handleKnowledgeSearchRoute = createKnowledgeSearchRouteHandler({
+  searchPage: searchKnowledgeBasePage,
+  sendJson,
+});
+const handleAiHistoryRoute = createAiHistoryRouteHandler({
+  getConversation: getAiConversation,
+  listConversations: listAiConversations,
+  sendJson,
+});
+const handleAiQuestionRoute = createAiQuestionRouteHandler({
+  answerQuestion: answerFromSources,
+  config: serverConfig,
+  createBackup: createDailyBackup,
+  getArticle: getArticleById,
+  getConversation: getAiConversation,
+  getDocument: getDocumentById,
+  getPaper: getPaperById,
+  listArticles,
+  listDocuments,
+  listPapers,
+  readRequestBuffer,
+  saveExchange: saveAiExchange,
+  sendJson,
+});
+const handleImportJobRoute = createImportJobRouteHandler({
+  attachLocations: attachImportJobLocations,
+  confirmVideoJob: confirmVideoImportJob,
+  getJob: getImportJob,
+  getRunnerStatus: () => importJobRunner.getStatus(),
+  listJobs: listImportJobs,
+  readRequestBuffer,
+  retryJob: retryImportJob,
+  sendJson,
+  triggerRunner: () => importJobRunner.trigger(),
+});
+
 async function handleApiRequest(request, response, url) {
   if (request.method === "GET" && url.pathname === "/api/storage/cleanup") {
     const pending = listPendingFileDeletions();
@@ -1143,98 +1206,9 @@ async function handleApiRequest(request, response, url) {
     return true;
   }
 
-  if (request.method === "GET" && url.pathname === "/api/github-projects") {
-    sendJson(response, 200, { projects: listGitHubProjects(null) });
-    return true;
-  }
+  if (await handleGitHubProjectRoute(request, response, url)) return true;
 
-  if (request.method === "POST" && url.pathname === "/api/github-projects/analyze") {
-    const requestBuffer = await readRequestBuffer(request, 64 * 1024);
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    const projectSnapshot = await analyzeGitHubRepository(String(payload.url || ""), {
-      githubToken: serverConfig.githubToken,
-      deepSeekApiKey: serverConfig.deepSeekApiKey,
-      deepSeekModel: serverConfig.deepSeekModel,
-    });
-    createDailyBackup();
-    const project = upsertGitHubProject(projectSnapshot);
-    sendJson(response, 201, { project });
-    return true;
-  }
-
-  const githubProjectMatch = url.pathname.match(/^\/api\/github-projects\/([^/]+)$/);
-  if (request.method === "GET" && githubProjectMatch) {
-    const project = getGitHubProject(decodeURIComponent(githubProjectMatch[1]));
-    if (!project) {
-      sendJson(response, 404, { message: "找不到这份 GitHub 项目分析。" });
-      return true;
-    }
-    sendJson(response, 200, { project });
-    return true;
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/import-jobs") {
-    /** jobs 是前端任务中心最近的后台导入记录。 */
-    const jobs = attachImportJobLocations(listImportJobs({
-      status: url.searchParams.get("status") || "",
-      jobType: url.searchParams.get("jobType") || "",
-      limit: Number(url.searchParams.get("limit")) || 30,
-    }));
-    sendJson(response, 200, { jobs, runner: importJobRunner.getStatus() });
-    return true;
-  }
-
-  /** importJobMatch 匹配单个任务状态或重试接口。 */
-  const importJobMatch = url.pathname.match(/^\/api\/import-jobs\/([^/]+)$/);
-  if (request.method === "GET" && importJobMatch) {
-    /** job 是指定 ID 的后台导入任务。 */
-    const job = attachImportJobLocations([
-      getImportJob(decodeURIComponent(importJobMatch[1])),
-    ].filter(Boolean))[0];
-    if (!job) {
-      sendJson(response, 404, { message: "找不到这项导入任务。" });
-      return true;
-    }
-    sendJson(response, 200, { job });
-    return true;
-  }
-
-  /** importJobRetryMatch 匹配失败任务重新排队地址。 */
-  const importJobRetryMatch = url.pathname.match(/^\/api\/import-jobs\/([^/]+)\/retry$/);
-  if (request.method === "POST" && importJobRetryMatch) {
-    /** job 是重新进入队列的失败任务。 */
-    const job = retryImportJob(decodeURIComponent(importJobRetryMatch[1]));
-    if (!job) {
-      sendJson(response, 409, { message: "只有失败的导入任务可以重试。" });
-      return true;
-    }
-    importJobRunner.trigger();
-    sendJson(response, 202, { job });
-    return true;
-  }
-
-  /** importJobConfirmMatch 匹配无字幕视频的用户确认入口。 */
-  const importJobConfirmMatch = url.pathname.match(/^\/api\/import-jobs\/([^/]+)\/confirm$/);
-  if (request.method === "POST" && importJobConfirmMatch) {
-    const requestBuffer = await readRequestBuffer(request, 16 * 1024);
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    if (!["save_link", "generate_study_pdf"].includes(payload.action)) {
-      sendJson(response, 400, { message: "请选择仅保存链接或生成图文学习 PDF。" });
-      return true;
-    }
-    /** job 是用户明确选择处理方式后重新排队的任务。 */
-    const job = confirmVideoImportJob(
-      decodeURIComponent(importJobConfirmMatch[1]),
-      String(payload.action || ""),
-    );
-    if (!job) {
-      sendJson(response, 409, { message: "这项任务当前不需要视频导入确认。" });
-      return true;
-    }
-    importJobRunner.trigger();
-    sendJson(response, 202, { job });
-    return true;
-  }
+  if (await handleImportJobRoute(request, response, url)) return true;
 
   if (request.method === "GET" && url.pathname === "/api/ocr/status") {
     /** ocr 是本机 Tesseract 与 PDF 渲染工具可用状态。 */
@@ -1520,80 +1494,7 @@ async function handleApiRequest(request, response, url) {
     return true;
   }
 
-  if (request.method === "GET" && url.pathname === "/api/folders") {
-    sendJson(response, 200, { folders: listFolders() });
-    return true;
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/folders") {
-    /** requestBuffer 是新文件夹名称和父级信息。 */
-    const requestBuffer = await readRequestBuffer(request, 128 * 1024);
-    /** payload 是浏览器提交的新文件夹参数。 */
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    /** folder 是本地数据库创建后的文件夹。 */
-    const folder = createFolder(payload);
-    createDailyBackup();
-    sendJson(response, 201, { folder, folders: listFolders() });
-    return true;
-  }
-
-  /** folderMoveMatch 匹配文件夹父目录变更地址。 */
-  const folderMoveMatch = url.pathname.match(/^\/api\/folders\/([^/]+)\/move$/);
-  if (request.method === "PATCH" && folderMoveMatch) {
-    const requestBuffer = await readRequestBuffer(request, 128 * 1024);
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    const folder = moveFolder(decodeURIComponent(folderMoveMatch[1]), payload.parentId || null);
-    createDailyBackup();
-    sendJson(response, 200, { folder, folders: listFolders() });
-    return true;
-  }
-
-  /** folderMatch 匹配单个文件夹的重命名或删除地址。 */
-  const folderMatch = url.pathname.match(/^\/api\/folders\/([^/]+)$/);
-  if (request.method === "PATCH" && folderMatch) {
-    /** requestBuffer 是文件夹新名称请求。 */
-    const requestBuffer = await readRequestBuffer(request, 128 * 1024);
-    /** payload 是文件夹修改参数。 */
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    /** folder 是修改后的文件夹。 */
-    const folder = renameFolder(decodeURIComponent(folderMatch[1]), payload.name);
-    createDailyBackup();
-    sendJson(response, 200, { folder, folders: listFolders() });
-    return true;
-  }
-
-  if (request.method === "DELETE" && folderMatch) {
-    /** deleted 表示空文件夹已经从本地数据库移除。 */
-    const deleted = deleteEmptyFolder(decodeURIComponent(folderMatch[1]));
-    createDailyBackup();
-    sendJson(response, 200, { deleted, folders: listFolders() });
-    return true;
-  }
-
-  if (request.method === "PATCH" && url.pathname === "/api/folder-items") {
-    /** requestBuffer 是内容移动到目标文件夹的请求。 */
-    const requestBuffer = await readRequestBuffer(request, 128 * 1024);
-    /** payload 是目标内容和文件夹 ID。 */
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    /** assignment 是保存后的唯一主要目录关系。 */
-    const assignment = assignContentToFolder(
-      payload.targetType,
-      payload.targetId,
-      payload.folderId,
-    );
-    createDailyBackup();
-    sendJson(response, 200, { assignment, folders: listFolders() });
-    return true;
-  }
-
-  if (request.method === "PATCH" && url.pathname === "/api/folder-items/batch") {
-    const requestBuffer = await readRequestBuffer(request, 512 * 1024);
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    const assignments = assignContentsToFolder(payload.items, payload.folderId);
-    createDailyBackup();
-    sendJson(response, 200, { assignments, movedCount: assignments.length, folders: listFolders() });
-    return true;
-  }
+  if (await handleContentOrganizationRoute(request, response, url)) return true;
 
   if (request.method === "DELETE" && url.pathname === "/api/folder-items/batch") {
     /** requestBuffer 是用户已确认永久删除的一批知识内容。 */
@@ -1711,442 +1612,30 @@ async function handleApiRequest(request, response, url) {
     return true;
   }
 
-  if (request.method === "GET" && url.pathname === "/api/ai/sources") {
-    /** sources 是可以被用户主动选入 AI 问答的本地内容摘要。 */
-    const sources = [
-      ...listDocuments({ limit: 1000 }).map((item) => ({
-        targetType: "document", targetId: item.id, title: item.title,
-        category: item.category, summary: item.summary,
-      })),
-      ...listArticles({ limit: 1000 }).map((item) => ({
-        targetType: "article", targetId: item.id, title: item.title,
-        category: item.category, summary: item.summary,
-      })),
-      ...listPapers().map((item) => ({
-        targetType: "paper", targetId: item.id, title: item.titleZh || item.title,
-        category: item.category, summary: item.abstractZh || item.abstract || item.curatorNote,
-      })),
-    ];
-    sendJson(response, 200, {
-      configured: Boolean(serverConfig.deepSeekApiKey),
-      model: serverConfig.deepSeekModel,
-      sources,
-    });
-    return true;
-  }
+  if (await handleAiQuestionRoute(request, response, url)) return true;
+  if (await handleAiHistoryRoute(request, response, url)) return true;
 
-  if (request.method === "GET" && url.pathname === "/api/ai/conversations") {
-    /** conversations 是可搜索的本地 AI 问答历史摘要。 */
-    const conversations = listAiConversations({
-      query: url.searchParams.get("q") ?? "",
-      targetType: url.searchParams.get("targetType") ?? "",
-      targetId: url.searchParams.get("targetId") ?? "",
-    });
-    sendJson(response, 200, { conversations });
-    return true;
-  }
+  if (await handleKnowledgeSearchRoute(request, response, url)) return true;
 
-  /** aiConversationMatch 匹配一条完整本地 AI 会话。 */
-  const aiConversationMatch = url.pathname.match(/^\/api\/ai\/conversations\/([^/]+)$/);
-  if (request.method === "GET" && aiConversationMatch) {
-    /** conversationId 是地址中经过解码的会话 ID。 */
-    const conversationId = decodeURIComponent(aiConversationMatch[1]);
-    /** conversation 是包含全部问答消息的本地会话。 */
-    const conversation = getAiConversation(conversationId);
-    if (!conversation) {
-      sendJson(response, 404, { message: "找不到这条问答记录。" });
-      return true;
-    }
-    sendJson(response, 200, { conversation });
-    return true;
-  }
+  if (await handleTopicRoute(request, response, url)) return true;
+  if (await handleKnowledgeCardRoute(request, response, url)) return true;
 
-  if (request.method === "POST" && url.pathname === "/api/ai/ask") {
-    /** requestBuffer 是问题、模式和用户主动选择来源的 JSON。 */
-    const requestBuffer = await readRequestBuffer(request, 512 * 1024);
-    /** payload 是经过 JSON 解析的问答参数。 */
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    /** requestedSources 是最多六份用户明确选择的本地来源。 */
-    const requestedSources = Array.isArray(payload.sources)
-      ? payload.sources.slice(0, 6)
-      : [];
-    /** resolvedSources 是从 SQLite 重新读取的真实正文，绝不信任浏览器提交正文。 */
-    const resolvedSources = requestedSources.flatMap((sourceReference, index) => {
-      /** targetType 是限定在三类内容中的来源类型。 */
-      const targetType = ["document", "article", "paper"].includes(sourceReference?.targetType)
-        ? sourceReference.targetType
-        : "";
-      /** targetId 是来源在本地数据库中的稳定 ID。 */
-      const targetId = String(sourceReference?.targetId ?? "").trim();
-      /** sourceKey 是本次请求内用于引用的短编号。 */
-      const sourceKey = `S${index + 1}`;
-      if (targetType === "document") {
-        /** documentItem 是本地数据库中的完整文档。 */
-        const documentItem = getDocumentById(targetId);
-        return documentItem ? [{ sourceKey, targetType, targetId, title: documentItem.title, text: documentItem.extractedText || documentItem.summary }] : [];
-      }
-      if (targetType === "article") {
-        /** articleItem 是本地数据库中的完整网页文章。 */
-        const articleItem = getArticleById(targetId);
-        return articleItem ? [{ sourceKey, targetType, targetId, title: articleItem.title, text: articleItem.contentText || articleItem.summary }] : [];
-      }
-      if (targetType === "paper") {
-        /** paperItem 是本地数据库中的完整论文及可用译文。 */
-        const paperItem = getPaperById(targetId);
-        return paperItem ? [{ sourceKey, targetType, targetId, title: paperItem.titleZh || paperItem.title, text: paperItem.fullTranslationHtml || paperItem.sourceText || paperItem.abstractZh || paperItem.abstract }] : [];
-      }
-      return [];
-    });
-    if (resolvedSources.length !== requestedSources.length) {
-      sendJson(response, 422, { message: "部分所选资料已不存在，请刷新资料列表后重试。" });
-      return true;
-    }
-    /** existingConversation 是连续追问时的本地上下文。 */
-    const existingConversation = payload.conversationId
-      ? getAiConversation(String(payload.conversationId))
-      : null;
-    if (payload.conversationId && !existingConversation) {
-      sendJson(response, 404, { message: "找不到要继续的问答记录。" });
-      return true;
-    }
-    /** result 是 DeepSeek 回答及经过本地逐字校验的引用。 */
-    const result = await answerFromSources({
-      apiKey: serverConfig.deepSeekApiKey,
-      model: serverConfig.deepSeekModel,
-      question: payload.question,
-      mode: payload.mode,
-      sources: resolvedSources,
-      selectedQuote: payload.selectedQuote,
-      conversationMessages: existingConversation?.messages ?? [],
-    });
-    /** sourceReferenceMap 用于把引用短编号恢复为可打开的本地内容地址。 */
-    const sourceReferenceMap = new Map(resolvedSources.map((source) => [source.sourceKey, source]));
-    /** citations 是只包含已验证引文和本地跳转信息的前端响应。 */
-    const citations = result.citations.map((citation) => {
-      /** source 是该引文经过服务端确认的真实资料。 */
-      const source = sourceReferenceMap.get(citation.sourceKey);
-      return { ...citation, targetType: source.targetType, targetId: source.targetId };
-    });
-    /** savedConversation 是写入本机 SQLite 后的完整问答记录。 */
-    const savedConversation = saveAiExchange({
-      conversationId: existingConversation?.id,
-      mode: payload.mode,
-      sources: resolvedSources.map((source) => ({
-        targetType: source.targetType,
-        targetId: source.targetId,
-        title: source.title,
-      })),
-      question: payload.question,
-      selectedQuote: payload.selectedQuote,
-      answer: result.answer,
-      citations,
-      insufficientEvidence: result.insufficientEvidence,
-    });
-    createDailyBackup();
-    sendJson(response, 200, {
-      ...result,
-      citations,
-      conversationId: savedConversation.id,
-      conversation: savedConversation,
-    });
-    return true;
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/search") {
-    /** results 是跨内容正文、阅读笔记和高亮批注的统一搜索结果。 */
-    const searchPage = searchKnowledgeBasePage({
-      query: url.searchParams.get("q") ?? "",
-      targetType: url.searchParams.get("targetType") ?? "",
-      category: url.searchParams.get("category") ?? "",
-      tagName: url.searchParams.get("tagName") ?? "",
-      folderId: url.searchParams.get("folderId") ?? "",
-      limit: url.searchParams.get("limit"),
-      offset: url.searchParams.get("offset"),
-    });
-    sendJson(response, 200, searchPage);
-    return true;
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/tags") {
-    sendJson(response, 200, { tags: listTags() });
-    return true;
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/content-organization") {
-    /** organization 是当前内容的标签和专题信息。 */
-    const organization = getContentOrganization(
-      url.searchParams.get("targetType") ?? "",
-      url.searchParams.get("targetId") ?? "",
-    );
-    if (!organization) {
-      sendJson(response, 404, { message: "找不到对应内容。" });
-      return true;
-    }
-    sendJson(response, 200, { organization });
-    return true;
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/content-tags") {
-    /** requestBuffer 是新增标签的 JSON 请求正文。 */
-    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
-    /** payload 是标签和目标内容信息。 */
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    /** tags 是保存后的最新标签列表。 */
-    const tags = addContentTag(payload.targetType, payload.targetId, payload.tagName);
-    createDailyBackup();
-    sendJson(response, 201, { tags });
-    return true;
-  }
-
-  if (request.method === "DELETE" && url.pathname === "/api/content-tags") {
-    /** tags 是移除关联后的最新标签列表。 */
-    const tags = removeContentTag(
-      url.searchParams.get("targetType") ?? "",
-      url.searchParams.get("targetId") ?? "",
-      url.searchParams.get("tagName") ?? "",
-    );
-    createDailyBackup();
-    sendJson(response, 200, { tags });
-    return true;
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/topics") {
-    sendJson(response, 200, { topics: listTopics() });
-    return true;
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/topics") {
-    /** requestBuffer 是新专题的 JSON 请求正文。 */
-    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
-    /** payload 是专题名称和说明。 */
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    /** topic 是创建后的本地专题。 */
-    const topic = createTopic(payload);
-    createDailyBackup();
-    sendJson(response, 201, { topic });
-    return true;
-  }
-
-  /** topicItemsMatch 匹配某个专题的内容列表地址。 */
-  const topicItemsMatch = url.pathname.match(/^\/api\/topics\/([^/]+)\/items$/);
-  if (request.method === "GET" && topicItemsMatch) {
-    /** topicId 是地址中的专题 ID。 */
-    const topicId = decodeURIComponent(topicItemsMatch[1]);
-    sendJson(response, 200, { items: listTopicItems(topicId) });
-    return true;
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/topic-items") {
-    /** requestBuffer 是专题内容关联的 JSON 请求正文。 */
-    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
-    /** payload 是专题和目标内容信息。 */
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    /** items 是专题更新后的内容列表。 */
-    const items = addTopicItem(payload.topicId, payload.targetType, payload.targetId);
-    createDailyBackup();
-    sendJson(response, 201, { items });
-    return true;
-  }
-
-  if (request.method === "DELETE" && url.pathname === "/api/topic-items") {
-    /** items 是移除关联后的专题内容列表。 */
-    const items = removeTopicItem(
-      url.searchParams.get("topicId") ?? "",
-      url.searchParams.get("targetType") ?? "",
-      url.searchParams.get("targetId") ?? "",
-    );
-    createDailyBackup();
-    sendJson(response, 200, { items });
-    return true;
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/knowledge-cards") {
-    /** dueOnly 表示是否只返回已经到期的今日复习卡片。 */
-    const dueOnly = url.searchParams.get("due") === "1";
-    /** cards 是符合筛选条件的本地来源卡片。 */
-    const cards = listKnowledgeCards({ dueOnly });
-    sendJson(response, 200, { cards });
-    return true;
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/knowledge-cards") {
-    /** requestBuffer 是新卡片的 JSON 请求正文。 */
-    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
-    /** payload 是用户确认的问题、答案和来源锚点。 */
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    /** card 是已保存到 SQLite 的来源卡片。 */
-    const card = createKnowledgeCard(payload);
-    createDailyBackup();
-    sendJson(response, 201, { card });
-    return true;
-  }
-
-  /** cardReviewMatch 匹配单张卡片的复习调度地址。 */
-  const cardReviewMatch = url.pathname.match(
-    /^\/api\/knowledge-cards\/([^/]+)\/review$/,
-  );
-  if (request.method === "POST" && cardReviewMatch) {
-    /** cardId 是地址中经过解码的卡片 ID。 */
-    const cardId = decodeURIComponent(cardReviewMatch[1]);
-    /** requestBuffer 是复习结果的 JSON 请求正文。 */
-    const requestBuffer = await readRequestBuffer(request, 32 * 1024);
-    /** payload 是 again、hard、good 或 easy 评价。 */
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    /** card 是完成下一次调度后的卡片。 */
-    const card = reviewKnowledgeCard(cardId, String(payload.rating || "good"));
-    if (!card) {
-      sendJson(response, 404, { message: "找不到这张知识卡片。" });
-      return true;
-    }
-    createDailyBackup();
-    sendJson(response, 200, { card });
-    return true;
-  }
-
-  /** cardDetailMatch 匹配单张知识卡片地址。 */
-  const cardDetailMatch = url.pathname.match(/^\/api\/knowledge-cards\/([^/]+)$/);
-  if (request.method === "DELETE" && cardDetailMatch) {
-    /** cardId 是地址中经过解码的卡片 ID。 */
-    const cardId = decodeURIComponent(cardDetailMatch[1]);
-    createDailyBackup();
-    /** deleted 表示是否实际删除了卡片。 */
-    const deleted = deleteKnowledgeCard(cardId);
-    if (!deleted) {
-      sendJson(response, 404, { message: "找不到这张知识卡片。" });
-      return true;
-    }
-    sendJson(response, 200, { deleted: true });
-    return true;
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/reading-workspace") {
-    /** targetType 是当前阅读内容所属的固定类型。 */
-    const targetType = url.searchParams.get("targetType")?.trim() ?? "";
-    /** targetId 是当前阅读内容的本地 ID。 */
-    const targetId = url.searchParams.get("targetId")?.trim() ?? "";
-    /** workspace 是该内容已经保存的阅读状态、笔记和批注。 */
-    const workspace = getReadingWorkspace(targetType, targetId);
-    if (!workspace) {
-      sendJson(response, 404, { message: "找不到对应的阅读内容。" });
-      return true;
-    }
-    sendJson(response, 200, { workspace });
-    return true;
-  }
-
-  if (request.method === "PATCH" && url.pathname === "/api/reading-workspace") {
-    /** requestBuffer 是阅读状态的 JSON 请求正文。 */
-    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
-    /** payload 是浏览器提交的进度、状态或个人笔记。 */
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    /** state 是写入数据库后的最新阅读状态。 */
-    const state = updateReadingState(
-      String(payload.targetType ?? ""),
-      String(payload.targetId ?? ""),
-      payload,
-    );
-    if (!state) {
-      sendJson(response, 404, { message: "找不到对应的阅读内容。" });
-      return true;
-    }
-    sendJson(response, 200, { state });
-    return true;
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/activity-dashboard") {
-    const days = Number(url.searchParams.get("days") || 30);
-    sendJson(response, 200, { dashboard: getActivityDashboard(days) });
-    return true;
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/reading-sessions") {
-    const requestBuffer = await readRequestBuffer(request, 64 * 1024);
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    const session = startReadingSession(
-      String(payload.targetType ?? ""),
-      String(payload.targetId ?? ""),
-      Number(payload.progressPercent) || 0,
-    );
-    if (!session) {
-      sendJson(response, 404, { message: "找不到对应的阅读内容。" });
-      return true;
-    }
-    sendJson(response, 201, { session });
-    return true;
-  }
-
-  const readingSessionMatch = url.pathname.match(/^\/api\/reading-sessions\/([^/]+)$/);
-  if (request.method === "POST" && readingSessionMatch) {
-    const requestBuffer = await readRequestBuffer(request, 64 * 1024);
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    const session = updateReadingSession(decodeURIComponent(readingSessionMatch[1]), payload);
-    if (!session) {
-      sendJson(response, 404, { message: "找不到对应的阅读会话。" });
-      return true;
-    }
-    sendJson(response, 200, { session });
-    return true;
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/reading-annotations") {
-    /** requestBuffer 是新高亮批注的 JSON 请求正文。 */
-    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
-    /** payload 是浏览器选区及高亮颜色。 */
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    /** annotation 是成功保存的本地高亮批注。 */
-    const annotation = createReadingAnnotation(
-      String(payload.targetType ?? ""),
-      String(payload.targetId ?? ""),
-      payload,
-    );
-    if (!annotation) {
-      sendJson(response, 404, { message: "找不到对应的阅读内容。" });
-      return true;
-    }
-    createDailyBackup();
-    sendJson(response, 201, { annotation });
-    return true;
-  }
-
-  /** annotationMatch 匹配单条高亮批注的修改和删除地址。 */
-  const annotationMatch = url.pathname.match(/^\/api\/reading-annotations\/([^/]+)$/);
-  if (request.method === "PATCH" && annotationMatch) {
-    /** annotationId 是地址中经过解码的批注 ID。 */
-    const annotationId = decodeURIComponent(annotationMatch[1]);
-    /** requestBuffer 是批注修改请求的 JSON 正文。 */
-    const requestBuffer = await readRequestBuffer(request, 256 * 1024);
-    /** payload 是新批注正文或高亮颜色。 */
-    const payload = JSON.parse(requestBuffer.toString("utf8") || "{}");
-    /** annotation 是修改后的完整批注。 */
-    const annotation = updateReadingAnnotation(annotationId, payload);
-    if (!annotation) {
-      sendJson(response, 404, { message: "找不到这条批注。" });
-      return true;
-    }
-    createDailyBackup();
-    sendJson(response, 200, { annotation });
-    return true;
-  }
-
-  if (request.method === "DELETE" && annotationMatch) {
-    /** annotationId 是地址中经过解码的批注 ID。 */
-    const annotationId = decodeURIComponent(annotationMatch[1]);
-    /** deleted 表示本次是否真正删除了批注记录。 */
-    const deleted = deleteReadingAnnotation(annotationId);
-    if (!deleted) {
-      sendJson(response, 404, { message: "找不到这条批注。" });
-      return true;
-    }
-    createDailyBackup();
-    sendJson(response, 200, { deleted: true });
-    return true;
-  }
+  if (await handleReadingRoute(request, response, url)) return true;
+  if (await handleActivityDashboardRoute(request, response, url)) return true;
 
   if (request.method === "GET" && url.pathname === "/api/papers") {
     /** sourceType 是可选的论文来源过滤值。 */
     const sourceType = url.searchParams.get("source") ?? "";
     /** papers 是用户已经保存到统一论文库的论文。 */
-    const jobByPaper = new Map(getPaperImportStatuses().map(job => [job.target_id, { id: job.id, status: job.status, stage: job.stage, progressPercent: job.progress_percent, attemptCount: job.attempt_count, errorMessage: job.error_message }]));
+    const jobByPaper = new Map(getPaperImportStatuses().map(job => [job.target_id, {
+      id: job.id,
+      status: job.status,
+      stage: job.stage,
+      progressPercent: job.progress_percent,
+      attemptCount: job.attempt_count,
+      errorMessage: job.error_message,
+      nextAttemptAt: job.next_attempt_at || null,
+    }]));
     const duplicates = listPaperIdentityDuplicates();
     const duplicateIds = new Set(duplicates.flatMap(group => group.paperIds));
     const page = url.searchParams.has("page") ? getPaperLibraryPage(Object.fromEntries(url.searchParams), [...duplicateIds]) : null;
@@ -2154,6 +1643,8 @@ async function handleApiRequest(request, response, url) {
     sendJson(response, 200, { ...page, papers, duplicates });
     return true;
   }
+
+  if (await handleNoteRoute(request, response, url)) return true;
 
   if (request.method === "GET" && url.pathname === "/api/paper-folders") {
     sendJson(response, 200, { folders: paperFolders.list() });
@@ -3466,6 +2957,43 @@ async function runPaperSchedule() {
   }
 }
 
+/** 确保首次打开笔记库时生成未来的本地整理时间。 */
+function ensureNoteOrganizationSchedule() {
+  const settings = getNoteOrganizationSettings();
+  if (!settings.enabled || settings.nextRunAt) return settings;
+  return updateNoteOrganizationSettings({ nextRunAt: calculateNextNoteRun(settings) });
+}
+
+/** 整理上次成功检查后新增或修改的笔记；原始笔记不作任何改写。 */
+function runNoteOrganization({ manual = false } = {}) {
+  const settings = ensureNoteOrganizationSchedule();
+  const now = new Date();
+  const periodEnd = now.toISOString();
+  const notes = listAllNotes({ updatedAfter: settings.lastRunAt || "", limit: 5000 })
+    .items.filter((note) => String(note.noteText || "").trim());
+  const digest = notes.length
+    ? createNoteDigest({
+        periodStart: settings.lastRunAt || null,
+        periodEnd,
+        notes,
+        digest: createLocalNoteDigest(notes, now),
+      })
+    : null;
+  const nextSettings = updateNoteOrganizationSettings({
+    lastRunAt: periodEnd,
+    nextRunAt: settings.enabled ? calculateNextNoteRun(settings, now) : null,
+  });
+  if (digest && !manual) createDailyBackup();
+  return { digest, settings: nextSettings, summary: getNoteLibrarySummary(), digests: listNoteDigests(12) };
+}
+
+/** 每分钟只检查时间，不联网；到期且有新笔记时生成一份派生整理。 */
+function runScheduledNoteOrganization() {
+  const settings = ensureNoteOrganizationSchedule();
+  if (!settings.enabled || !settings.nextRunAt) return;
+  if (Date.now() >= Date.parse(settings.nextRunAt)) runNoteOrganization();
+}
+
 /** paperScheduleTimer 是服务运行期间每六小时执行一次的周任务。 */
 const paperScheduleTimer = setInterval(
   () => void runPaperSchedule(),
@@ -3473,6 +3001,10 @@ const paperScheduleTimer = setInterval(
 );
 paperScheduleTimer.unref();
 void runPaperSchedule();
+
+runScheduledNoteOrganization();
+const noteOrganizationTimer = setInterval(runScheduledNoteOrganization, 60 * 1000);
+noteOrganizationTimer.unref();
 
 /** codexWorkerTimer 定期检查登录恢复和未完成队列。 */
 const codexWorkerTimer = setInterval(

@@ -5,6 +5,7 @@
  * arXiv 检索函数继续保留，供测试和未来主动检索扩展使用。
  */
 import crypto from "node:crypto";
+import { parseHTML } from "linkedom";
 import {
   getPaperWeekStatus,
   listPaperCandidates,
@@ -12,6 +13,7 @@ import {
 } from "./database.mjs";
 import { fetchExternalResource } from "./article-parser.mjs";
 import { parseArxivIdentity } from "./paper-identity.mjs";
+import { RetryableImportError, isTransientImportError, parseRetryAfter } from "./import-retry.mjs";
 
 /** arxivEndpoint 是无需浏览器跨域访问的公开论文检索接口。 */
 const arxivEndpoint = "https://export.arxiv.org/api/query";
@@ -297,6 +299,53 @@ function parseArxivResponse(xml, category) {
   });
 }
 
+/** 从 arXiv 摘要页的标准 citation 元数据恢复论文信息，作为 Atom API 的备用路径。 */
+export function parseArxivAbstractMetadata(html, identity) {
+  const { document } = parseHTML(String(html || ""));
+  const readMeta = (name) => String(document.querySelector(`meta[name="${name}"]`)?.getAttribute("content") || "").trim();
+  const readAllMeta = (name) => [...document.querySelectorAll(`meta[name="${name}"]`)]
+    .map((element) => String(element.getAttribute("content") || "").trim())
+    .filter(Boolean);
+  const title = readMeta("citation_title") || document.querySelector("h1.title")?.textContent?.replace(/^Title:\s*/i, "").trim() || "";
+  if (!title) return null;
+  const abstractNode = document.querySelector("blockquote.abstract");
+  abstractNode?.querySelector(".descriptor")?.remove();
+  const abstract = String(abstractNode?.textContent || readMeta("description") || "")
+    .replace(/^Abstract:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 4_000);
+  const authors = readAllMeta("citation_author");
+  const publishedAt = readMeta("citation_date") || readMeta("citation_online_date") || null;
+  return {
+    id: `candidate_${crypto.randomUUID()}`,
+    externalId: identity.externalId,
+    title,
+    abstract,
+    authors,
+    category: "AI",
+    publishedAt,
+    sourceUrl: identity.sourceUrl,
+    pdfUrl: readMeta("citation_pdf_url") || identity.pdfUrl,
+    metadataSource: "arxiv_abstract",
+  };
+}
+
+function createArxivResponseError(label, response) {
+  const status = Number(response?.status) || 0;
+  const message = `${label}读取失败（${status || "网络错误"}）。`;
+  if (status === 408 || status === 425 || status === 429 || status >= 500) {
+    return new RetryableImportError(message, {
+      status,
+      retryAfterMs: parseRetryAfter(response?.headers?.get?.("retry-after")),
+      maxAttempts: 5,
+    });
+  }
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
 /**
  * 从 arXiv 获取一个主题下最新且信息完整的候选论文。
  *
@@ -333,9 +382,11 @@ async function fetchTopicCandidate(topic) {
  * 根据 arXiv 摘要页或 PDF 链接读取一篇论文的规范元数据。
  *
  * @param {string} rawUrl 用户提交的 arXiv 链接。
+ * @param {{ fetchExternalResource?: Function }} dependencies 测试或运行时依赖覆盖。
  * @returns {Promise<Record<string, unknown> | null>} 论文元数据或空值。
  */
-export async function fetchArxivPaperByUrl(rawUrl) {
+export async function fetchArxivPaperByUrl(rawUrl, dependencies = {}) {
+  const fetchResource = dependencies.fetchExternalResource || fetchExternalResource;
   /** parsedUrl 是已经标准化的 arXiv 链接。 */
   const parsedUrl = new URL(String(rawUrl || ""));
   if (!/(^|\.)arxiv\.org$/i.test(parsedUrl.hostname)) return null;
@@ -347,15 +398,38 @@ export async function fetchArxivPaperByUrl(rawUrl) {
   /** requestUrl 是只查询一个编号的官方 Atom API。 */
   const requestUrl = new URL(arxivEndpoint);
   requestUrl.searchParams.set("id_list", `${identity.arxivId}${identity.requestedVersion}`);
-  /** response 是 arXiv 官方元数据响应。 */
-  const response = await fetchExternalResource(requestUrl, {
-    headers: { Accept: "application/atom+xml", "User-Agent": "ZhixuLocalKnowledge/1.0" },
-    timeoutMs: paperRequestTimeoutMilliseconds,
-  }, "arXiv 元数据接口");
-  if (!response.ok) throw new Error(`arXiv 元数据读取失败（${response.status}）。`);
-  /** candidates 是官方响应中解析出的唯一论文。 */
-  const candidates = parseArxivResponse(await response.text(), "AI");
-  return candidates[0] ? { ...candidates[0], externalId: identity.externalId, sourceUrl: identity.sourceUrl, pdfUrl: identity.pdfUrl } : null;
+  let primaryError = null;
+  try {
+    /** response 是 arXiv 官方 Atom 元数据响应。 */
+    const response = await fetchResource(requestUrl, {
+      headers: { Accept: "application/atom+xml", "User-Agent": "ZhixuLocalKnowledge/1.0" },
+      timeoutMs: paperRequestTimeoutMilliseconds,
+    }, "arXiv 元数据接口");
+    if (!response.ok) throw createArxivResponseError("arXiv 元数据", response);
+    const candidates = parseArxivResponse(await response.text(), "AI");
+    if (candidates[0]) {
+      return { ...candidates[0], externalId: identity.externalId, sourceUrl: identity.sourceUrl, pdfUrl: identity.pdfUrl, metadataSource: "arxiv_api" };
+    }
+    primaryError = new Error("arXiv 元数据接口未返回该论文。");
+  } catch (error) {
+    primaryError = error;
+  }
+
+  try {
+    /** Atom 接口限流或暂时异常时，改读同一官方摘要页的 citation 元数据。 */
+    const fallbackResponse = await fetchResource(identity.sourceUrl, {
+      headers: { Accept: "text/html,application/xhtml+xml", "User-Agent": "ZhixuLocalKnowledge/1.0" },
+      timeoutMs: paperRequestTimeoutMilliseconds,
+    }, "arXiv 摘要页");
+    if (!fallbackResponse.ok) throw createArxivResponseError("arXiv 摘要页", fallbackResponse);
+    const metadata = parseArxivAbstractMetadata(await fallbackResponse.text(), identity);
+    if (metadata) return metadata;
+    throw new Error("arXiv 摘要页缺少可识别的论文元数据。");
+  } catch (fallbackError) {
+    if (isTransientImportError(primaryError)) throw primaryError;
+    if (isTransientImportError(fallbackError)) throw fallbackError;
+    throw primaryError || fallbackError;
+  }
 }
 
 /**
@@ -485,7 +559,8 @@ export async function ensureDailyClassicPaperCandidate(currentDate = new Date())
     titleZh: catalogItem.titleZh,
     abstractZh: catalogItem.abstractZh,
     translationSource: "codex",
-    translatedAt: new Date().toISOString(),
+    // 每次启动都会同步经典目录元数据，但已完成翻译的时间属于历史事实，不能随启动漂移。
+    translatedAt: cachedCandidate?.translatedAt || new Date().toISOString(),
   };
   /** savePaperCandidates 会同步目录修正，避免旧候选永久保留失效 PDF 地址。 */
   return savePaperCandidates(dailyKey, [candidate]);

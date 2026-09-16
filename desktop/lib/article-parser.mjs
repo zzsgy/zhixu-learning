@@ -738,6 +738,38 @@ function hasVisibleArticleLength(properties, names) {
   });
 }
 
+/** articleHeadingBlockSelector 是标题元素不能承担的块级正文结构。 */
+const articleHeadingBlockSelector = "article, section, div, figure, table, ul, ol, blockquote, pre";
+/** articleHeadingMediaSelector 是空标题判断时必须保留的有效媒体结构。 */
+const articleHeadingMediaSelector = "img, video, iframe, table, pre, code, ul, ol";
+
+/**
+ * 清理富文本编辑器把标题当作布局外壳或空白占位符的结构。
+ *
+ * 部分公众号会输出 `<h2><section>...</section></h2>`，并用只含 `<br>` 的标题
+ * 拉开版面。知序会给真正标题增加间距和分隔线，因此必须拆掉错误外壳并删除
+ * 纯占位标题；文字、图片、表格和列表节点本身保持原顺序。
+ *
+ * @param {Element} root 原始正文根节点。
+ * @returns {{ unwrapped: number, removedEmpty: number }} 结构修正数量。
+ */
+export function normalizeArticleHeadingStructure(root) {
+  let unwrapped = 0;
+  for (const heading of Array.from(root.querySelectorAll("h1, h2, h3, h4"))) {
+    if (!heading.querySelector(articleHeadingBlockSelector)) continue;
+    heading.replaceWith(...Array.from(heading.childNodes));
+    unwrapped += 1;
+  }
+  let removedEmpty = 0;
+  for (const heading of Array.from(root.querySelectorAll("h1, h2, h3, h4"))) {
+    const text = String(heading.textContent || "").replace(/\s+/g, " ").trim();
+    if (text || heading.querySelector(articleHeadingMediaSelector)) continue;
+    heading.remove();
+    removedEmpty += 1;
+  }
+  return { unwrapped, removedEmpty };
+}
+
 /**
  * 修正富文本编辑器把普通长段落错误输出为 H1-H4 的情况。
  *
@@ -921,6 +953,8 @@ export function sanitizeArticleHtml(rawHtml, baseUrl) {
   /** root 是正文根节点。 */
   const root = parsedDocument.querySelector("article");
   if (!root) return { html: "", text: "" };
+  /** 先拆掉标题中的块级布局外壳和空白占位符，保留其内部真实内容。 */
+  normalizeArticleHeadingStructure(root);
   /** 先纠正来源编辑器的错误标题语义，避免普通正文被阅读页放成巨型标题。 */
   normalizeMisusedArticleHeadings(root);
   /** 推广块在原始容器层级仍完整时清理，避免样式移除后把关注素材展开成正文大图。 */
@@ -1139,6 +1173,130 @@ export function restoreReadableFigureImages(readableHtml, originalDocument) {
     else figure.prepend(image);
   }
   return root.innerHTML;
+}
+
+/** 把章节标题压缩为可跨原始 DOM 与 Readability 输出比较的稳定文本。 */
+function normalizeArticleSectionHeading(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/[\u200b-\u200d\ufeff]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * 读取“1. Introduction / 1.1 Landscape”形式的章节编号。
+ *
+ * @param {Element | null} heading 标题节点。
+ * @returns {{ text: string, path: number[], topLevel: number } | null} 章节编号信息。
+ */
+function readArticleSectionNumber(heading) {
+  const text = normalizeArticleSectionHeading(heading?.textContent);
+  const matched = text.match(/^(\d{1,3}(?:\.\d{1,3}){0,4})[.)]?\s+\S/);
+  if (!matched) return null;
+  const path = matched[1].split(".").map(Number);
+  if (path.some((value) => !Number.isInteger(value) || value < 0)) return null;
+  return { text, path, topLevel: path[0] };
+}
+
+/** 返回 ancestor 下直接包含 node 的子块。 */
+function directChildContaining(ancestor, node) {
+  let current = node;
+  while (current?.parentElement && current.parentElement !== ancestor) {
+    current = current.parentElement;
+  }
+  return current?.parentElement === ancestor ? current : null;
+}
+
+/**
+ * 恢复 Readability 因“长章节得分更高”而丢掉的同级章节块。
+ *
+ * 一些长报告把每章放在同一布局容器的不同子列中。Readability 会选中较长的
+ * 第二、三章，再按得分阈值排除较短的第一章或结论。这里只在以下证据同时
+ * 成立时改用完整章节容器：
+ * 1. 原网页同一父容器中存在从 1 开始、编号单调递增的兄弟内容块；
+ * 2. Readability 至少命中其中一章，但遗漏了另外一章；
+ * 3. 完整章节容器达到正文长度门槛，且不来自 header/nav/aside/footer。
+ *
+ * @param {string} readableHtml Readability 输出正文。
+ * @param {Document} originalDocument Readability 运行前的完整网页 DOM。
+ * @returns {string} 必要时恢复完整同级章节容器后的正文 HTML。
+ */
+export function restoreOmittedSiblingArticleSections(readableHtml, originalDocument) {
+  const sourceHtml = String(readableHtml || "");
+  const { document: readableDocument } = parseHTML(`<main>${sourceHtml}</main>`);
+  const readableRoot = readableDocument.querySelector("main");
+  if (!readableRoot) return sourceHtml;
+  const firstReadableHeading = Array.from(readableRoot.querySelectorAll("h1, h2, h3, h4"))
+    .map((heading) => ({ heading, section: readArticleSectionNumber(heading) }))
+    .find((entry) => entry.section);
+  if (!firstReadableHeading) return sourceHtml;
+  const readableSectionTexts = new Set(
+    Array.from(readableRoot.querySelectorAll("h1, h2, h3, h4"))
+      .map(readArticleSectionNumber)
+      .filter(Boolean)
+      .map((section) => section.text),
+  );
+
+  const sourceHeadingCandidates = Array.from(originalDocument.querySelectorAll("h1, h2, h3, h4"))
+    .filter((heading) => (
+      normalizeArticleSectionHeading(heading.textContent) === firstReadableHeading.section.text
+    ));
+  for (const sourceHeading of sourceHeadingCandidates) {
+    let ancestor = sourceHeading.parentElement;
+    while (ancestor && ancestor !== originalDocument.body) {
+      if (ancestor.closest("header, nav, aside, footer")) break;
+      const children = Array.from(ancestor.children || []);
+      const currentChild = directChildContaining(ancestor, sourceHeading);
+      const currentIndex = children.indexOf(currentChild);
+      if (currentIndex >= 0) {
+        const numberedChildren = children.map((child, index) => ({
+          child,
+          index,
+          section: Array.from(child.querySelectorAll("h1, h2, h3, h4"))
+            .map(readArticleSectionNumber)
+            .find(Boolean),
+        }));
+        const firstChapterIndex = numberedChildren.findIndex((entry) => entry.section?.topLevel === 1);
+        if (firstChapterIndex >= 0) {
+          const followingNumbered = numberedChildren.slice(firstChapterIndex).filter((entry) => entry.section);
+          let previousTopLevel = 0;
+          const orderedEntries = [];
+          for (const entry of followingNumbered) {
+            if (entry.section.topLevel < previousTopLevel) break;
+            if (previousTopLevel > 0 && entry.section.topLevel > previousTopLevel + 1) break;
+            orderedEntries.push(entry);
+            previousTopLevel = entry.section.topLevel;
+          }
+          const distinctTopLevels = new Set(orderedEntries.map((entry) => entry.section.topLevel));
+          const lastChapterIndex = orderedEntries.at(-1)?.index ?? -1;
+          const chapterBlocks = lastChapterIndex >= firstChapterIndex
+            ? children.slice(firstChapterIndex, lastChapterIndex + 1)
+            : [];
+          const chapterTextLength = chapterBlocks.reduce(
+            (total, block) => total + String(block.textContent || "").replace(/\s+/g, " ").trim().length,
+            0,
+          );
+          const coveredCount = orderedEntries.filter((entry) => readableSectionTexts.has(entry.section.text)).length;
+          const hasOmittedChapter = orderedEntries.some((entry) => !readableSectionTexts.has(entry.section.text));
+          const unsafeContainer = chapterBlocks.some((block) => block.matches("header, nav, aside, footer")
+            || block.querySelector("header, nav, aside, footer"));
+          if (
+            distinctTopLevels.size >= 2
+            && coveredCount > 0
+            && hasOmittedChapter
+            && !unsafeContainer
+            && chapterTextLength >= minimumArticleLength
+          ) {
+            return chapterBlocks.map((block) => block.innerHTML).join("\n");
+          }
+        }
+      }
+      ancestor = ancestor.parentElement;
+    }
+  }
+  return sourceHtml;
 }
 
 /**
@@ -1371,9 +1529,16 @@ async function parseAndClassifyArticleSource(source) {
   const figureRestoredHtml = wechatContent
     ? extractedContentHtml
     : restoreReadableFigureImages(extractedContentHtml, originalDocument);
-  const rawContentHtml = wechatContent
+  /**
+   * 部分长报告把各章拆成同级布局块；Readability 可能从最长的第二章开始。
+   * 图片恢复之后、最终清洗之前恢复同一内容容器中有明确编号的完整章节序列。
+   */
+  const sectionRestoredHtml = wechatContent
     ? figureRestoredHtml
-    : restoreMarkedArticleImages(figureRestoredHtml, standaloneImages);
+    : restoreOmittedSiblingArticleSections(figureRestoredHtml, originalDocument);
+  const rawContentHtml = wechatContent
+    ? sectionRestoredHtml
+    : restoreMarkedArticleImages(sectionRestoredHtml, standaloneImages);
   /** sanitized 是移除危险内容后的正文。 */
   const sanitized = sanitizeArticleHtml(rawContentHtml, source.finalUrl);
   if (!sanitized.html || sanitized.text.length < minimumArticleLength) {

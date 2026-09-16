@@ -43,6 +43,9 @@ test("超长标题、推广块和异常媒体不会破坏阅读页比例", () =>
   assert.match(script, /function removeDecorativeArticleImage\(image, sourceCount, relativeWidthPercent = 0\)/);
   assert.match(script, /function removeLegacyArticlePromotionBlocks\(root\)/);
   assert.match(script, /removeLegacyArticlePromotionBlocks\(safeArticleRoot\)/);
+  assert.match(script, /function normalizeLegacyArticleHeadingStructure\(root\)/);
+  assert.match(script, /heading\.replaceWith\(\.\.\.Array\.from\(heading\.childNodes\)\)/);
+  assert.match(script, /normalizeLegacyArticleHeadingStructure\(safeArticleRoot\)/);
   assert.match(script, /image\.dataset\.zhixuDisplayWidth/);
   assert.match(script, /image\.dataset\.zhixuRelativeWidthPercent \|\| image\.dataset\.zhixuDisplayWidthPercent/);
   assert.match(script, /image\.classList\.add\("article-inline-decoration"\)/);
@@ -64,6 +67,8 @@ test("超长标题、推广块和异常媒体不会破坏阅读页比例", () =>
 
 test("三类阅读正文统一增强代码块、行内代码和特殊提示字段", () => {
   assert.match(script, /function enhanceReadingSemantics\(readingSurface\)/);
+  assert.match(script, /classifyReadableBlock/);
+  assert.match(script, /normalizeReadableLines\(text\)/);
   assert.match(script, /function normalizeReadingPreformattedLines\(preElement\)/);
   assert.match(script, /normalizeReadingPreformattedLines\(preElement\)/);
   assert.match(script, /inferReadingCodeLanguage/);

@@ -4,14 +4,31 @@
  * 页面只请求当前电脑上的本地服务，不连接任何第三方前端接口。
  */
 import renderMathInElement from "/vendor/katex/contrib/auto-render.mjs";
+import { mountActivityDashboard } from "./activity-dashboard.js";
+import { mountAiCenter } from "./ai-center.js";
+import { mountGitHubProjects } from "./github-projects.js";
 import { normalizePaperMath } from "./paper-math.js";
-import { getProjectPage } from "./project-index.js";
 import { normalizePaperReadingLayout } from "./paper-layout.js";
 import { parsePaperAssetUrl } from "./paper-assets.js";
 import { createPaperLibrary } from "./paper-library.js";
 import { renderStorageDashboard, renderStorageJobOverview, renderStorageBrowserOverview } from "./storage-dashboard.js";
+import { mountNotesCenter } from "./notes-center.js";
+import {
+  classifyReadableBlock,
+  createDocumentChapterTocEntries,
+  joinReadableTextLines,
+  matchesReadableChapterHeading,
+  normalizeReadableLines,
+} from "./reading-semantics.js";
+import { buildSingleColumnPdfFlow } from "./pdf-reading-flow.js";
 
 let paperLibrary;
+let activityDashboard;
+let aiCenter;
+let githubProjects;
+import { mountReadingNotes } from "./reading-notes.js";
+let readingNotesEditor;
+let notesCenter;
 
 /** applicationState 保存当前筛选、文档列表和已打开文档。 */
 const applicationState = {
@@ -61,10 +78,6 @@ const applicationState = {
   activeReadingSurface: null,
   /** pendingReadingSelection 是等待用户选择颜色的正文选区。 */
   pendingReadingSelection: null,
-  /** readingAiSelection 是当前阅读内问答重点引用的正文选区。 */
-  readingAiSelection: null,
-  /** readingAiConversationId 是当前资料正在继续的本地问答会话。 */
-  readingAiConversationId: "",
   /** readingWorkbenchWidth 是用户最后设置的阅读工作台宽度。 */
   readingWorkbenchWidth: 420,
   /** readingProgressTimer 用于合并连续滚动产生的进度保存。 */
@@ -131,18 +144,6 @@ const applicationState = {
   dueKnowledgeCards: [],
   /** activeReviewIndex 是今日复习队列中的当前位置。 */
   activeReviewIndex: 0,
-  /** aiSources 是可被用户主动选入有出处问答的本地资料摘要。 */
-  aiSources: [],
-  /** selectedAiSourceKeys 是当前已选择的“类型:ID”集合。 */
-  selectedAiSourceKeys: new Set(),
-  /** aiMode 是单篇追问 ask 或多资料比较 compare。 */
-  aiMode: "ask",
-  /** aiConfigured 表示本机服务端是否已读取 DeepSeek Key。 */
-  aiConfigured: false,
-  /** aiConversations 是资料问答页显示的本地历史摘要。 */
-  aiConversations: [],
-  /** aiHistoryTimer 用于合并连续输入产生的历史搜索请求。 */
-  aiHistoryTimer: null,
   /** importJobs 是任务中心最近的浏览器收藏、OCR 和视频导入记录。 */
   importJobs: [],
   /** importJobFilter 控制任务中心的重点、状态和类型筛选。 */
@@ -157,27 +158,14 @@ const applicationState = {
   documentChapters: [],
   /** activeDocumentChapterIndex 是当前只渲染的一章下标。 */
   activeDocumentChapterIndex: 0,
+  /** 连续阅读章节索引；仅用于目录定位和滚动章节识别，不卸载 DOM，也不改写章节高度。 */
+  documentContinuousIndex: null,
+  /** documentVirtualScrollFrame 合并连续滚动中的章节定位计算。 */
+  documentVirtualScrollFrame: null,
   /** uploadInProgress 防止两个大批次同时解析造成内存峰值。 */
   uploadInProgress: false,
   /** uploadBatchHideTimer 在整批成功后收起紧凑进度提示。 */
   uploadBatchHideTimer: null,
-  /** activityDashboard 是学习统计页最近一次加载的数据。 */
-  activityDashboard: null,
-  /** activityRangeDays 是学习统计页当前时间范围。 */
-  activityRangeDays: 30,
-  /** activityShowSecondaryFolders 控制资料库柱状图是否展示二级目录。 */
-  activityShowSecondaryFolders: false,
-  /** githubProjects 是“项目研读”左侧档案索引的轻量项目列表。 */
-  githubProjects: [],
-  githubProjectQuery: "",
-  githubProjectSort: "recent",
-  githubProjectPage: 1,
-  /** githubProjectDetails 缓存本次页面会话已经读取的完整研读报告。 */
-  githubProjectDetails: new Map(),
-  /** activeGithubProjectId 是当前打开的项目档案。 */
-  activeGithubProjectId: "",
-  /** githubAnalysisInProgress 防止重复提交同一个耗时分析请求。 */
-  githubAnalysisInProgress: false,
   /** readingActivitySession 是当前正文的精确活跃阅读会话。 */
   readingActivitySession: null,
   /** readingActivityTimer 定期累计并保存活跃阅读时长。 */
@@ -272,37 +260,11 @@ const dom = {
   videoImportForm: document.querySelector("#video-import-form"),
   videoUrlInput: document.querySelector("#video-url-input"),
   importVideoButton: document.querySelector("#import-video-button"),
-  activityTrackingNote: document.querySelector("#activity-tracking-note"),
-  activityRangeForm: document.querySelector("#activity-range-form"),
-  activityRangeDaysInput: document.querySelector("#activity-range-days"),
-  activitySecondaryToggle: document.querySelector("#activity-secondary-toggle"),
-  activityReadingTime: document.querySelector("#activity-reading-time"),
-  activityReadItems: document.querySelector("#activity-read-items"),
-  activityActiveDays: document.querySelector("#activity-active-days"),
-  activityNewItems: document.querySelector("#activity-new-items"),
-  activityReadingChart: document.querySelector("#activity-reading-chart"),
-  activityProgressChart: document.querySelector("#activity-progress-chart"),
-  activityLibraryChart: document.querySelector("#activity-library-chart"),
-  activityGithubStatistics: document.querySelector("#activity-github-statistics"),
-  activityRecentReading: document.querySelector("#activity-recent-reading"),
-  activityRecentImports: document.querySelector("#activity-recent-imports"),
-  githubProjectForm: document.querySelector("#github-project-form"),
-  githubProjectUrl: document.querySelector("#github-project-url"),
-  githubAnalyzeButton: document.querySelector("#github-analyze-button"),
-  githubAnalysisStatus: document.querySelector("#github-analysis-status"),
-  githubProjectCount: document.querySelector("#github-project-count"),
-  githubProjectList: document.querySelector("#github-project-list"),
-  githubProjectSearch: document.querySelector("#github-project-search"),
-  githubProjectSort: document.querySelector("#github-project-sort"),
-  githubProjectPageLabel: document.querySelector("#github-project-page-label"),
-  githubProjectPrevious: document.querySelector("#github-project-previous"),
-  githubProjectNext: document.querySelector("#github-project-next"),
-  githubProjectResults: document.querySelector("#github-project-results"),
-  githubProjectDetail: document.querySelector("#github-project-detail"),
   reader: document.querySelector("#reader"),
   readerBackButton: document.querySelector("#reader-back-button"),
   readerModeSwitch: document.querySelector("#reader-mode-switch"),
   originalDocumentLink: document.querySelector("#original-document-link"),
+  readerDocumentName: document.querySelector("#reader-document-name"),
   readerTitle: document.querySelector("#reader-title"),
   readerMeta: document.querySelector("#reader-meta"),
   readerSummary: document.querySelector("#reader-summary"),
@@ -375,16 +337,6 @@ const dom = {
   readingTocToggle: document.querySelector("#reading-toc-toggle"),
   readingTocReopen: document.querySelector("#reading-toc-reopen"),
   readingToolsPanel: document.querySelector("#reading-tools-panel"),
-  readingAiPanel: document.querySelector("#reading-ai-panel"),
-  readingAiSourceTitle: document.querySelector("#reading-ai-source-title"),
-  readingAiSelection: document.querySelector("#reading-ai-selection"),
-  readingAiSelectionText: document.querySelector("#reading-ai-selection-text"),
-  readingAiClearSelection: document.querySelector("#reading-ai-clear-selection"),
-  readingAiMessages: document.querySelector("#reading-ai-messages"),
-  readingAiForm: document.querySelector("#reading-ai-form"),
-  readingAiInput: document.querySelector("#reading-ai-input"),
-  readingAiSubmit: document.querySelector("#reading-ai-submit"),
-  readingAiStatus: document.querySelector("#reading-ai-status"),
   readingStatusSelect: document.querySelector("#reading-status-select"),
   readingProgressLabel: document.querySelector("#reading-progress-label"),
   readingProgressBar: document.querySelector("#reading-progress-bar"),
@@ -441,25 +393,6 @@ const dom = {
   knowledgeCardQuestion: document.querySelector("#knowledge-card-question"),
   knowledgeCardAnswer: document.querySelector("#knowledge-card-answer"),
   knowledgeCardSource: document.querySelector("#knowledge-card-source"),
-  aiStatusLabel: document.querySelector("#ai-status-label"),
-  aiSourceCount: document.querySelector("#ai-source-count"),
-  aiSourceSearch: document.querySelector("#ai-source-search"),
-  aiSourceList: document.querySelector("#ai-source-list"),
-  aiQuestionForm: document.querySelector("#ai-question-form"),
-  aiModeSwitch: document.querySelector("#ai-mode-switch"),
-  aiQuestionInput: document.querySelector("#ai-question-input"),
-  aiSubmitButton: document.querySelector("#ai-submit-button"),
-  aiAnswerPanel: document.querySelector("#ai-answer-panel"),
-  aiAnswerStats: document.querySelector("#ai-answer-stats"),
-  aiEvidenceWarning: document.querySelector("#ai-evidence-warning"),
-  aiAnswerText: document.querySelector("#ai-answer-text"),
-  aiCitationList: document.querySelector("#ai-citation-list"),
-  aiHistorySearch: document.querySelector("#ai-history-search"),
-  aiHistoryList: document.querySelector("#ai-history-list"),
-  aiHistoryDetail: document.querySelector("#ai-history-detail"),
-  documentAiButton: document.querySelector("#document-ai-button"),
-  articleAiButton: document.querySelector("#article-ai-button"),
-  paperAiButton: document.querySelector("#paper-ai-button"),
   moveFolderDialog: document.querySelector("#move-folder-dialog"),
   workRecordDialog: document.querySelector("#work-record-dialog"),
   workRecordForm: document.querySelector("#work-record-form"),
@@ -552,11 +485,6 @@ function formatReadingDuration(seconds) {
   return minutes ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`;
 }
 
-/** 将目标类型转换为页面上的中文标签。 */
-function getActivityTypeLabel(targetType) {
-  return { document: "文档", article: "网页文章", paper: "论文" }[targetType] || "资料";
-}
-
 /** 打开统计列表中选中的知识来源。 */
 function openActivityTarget(targetType, targetId) {
   if (targetType === "document") void openDocument(targetId, { fromView: "activity" });
@@ -564,647 +492,6 @@ function openActivityTarget(targetType, targetId) {
   if (targetType === "paper") void openPaper(targetId, { fromView: "activity" });
 }
 
-/** 为图表创建 SVG 元素，避免拼接不可信的内容。 */
-function createSvgElement(name, attributes = {}) {
-  const element = document.createElementNS("http://www.w3.org/2000/svg", name);
-  for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, String(value));
-  return element;
-}
-
-/** 渲染阅读活跃度折线图。 */
-function renderReadingActivityChart(points) {
-  dom.activityReadingChart.replaceChildren();
-  const width = 760;
-  const height = 272;
-  const padding = { top: 24, right: 24, bottom: 64, left: 48 };
-  const values = points.map((point) => (Number(point.activeSeconds) || 0) / 60);
-  const observedMaximum = Math.max(0, ...values);
-  const maximum = Math.max(5, observedMaximum);
-  const svg = createSvgElement("svg", { viewBox: `0 0 ${width} ${height}`, "aria-hidden": "true" });
-  for (let index = 0; index <= 4; index += 1) {
-    const y = padding.top + ((height - padding.top - padding.bottom) * index) / 4;
-    svg.append(createSvgElement("line", { x1: padding.left, x2: width - padding.right, y1: y, y2: y, class: "activity-grid-line" }));
-    const label = createSvgElement("text", { x: padding.left - 10, y: y + 4, class: "activity-axis-label", "text-anchor": "end" });
-    label.textContent = String(Math.round(maximum * (1 - index / 4)));
-    svg.append(label);
-  }
-  const chartWidth = width - padding.left - padding.right;
-  const chartHeight = height - padding.top - padding.bottom;
-  const coordinates = values.map((value, index) => ({
-    x: padding.left + (chartWidth * index) / Math.max(1, values.length - 1),
-    y: padding.top + chartHeight * (1 - value / maximum),
-  }));
-  const area = createSvgElement("path", {
-    d: coordinates.length ? `M ${coordinates[0].x} ${padding.top + chartHeight} L ${coordinates.map((point) => `${point.x} ${point.y}`).join(" L ")} L ${coordinates.at(-1).x} ${padding.top + chartHeight} Z` : "",
-    class: "activity-line-area",
-  });
-  const line = createSvgElement("polyline", {
-    points: coordinates.map((point) => `${point.x},${point.y}`).join(" "),
-    class: "activity-line-path",
-  });
-  svg.append(area, line);
-  /** 30 天以内逐日标注；更长区间仍按天计算，但抽样标签以避免完全重叠。 */
-  const labelStep = points.length <= 31 ? 1 : Math.ceil(points.length / 31);
-  const labelIndexes = new Set(
-    points.map((_, index) => index).filter((index) => index % labelStep === 0),
-  );
-  if (points.length) labelIndexes.add(points.length - 1);
-  const chartBottom = padding.top + chartHeight;
-  for (const index of labelIndexes) {
-    if (!points[index]) continue;
-    const x = coordinates[index].x;
-    svg.append(createSvgElement("line", {
-      x1: x,
-      x2: x,
-      y1: chartBottom,
-      y2: chartBottom + 4,
-      class: "activity-axis-tick",
-    }));
-    const y = chartBottom + 11;
-    const label = createSvgElement("text", {
-      x,
-      y,
-      class: "activity-axis-label activity-axis-day-label",
-      "text-anchor": points.length > 14 ? "end" : index === 0 ? "start" : index === points.length - 1 ? "end" : "middle",
-      transform: points.length > 14 ? `rotate(-55 ${x} ${y})` : "",
-    });
-    label.textContent = points[index].date.slice(5).replace("-", "/");
-    svg.append(label);
-  }
-  dom.activityReadingChart.append(svg);
-  dom.activityReadingChart.setAttribute("aria-label", `阅读活跃度折线图，最高单日 ${Math.round(observedMaximum)} 分钟`);
-}
-
-/** 渲染当前阅读进度的环形分布图和图例。 */
-function renderProgressDistribution(items) {
-  dom.activityProgressChart.replaceChildren();
-  const total = items.reduce((sum, item) => sum + (Number(item.count) || 0), 0);
-  const chart = document.createElement("div");
-  chart.className = "activity-donut";
-  const colors = ["var(--line-dark)", "var(--blue)", "var(--amber)", "var(--cyan-strong)"];
-  let cursor = 0;
-  const segments = items.map((item, index) => {
-    const start = cursor;
-    cursor += total ? (Number(item.count) / total) * 360 : 0;
-    return `${colors[index]} ${start}deg ${cursor}deg`;
-  });
-  chart.style.background = total ? `conic-gradient(${segments.join(",")})` : "var(--line)";
-  const center = document.createElement("span");
-  center.innerHTML = `<strong>${total}</strong><small>有进度记录</small>`;
-  chart.append(center);
-  const legend = document.createElement("div");
-  legend.className = "activity-legend";
-  items.forEach((item, index) => {
-    const row = document.createElement("div");
-    const marker = document.createElement("i");
-    marker.style.background = colors[index];
-    row.append(marker, createTextElement("span", "", item.label), createTextElement("strong", "", String(item.count)));
-    legend.append(row);
-  });
-  dom.activityProgressChart.append(chart, legend);
-}
-
-/** 渲染以文件夹为横轴、内容数量为纵轴的堆叠柱状图。 */
-function renderLibraryCompositionChart(composition) {
-  dom.activityLibraryChart.replaceChildren();
-  const folders = Array.isArray(composition?.folders) ? composition.folders : [];
-  const visibleFolders = folders.filter(
-    (folder) => Number(folder.level) === 1 || applicationState.activityShowSecondaryFolders,
-  );
-  const maximum = Math.max(1, Number(composition?.paperCount) || 0, ...visibleFolders.map((folder) => Number(folder.itemCount) || 0));
-  const firstLevelCount = folders.filter((folder) => Number(folder.level) === 1).length;
-  const secondLevelCount = folders.filter((folder) => Number(folder.level) === 2).length;
-
-  const summary = document.createElement("div");
-  summary.className = "activity-library-summary";
-  for (const [label, value] of [
-    ["文档", composition?.documentCount],
-    ["网页文章", composition?.articleCount],
-    ["论文", composition?.paperCount],
-  ]) {
-    const item = document.createElement("span");
-    item.append(createTextElement("small", "", label), createTextElement("strong", "", String(Number(value) || 0)));
-    summary.append(item);
-  }
-
-  const legend = document.createElement("div");
-  legend.className = "activity-library-legend";
-  legend.innerHTML = `<span><i class="is-document"></i>文档</span><span><i class="is-article"></i>网页文章</span><span><i class="is-paper"></i>论文</span><small>${firstLevelCount} 个一级目录${applicationState.activityShowSecondaryFolders ? ` · 已展开 ${secondLevelCount} 个二级目录` : " · 二级目录已收起"}</small>`;
-
-  const plot = document.createElement("div");
-  plot.className = "activity-library-plot";
-  const scale = document.createElement("div");
-  scale.className = "activity-library-scale";
-  for (const ratio of [1, 0.75, 0.5, 0.25, 0]) {
-    const tick = document.createElement("span");
-    tick.style.bottom = `${ratio * 100}%`;
-    tick.textContent = String(Math.round(maximum * ratio));
-    scale.append(tick);
-  }
-  const columns = document.createElement("div");
-  columns.className = "activity-library-columns";
-  const chartItems = [{
-    id: "paper-library",
-    name: "论文库",
-    level: 0,
-    documentCount: 0,
-    articleCount: 0,
-    paperCount: Number(composition?.paperCount) || 0,
-    itemCount: Number(composition?.paperCount) || 0,
-  }, ...visibleFolders];
-  columns.classList.toggle("is-expanded", applicationState.activityShowSecondaryFolders);
-  columns.style.setProperty("--activity-library-column-count", String(chartItems.length));
-  /** createLibraryColumn 把一条目录统计转换为统一的柱状项。 */
-  const createLibraryColumn = (item) => {
-    const column = document.createElement("div");
-    column.className = `activity-library-column is-level-${Number(item.level) || 0}`;
-    column.title = `${item.name}：${Number(item.itemCount) || 0}`;
-    const value = createTextElement("strong", "activity-library-value", String(Number(item.itemCount) || 0));
-    const track = document.createElement("span");
-    track.className = "activity-library-track";
-    for (const [key, className] of [["documentCount", "is-document"], ["articleCount", "is-article"], ["paperCount", "is-paper"]]) {
-      const count = Number(item[key]) || 0;
-      if (!count) continue;
-      const segment = document.createElement("i");
-      segment.className = className;
-      segment.style.height = `${(count / maximum) * 100}%`;
-      track.append(segment);
-    }
-    const label = document.createElement("span");
-    label.className = "activity-library-label";
-    label.append(createTextElement("small", "", item.level === 2 ? "二级" : item.level === 1 ? "一级" : "论文"));
-    label.append(createTextElement("strong", "", item.name));
-    column.append(value, track, label);
-    return column;
-  };
-  if (applicationState.activityShowSecondaryFolders) {
-    /** groups 按一级目录切开连续柱子，让二级目录的归属在图上直接可见。 */
-    const groups = [];
-    for (const item of chartItems) {
-      if (Number(item.level) !== 2 || groups.length === 0) {
-        groups.push({ name: item.name, level: Number(item.level) || 0, items: [item] });
-      } else {
-        groups.at(-1).items.push(item);
-      }
-    }
-    groups.forEach((group, groupIndex) => {
-      const groupElement = document.createElement("div");
-      groupElement.className = `activity-library-group is-group-${groupIndex % 2 ? "even" : "odd"}`;
-      groupElement.style.setProperty("--activity-library-group-count", String(group.items.length));
-      group.items.forEach((item) => groupElement.append(createLibraryColumn(item)));
-      const groupLabel = createTextElement(
-        "span",
-        "activity-library-group-label",
-        group.level === 0 ? "论文库 · 独立统计" : group.name,
-      );
-      groupElement.append(groupLabel);
-      columns.append(groupElement);
-    });
-  } else {
-    chartItems.forEach((item) => columns.append(createLibraryColumn(item)));
-  }
-  plot.append(scale, columns);
-  dom.activityLibraryChart.append(summary, legend, plot);
-  dom.activityLibraryChart.setAttribute(
-    "aria-label",
-    `资料库内容统计：${composition?.documentCount || 0} 份文档，${composition?.articleCount || 0} 篇网页文章，${composition?.paperCount || 0} 篇论文，${firstLevelCount} 个一级目录，${secondLevelCount} 个二级目录。`,
-  );
-  dom.activitySecondaryToggle.textContent = applicationState.activityShowSecondaryFolders
-    ? "收起二级"
-    : "展开二级";
-  dom.activitySecondaryToggle.setAttribute(
-    "aria-pressed",
-    String(applicationState.activityShowSecondaryFolders),
-  );
-}
-
-/** 统一更新 GitHub 研读表单的状态文字。 */
-function setGitHubAnalysisStatus(message, isError = false) {
-  dom.githubAnalysisStatus.textContent = message;
-  dom.githubAnalysisStatus.classList.toggle("is-error", isError);
-}
-
-/** 渲染“项目研读”左侧轻量档案索引。 */
-function renderGitHubProjectList() {
-  dom.githubProjectList.replaceChildren();
-  const result = getProjectPage(applicationState.githubProjects, {
-    query: applicationState.githubProjectQuery,
-    sort: applicationState.githubProjectSort,
-    page: applicationState.githubProjectPage,
-  });
-  applicationState.githubProjectPage = result.page;
-  dom.githubProjectPageLabel.textContent = `${result.page} / ${result.pages}`;
-  dom.githubProjectPrevious.disabled = result.page === 1;
-  dom.githubProjectNext.disabled = result.page === result.pages;
-  dom.githubProjectResults.textContent = applicationState.githubProjectQuery.trim()
-    ? `找到 ${result.total} 个项目 · 每页 10 项`
-    : `共 ${result.total} 个项目 · 每页 10 项`;
-  dom.githubProjectCount.textContent = String(applicationState.githubProjects.length);
-  if (!result.total) {
-    const empty = document.createElement("div");
-    empty.className = "github-project-list-empty";
-    empty.append(
-      createTextElement("strong", "", applicationState.githubProjects.length ? "没有匹配的项目" : "尚无项目档案"),
-      createTextElement("p", "", applicationState.githubProjects.length ? "试试项目名、组织名或简介关键词；清空搜索可查看全部。" : "提交第一个公开仓库，开始建立项目档案。"),
-    );
-    dom.githubProjectList.append(empty);
-    return;
-  }
-  for (const project of result.items) {
-    const button = document.createElement("button");
-    button.className = "github-project-index-item";
-    button.classList.toggle("is-active", project.id === applicationState.activeGithubProjectId);
-    button.type = "button";
-    button.setAttribute("aria-current", project.id === applicationState.activeGithubProjectId ? "true" : "false");
-    button.title = `${project.fullName}\n${project.analysisSummary || project.description || ""}`;
-    button.addEventListener("click", () => void openGitHubProject(project.id));
-    const heading = document.createElement("span");
-    heading.className = "github-project-index-heading";
-    heading.append(
-      createTextElement("strong", "", project.fullName || "未命名项目"),
-      createTextElement("small", "", `${project.primaryLanguage || "语言未知"} · ★ ${Number(project.stars) || 0}`),
-    );
-    const description = createTextElement(
-      "span",
-      "github-project-index-description",
-      project.analysisSummary || project.description || "这个仓库没有填写项目说明。",
-    );
-    const footer = document.createElement("span");
-    footer.className = "github-project-index-footer";
-    footer.append(
-      createTextElement("small", "", project.analysisSource === "deepseek" ? "AI 深度分析" : "本地概览"),
-      createTextElement("time", "", project.analyzedAt ? formatDate(project.analyzedAt) : "刚刚"),
-    );
-    button.append(heading, description, footer);
-    dom.githubProjectList.append(button);
-  }
-}
-
-/** 创建项目报告内的标题段。 */
-function createGitHubReportSection(eyebrow, title) {
-  const section = document.createElement("section");
-  section.className = "github-report-section";
-  const header = document.createElement("header");
-  header.append(
-    createTextElement("span", "", eyebrow),
-    createTextElement("h3", "", title),
-  );
-  section.append(header);
-  return section;
-}
-
-/** 在项目报告中渲染一组带依据的模块或技术条目。 */
-function appendGitHubDetailCards(section, items) {
-  const grid = document.createElement("div");
-  grid.className = "github-detail-card-grid";
-  for (const item of Array.isArray(items) ? items : []) {
-    const card = document.createElement("article");
-    card.append(
-      createTextElement("h4", "", item.name || "未命名条目"),
-      createTextElement("p", "", item.detail || "暂无说明。"),
-    );
-    if (item.evidence) card.append(createTextElement("small", "", `依据：${item.evidence}`));
-    grid.append(card);
-  }
-  if (!grid.childElementCount) grid.append(createTextElement("p", "github-report-missing", "现有仓库证据不足，暂未形成可靠判断。"));
-  section.append(grid);
-}
-
-/** 在项目报告中渲染有顺序的研读要点。 */
-function appendGitHubTextList(section, items, ordered = false) {
-  const list = document.createElement(ordered ? "ol" : "ul");
-  list.className = "github-report-list";
-  for (const item of Array.isArray(items) ? items : []) {
-    list.append(createTextElement("li", "", item));
-  }
-  if (!list.childElementCount) list.append(createTextElement("li", "is-muted", "现有仓库证据不足，暂未形成可靠判断。"));
-  section.append(list);
-}
-
-/** 渲染一份完整的 GitHub 项目研读报告。 */
-function renderGitHubProjectDetail(project) {
-  dom.githubProjectDetail.replaceChildren();
-  const analysis = project.analysis || {};
-  const header = document.createElement("header");
-  header.className = "github-detail-header";
-  const titleGroup = document.createElement("div");
-  titleGroup.append(
-    createTextElement("p", "eyebrow", "项目技术档案"),
-    createTextElement("h2", "", project.fullName || "未命名项目"),
-    createTextElement("p", "", analysis.positioning || analysis.overview || project.description || "这个仓库没有填写项目说明。"),
-  );
-  const sourceLink = document.createElement("a");
-  sourceLink.className = "secondary-button github-source-link";
-  sourceLink.href = project.url;
-  sourceLink.target = "_blank";
-  sourceLink.rel = "noreferrer";
-  sourceLink.textContent = "打开 GitHub ↗";
-  header.append(titleGroup, sourceLink);
-
-  const topics = document.createElement("div");
-  topics.className = "github-topic-list";
-  for (const topic of project.topics || []) topics.append(createTextElement("span", "", topic));
-  if (project.archived) topics.append(createTextElement("span", "is-archived", "已归档"));
-
-  const metrics = document.createElement("div");
-  metrics.className = "github-detail-metrics";
-  for (const [label, value] of [
-    ["STAR 数", Number(project.stars) || 0],
-    ["派生项目", Number(project.forks) || 0],
-    ["未关闭问题", Number(project.openIssues) || 0],
-    ["主要语言", project.primaryLanguage || "未知"],
-    ["开源许可", project.licenseName || "未声明"],
-    ["最近更新", project.pushedAt ? formatDate(project.pushedAt) : "未知"],
-  ]) {
-    const item = document.createElement("span");
-    item.append(createTextElement("small", "", label), createTextElement("strong", "", String(value)));
-    metrics.append(item);
-  }
-
-  const provenance = document.createElement("div");
-  provenance.className = "github-analysis-provenance";
-  provenance.append(
-    createTextElement("strong", "", project.analysisSource === "deepseek" ? "DeepSeek 深度研读" : "本地规则概览"),
-    createTextElement("span", "", `分析于 ${project.analyzedAt ? formatDate(project.analyzedAt) : "刚刚"} · 默认分支 ${project.defaultBranch || "未知"}`),
-  );
-  if (project.analysisWarning) provenance.append(createTextElement("p", "", project.analysisWarning));
-
-  const overview = createGitHubReportSection("01 / 项目总览", "项目定位与整体判断");
-  overview.append(
-    createTextElement("p", "github-report-lead", analysis.overview || "暂无整体概览。"),
-    createTextElement("p", "", analysis.positioning || "暂无定位说明。"),
-  );
-  const architecture = createGitHubReportSection("02 / 整体架构", "架构与代码组织");
-  architecture.append(createTextElement("p", "github-report-lead", analysis.architecture || "现有仓库证据不足，暂时无法判断整体架构。"));
-  const structureNames = [...new Set((project.structure || []).map((item) => String(item.path || "").split("/")[0]).filter(Boolean))].slice(0, 14);
-  if (structureNames.length) {
-    const structure = document.createElement("div");
-    structure.className = "github-structure-tags";
-    structure.append(...structureNames.map((name) => createTextElement("code", "", name)));
-    architecture.append(structure);
-  }
-  const modules = createGitHubReportSection("03 / 核心模块", "核心模块与职责");
-  appendGitHubDetailCards(modules, analysis.coreModules);
-  const stack = createGitHubReportSection("04 / 技术栈", "技术栈与使用目的");
-  appendGitHubDetailCards(stack, analysis.technologyStack);
-  const flow = createGitHubReportSection("05 / 执行流程", "关键执行链路");
-  appendGitHubTextList(flow, analysis.executionFlow, true);
-
-  const judgmentGrid = document.createElement("div");
-  judgmentGrid.className = "github-judgment-grid";
-  const strengths = createGitHubReportSection("06 / 设计优势", "值得关注的设计");
-  appendGitHubTextList(strengths, analysis.strengths);
-  const risks = createGitHubReportSection("07 / 风险边界", "局限、风险与待核验点");
-  appendGitHubTextList(risks, analysis.risks);
-  judgmentGrid.append(strengths, risks);
-
-  const learningGrid = document.createElement("div");
-  learningGrid.className = "github-learning-grid";
-  const start = createGitHubReportSection("08 / 上手路线", "建议上手顺序");
-  appendGitHubTextList(start, analysis.gettingStarted, true);
-  const learning = createGitHubReportSection("09 / 学习建议", "学习与借鉴建议");
-  appendGitHubTextList(learning, analysis.learningSuggestions);
-  learningGrid.append(start, learning);
-
-  const evidence = document.createElement("footer");
-  evidence.className = "github-report-evidence";
-  const evidenceText = [
-    `${(project.structure || []).length} 个目录树条目`,
-    `${(project.importantFiles || []).length} 个关键配置文件`,
-    `${(project.contributors || []).length} 位主要贡献者`,
-  ];
-  if (project.treeTruncated) evidenceText.push("GitHub 返回的目录树已截断");
-  evidence.append(
-    createTextElement("strong", "", "本次分析证据"),
-    createTextElement("span", "", evidenceText.join(" · ")),
-  );
-
-  dom.githubProjectDetail.append(
-    header,
-    topics,
-    metrics,
-    provenance,
-    overview,
-    architecture,
-    modules,
-    stack,
-    flow,
-    judgmentGrid,
-    learningGrid,
-    evidence,
-  );
-}
-
-/** 打开一份项目档案，并在需要时从本地服务读取完整报告。 */
-async function openGitHubProject(projectId) {
-  applicationState.activeGithubProjectId = projectId;
-  renderGitHubProjectList();
-  let project = applicationState.githubProjectDetails.get(projectId);
-  if (!project) {
-    dom.githubProjectDetail.replaceChildren(createTextElement("p", "github-project-loading", "正在打开项目档案……"));
-    const payload = await requestJson(`/api/github-projects/${encodeURIComponent(projectId)}`);
-    project = payload.project;
-    applicationState.githubProjectDetails.set(projectId, project);
-  }
-  if (applicationState.activeGithubProjectId === projectId) renderGitHubProjectDetail(project);
-}
-
-/** 加载已有项目档案，并自动选中最近一次研读。 */
-async function loadGitHubProjects(options = {}) {
-  const payload = await requestJson("/api/github-projects");
-  applicationState.githubProjects = Array.isArray(payload.projects) ? payload.projects : [];
-  if (options.selectId) {
-    applicationState.githubProjectQuery = "";
-    applicationState.githubProjectSort = "recent";
-    applicationState.githubProjectPage = 1;
-    dom.githubProjectSearch.value = "";
-    dom.githubProjectSort.value = "recent";
-  }
-  const requestedId = options.selectId || applicationState.activeGithubProjectId;
-  const selectedId = applicationState.githubProjects.some((project) => project.id === requestedId)
-    ? requestedId
-    : applicationState.githubProjects[0]?.id || "";
-  applicationState.activeGithubProjectId = selectedId;
-  renderGitHubProjectList();
-  if (selectedId) {
-    await openGitHubProject(selectedId);
-  } else {
-    dom.githubProjectDetail.replaceChildren();
-    const empty = document.createElement("div");
-    empty.className = "github-project-empty";
-    empty.append(
-      createTextElement("span", "", "GH"),
-      createTextElement("h3", "", "从一个值得拆解的项目开始"),
-      createTextElement("p", "", "粘贴仓库主页链接。完成后，这里会呈现项目画像、代码结构、关键模块、运行链路、优势风险与建议学习路径。"),
-    );
-    dom.githubProjectDetail.append(empty);
-  }
-}
-
-/** 提交一个公开 GitHub 仓库，等待后端完成采集、分析与本地保存。 */
-async function analyzeGitHubProject() {
-  if (applicationState.githubAnalysisInProgress) return;
-  const url = dom.githubProjectUrl.value.trim();
-  if (!url) return;
-  applicationState.githubAnalysisInProgress = true;
-  dom.githubAnalyzeButton.disabled = true;
-  dom.githubAnalyzeButton.textContent = "研读中…";
-  setGitHubAnalysisStatus("正在读取仓库元数据、README、目录树和关键配置，并形成中文研读报告……");
-  try {
-    const payload = await requestJson("/api/github-projects/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    const project = payload.project;
-    applicationState.githubProjectDetails.set(project.id, project);
-    applicationState.activeGithubProjectId = project.id;
-    dom.githubProjectUrl.value = "";
-    setGitHubAnalysisStatus(`${project.fullName} 已完成研读，并保存到本机项目档案。`);
-    await loadGitHubProjects({ selectId: project.id });
-    void loadActivityDashboard().catch(() => {});
-  } catch (error) {
-    setGitHubAnalysisStatus(error.message, true);
-    showToast(error.message);
-  } finally {
-    applicationState.githubAnalysisInProgress = false;
-    dom.githubAnalyzeButton.disabled = false;
-    dom.githubAnalyzeButton.textContent = "深度研读";
-  }
-}
-
-/** 渲染统计首页的 GitHub 收藏规模、语言分布与最近项目。 */
-function renderGitHubStatistics(statistics) {
-  dom.activityGithubStatistics.replaceChildren();
-  const projectCount = Number(statistics?.projectCount) || 0;
-  if (!projectCount) {
-    const empty = document.createElement("div");
-    empty.className = "activity-github-empty";
-    const copy = document.createElement("div");
-    copy.append(
-      createTextElement("strong", "", "还没有 GitHub 项目档案"),
-      createTextElement("p", "", "研读一个公开仓库后，这里会展示收藏规模、项目活跃度与技术语言分布。"),
-    );
-    const button = createTextElement("button", "secondary-button", "开始项目研读");
-    button.type = "button";
-    button.addEventListener("click", () => showView("github"));
-    empty.append(copy, button);
-    dom.activityGithubStatistics.append(empty);
-    return;
-  }
-
-  const summary = document.createElement("div");
-  summary.className = "activity-github-summary";
-  for (const [label, value, note] of [
-    ["PROJECTS", projectCount, "项目档案"],
-    ["ACTIVE 90D", Number(statistics.activeProjectCount) || 0, "近 90 天仍更新"],
-    ["TOTAL STARS", Number(statistics.totalStars) || 0, "累计关注"],
-    ["TOTAL FORKS", Number(statistics.totalForks) || 0, "累计分支"],
-  ]) {
-    const item = document.createElement("span");
-    item.append(
-      createTextElement("small", "", label),
-      createTextElement("strong", "", String(value)),
-      createTextElement("em", "", note),
-    );
-    summary.append(item);
-  }
-
-  const body = document.createElement("div");
-  body.className = "activity-github-body";
-  const languagePanel = document.createElement("section");
-  languagePanel.className = "activity-language-panel";
-  languagePanel.append(createTextElement("h4", "", "主要技术语言"));
-  const languages = Array.isArray(statistics.languageDistribution) ? statistics.languageDistribution : [];
-  const maximum = Math.max(1, ...languages.map((item) => Number(item.count) || 0));
-  const languageRows = document.createElement("div");
-  languageRows.className = "activity-language-rows";
-  for (const item of languages) {
-    const row = document.createElement("div");
-    row.append(createTextElement("span", "", item.name || "未知"));
-    const track = document.createElement("i");
-    const fill = document.createElement("b");
-    fill.style.width = `${((Number(item.count) || 0) / maximum) * 100}%`;
-    track.append(fill);
-    row.append(track, createTextElement("strong", "", String(Number(item.count) || 0)));
-    languageRows.append(row);
-  }
-  languagePanel.append(languageRows);
-
-  const recentPanel = document.createElement("section");
-  recentPanel.className = "activity-github-recent";
-  recentPanel.append(createTextElement("h4", "", "最近研读"));
-  const recentList = document.createElement("div");
-  for (const project of statistics.recentProjects || []) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.addEventListener("click", () => {
-      applicationState.activeGithubProjectId = project.id;
-      showView("github");
-    });
-    const copy = document.createElement("span");
-    copy.append(
-      createTextElement("strong", "", project.fullName || "未命名项目"),
-      createTextElement("small", "", `${project.primaryLanguage || "语言未知"} · ${project.analyzedAt ? formatDate(project.analyzedAt) : "刚刚"}`),
-    );
-    button.append(copy, createTextElement("em", "", `★ ${Number(project.stars) || 0}`));
-    recentList.append(button);
-  }
-  recentPanel.append(recentList);
-  body.append(languagePanel, recentPanel);
-  dom.activityGithubStatistics.append(summary, body);
-}
-
-/** 渲染最近阅读或最近入库的可操作列表。 */
-function renderActivityList(container, items, mode) {
-  container.replaceChildren();
-  if (!items.length) {
-    container.append(createTextElement("p", "activity-empty", mode === "reading" ? "这个时间范围内还没有阅读记录。" : "这个时间范围内还没有新增资料。"));
-    return;
-  }
-  for (const item of items) {
-    const button = document.createElement("button");
-    button.className = "activity-list-item";
-    button.type = "button";
-    button.addEventListener("click", () => openActivityTarget(item.targetType, item.targetId));
-    const main = document.createElement("span");
-    main.className = "activity-list-main";
-    main.append(createTextElement("strong", "", item.title || "未命名资料"));
-    main.append(createTextElement("small", "", `${getActivityTypeLabel(item.targetType)} · ${item.category || "未分类"}`));
-    const detail = document.createElement("span");
-    detail.className = "activity-list-detail";
-    if (mode === "reading") {
-      detail.append(createTextElement("strong", "", `${Math.round(Number(item.progressPercent) || 0)}%`));
-      detail.append(createTextElement("small", "", item.activeSeconds ? formatReadingDuration(item.activeSeconds) : formatDate(item.lastReadAt)));
-    } else {
-      detail.append(createTextElement("strong", "", formatDate(item.createdAt)));
-      detail.append(createTextElement("small", "", item.sourceLabel || "本地导入"));
-    }
-    button.append(main, detail);
-    container.append(button);
-  }
-}
-
-/** 加载并渲染学习与资料活动仪表盘。 */
-async function loadActivityDashboard() {
-  const payload = await requestJson(`/api/activity-dashboard?days=${applicationState.activityRangeDays}`);
-  const dashboard = payload.dashboard;
-  applicationState.activityDashboard = dashboard;
-  dom.activityReadingTime.textContent = formatReadingDuration(dashboard.summary.totalReadingSeconds);
-  dom.activityReadItems.textContent = String(dashboard.summary.readItemCount);
-  dom.activityActiveDays.textContent = String(dashboard.summary.activeDays);
-  dom.activityNewItems.textContent = String(dashboard.summary.newItemCount);
-  dom.activityTrackingNote.textContent = dashboard.trackingStartedAt
-    ? `阅读时长从 ${formatDate(dashboard.trackingStartedAt)} 起按可见页面与活跃交互精确记录；此前仅展示阅读进度。`
-    : "阅读时长将从下一次打开正文开始，按可见页面与活跃交互精确记录；既有进度仍会正常展示。";
-  dom.activityRangeDaysInput.value = String(dashboard.range.days);
-  renderReadingActivityChart(dashboard.readingTrend);
-  renderProgressDistribution(dashboard.progressDistribution);
-  renderLibraryCompositionChart(dashboard.libraryComposition);
-  renderGitHubStatistics(dashboard.githubStatistics);
-  renderActivityList(dom.activityRecentReading, dashboard.recentReading, "reading");
-  renderActivityList(dom.activityRecentImports, dashboard.recentImports, "imports");
-}
 
 /**
  * 显示短暂操作反馈。
@@ -1381,21 +668,6 @@ function splitDenseText(text) {
   return outputBlocks;
 }
 
-/**
- * 判断文本块是否主要由统计数字、百分比和英文技能名称组成。
- *
- * @param {string} text 待判断文本。
- * @returns {boolean} 是否为高密度数据块。
- */
-function isDenseDataBlock(text) {
-  if (text.length < 90) return false;
-  /** numericCharacters 是数字和百分号数量。 */
-  const numericCharacters = (text.match(/[\d%+]/g) ?? []).length;
-  /** latinCharacters 是英文字符数量。 */
-  const latinCharacters = (text.match(/[A-Za-z]/g) ?? []).length;
-  return (numericCharacters + latinCharacters) / text.length > 0.42;
-}
-
 /** 清理 PDF 坐标文字中不必要的中文空格。 */
 function normalizeStructuredPdfText(value) {
   return String(value || "")
@@ -1504,27 +776,98 @@ function parseStructuredPdfColumn(lines, options = {}) {
   };
 }
 
+/** 把一段坐标文字添加为连续正文，同时恢复短标题和定义项强调。 */
+function appendStructuredPdfText(target, lines, options = {}) {
+  const parsed = parseStructuredPdfColumn(lines, options);
+  for (const calloutGroup of parsed.calloutGroups) {
+    const calloutList = document.createElement("ol");
+    calloutList.className = "readable-structured-callouts";
+    for (const callout of calloutGroup) {
+      const item = document.createElement("li");
+      item.value = Number(callout.index);
+      item.textContent = callout.text;
+      calloutList.append(item);
+    }
+    target.append(calloutList);
+  }
+  for (const paragraphText of parsed.paragraphs) {
+    if (options.allowHeadings && isReadableHeading(paragraphText, true, true)) {
+      target.append(createTextElement("h3", "readable-structured-heading", paragraphText));
+      continue;
+    }
+    const paragraph = document.createElement("p");
+    const definitionMatch = paragraphText.match(/^([^：]{1,28}：)(.*)$/);
+    if (definitionMatch) {
+      paragraph.append(createTextElement("strong", "", definitionMatch[1]), definitionMatch[2]);
+    } else {
+      paragraph.textContent = paragraphText;
+    }
+    target.append(paragraph);
+  }
+}
+
 /** 将复杂 PDF 页显示为可复制双栏 HTML，并把原始插图放回相应栏。 */
 function createStructuredPdfPage(pageNumber, pageData) {
   const page = document.createElement("section");
   page.className = "readable-structured-page";
   page.dataset.pdfPage = String(pageNumber);
+  /** wasFacsimile 只保留低置信标记；HTML 阅读不再插入整页栅格图。 */
+  const wasFacsimile = pageData.presentationMode === "facsimile";
+  if (wasFacsimile) page.classList.add("is-text-fallback");
+  /** displayFigureRegions 排除后端为整页保真生成的全页区域，只留下真实局部图框。 */
+  const displayFigureRegions = wasFacsimile ? [] : (pageData.figureRegions || []);
+  const displayFigures = wasFacsimile ? [] : (pageData.figures || []);
   const headerText = (pageData.header || []).map((line) => normalizeStructuredPdfText(line.text)).join(" · ");
   if (headerText) page.append(createTextElement("div", "readable-structured-header", headerText));
+  if (wasFacsimile) {
+    page.append(createTextElement(
+      "p",
+      "readable-structured-fallback-note",
+      "本页包含复杂图示；HTML 阅读保留可复制文字，完整图示可从顶部打开原版 PDF。",
+    ));
+  }
+  /**
+   * 单栏页不能套用双栏容器，否则同一行会被拆成先左后右的两个半句。
+   * 按 PDF 纵坐标将正文和跨栏图交错放回原位，图内文字由原始裁剪保留。
+   */
+  if (!pageData.multiColumn && displayFigureRegions.length > 0) {
+    const readingFlow = buildSingleColumnPdfFlow(pageData, displayFigureRegions);
+    for (const block of readingFlow) {
+      if (block.type === "figure") {
+        page.append(createStructuredPdfFigure(
+          pageNumber,
+          block.figure,
+          block.figure.caption || "",
+          Number(block.figure.regionIndex) || 0,
+        ));
+        continue;
+      }
+      appendStructuredPdfText(page, block.lines, { allowHeadings: true });
+    }
+    const footerText = (pageData.footer || [])
+      .map((line) => normalizeStructuredPdfText(line.text))
+      .join(" ");
+    page.append(createTextElement(
+      "div",
+      "readable-structured-footer",
+      footerText || `原文第 ${pageNumber} 页`,
+    ));
+    return page;
+  }
   const columns = document.createElement("div");
   columns.className = "readable-structured-columns";
-  const hasFigureRegions = (pageData.figureRegions || []).length > 0;
+  const hasFigureRegions = displayFigureRegions.length > 0;
   for (const columnName of ["left", "right"]) {
     const column = document.createElement("div");
     column.className = `readable-structured-column is-${columnName}`;
-    const figureRegions = (pageData.figureRegions || [])
+    const figureRegions = displayFigureRegions
       .filter((region) => region.column === columnName);
     const parsed = parseStructuredPdfColumn(pageData.columns?.[columnName] || [], {
-      removeDiagramLabels: (pageData.figureRegions || []).length > 0 || (pageData.figures || []).length > 0,
+      removeDiagramLabels: wasFacsimile || displayFigureRegions.length > 0 || displayFigures.length > 0,
     });
     const figures = hasFigureRegions
       ? figureRegions
-      : (pageData.figures || []).filter((figure) => figure.column === columnName);
+      : displayFigures.filter((figure) => figure.column === columnName);
     const figureElements = figures.map((figureInfo, index) => createStructuredPdfFigure(
       pageNumber,
       figureInfo,
@@ -1571,7 +914,7 @@ function createStructuredPdfPage(pageNumber, pageData) {
     columns.append(column);
   }
   page.append(columns);
-  const spanningRegions = (pageData.figureRegions || []).filter((region) => region.column === "both");
+  const spanningRegions = displayFigureRegions.filter((region) => region.column === "both");
   for (const [regionIndex, region] of spanningRegions.entries()) {
     page.append(createStructuredPdfFigure(
       pageNumber,
@@ -1581,7 +924,11 @@ function createStructuredPdfPage(pageNumber, pageData) {
     ));
   }
   const footerText = (pageData.footer || []).map((line) => normalizeStructuredPdfText(line.text)).join(" ");
-  page.append(createTextElement("div", "readable-structured-footer", footerText || `原文第 ${pageNumber} 页`));
+  page.append(createTextElement(
+    "div",
+    "readable-structured-footer",
+    footerText || `原文第 ${pageNumber} 页${wasFacsimile ? " · 复杂版面文字模式" : ""}`,
+  ));
   return page;
 }
 
@@ -1589,16 +936,14 @@ function createStructuredPdfPage(pageNumber, pageData) {
  * 把 PDF/文本提取结果重新组织为安全的语义化阅读结构。
  *
  * @param {string} text 文档提取正文。
+ * @param {{ chapterTitle?: string }} options 权威章节标题，用于恢复页首标题语义。
  * @returns {DocumentFragment} 只包含安全文本节点的阅读内容。
  */
-function createReadableDocument(text) {
+function createReadableDocument(text, options = {}) {
   /** fragment 是最终插入阅读页的文档片段。 */
   const fragment = document.createDocumentFragment();
   /** normalizedLines 是保留空行但清理行内多余空白的正文行。 */
-  const normalizedLines = text
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .map((line) => line.replace(/[ \t]+/g, " ").trim());
+  const normalizedLines = normalizeReadableLines(text);
   /** paragraphLines 暂存属于同一自然段的连续行。 */
   let paragraphLines = [];
   /** skipPdfPageText 表示当前复杂页已由坐标文字重建，后续扁平副本不再重复显示。 */
@@ -1612,20 +957,19 @@ function createReadableDocument(text) {
   function flushParagraph() {
     if (paragraphLines.length === 0) return;
     /** paragraphText 是修复 PDF 强制换行后的自然段正文。 */
-    const paragraphText = paragraphLines
-      .reduce((combinedText, currentLine) => {
-        if (!combinedText) return currentLine;
-        /** needsSpace 用于保留英文单词跨 PDF 行连接时的自然间隔。 */
-        const needsSpace =
-          /[A-Za-z0-9]$/.test(combinedText) && /^[A-Za-z0-9]/.test(currentLine);
-        return `${combinedText}${needsSpace ? " " : ""}${currentLine}`;
-      }, "")
-      .trim();
+    const paragraphText = joinReadableTextLines(paragraphLines);
     if (paragraphText) {
       /** readableBlocks 是从可能很长的 PDF 行中恢复出的短段落。 */
       const readableBlocks = splitDenseText(paragraphText);
       for (const block of readableBlocks) {
-        if (isReadableHeading(block, true, true)) {
+        const matchesChapterHeading = matchesReadableChapterHeading(
+          block,
+          options.chapterTitle,
+        );
+        const blockKind = classifyReadableBlock(block, {
+          heading: matchesChapterHeading || isReadableHeading(block, true, true),
+        });
+        if (blockKind === "heading") {
           /** markdownHeading 是当前标题可能携带的 Markdown 层级标记。 */
           const markdownHeading = block.match(/^(#{1,4})\s+(.+)$/);
           /** headingLevel 是在阅读页主标题之下使用的安全标题层级。 */
@@ -1635,7 +979,13 @@ function createReadableDocument(text) {
           /** headingText 是移除 Markdown 井号后的干净标题。 */
           const headingText = markdownHeading?.[2]?.trim() || block;
           fragment.append(createTextElement(`h${headingLevel}`, "", headingText));
-        } else if (isDenseDataBlock(block)) {
+        } else if (blockKind === "list") {
+          fragment.append(createTextElement(
+            "div",
+            "readable-list-item",
+            block.replace(/^[•●▪◦]\s*/, ""),
+          ));
+        } else if (blockKind === "data") {
           fragment.append(createTextElement("div", "readable-data-block", block));
         } else {
           fragment.append(createTextElement("p", "", block));
@@ -1730,17 +1080,7 @@ function createReadableDocument(text) {
       fragment.append(createTextElement("div", "page-divider", `第 ${line} 页`));
       continue;
     }
-    if (/^[•●▪◦\-–—]\s+/.test(line)) {
-      flushParagraph();
-      /** listItem 是单独展示的项目符号内容。 */
-      const listItem = createTextElement(
-        "div",
-        "readable-list-item",
-        line.replace(/^[•●▪◦\-–—]\s+/, ""),
-      );
-      fragment.append(listItem);
-      continue;
-    }
+    if (/^[•●▪◦]\s*\S/.test(line) && paragraphLines.length > 0) flushParagraph();
     /** 连续数字部件标注属于图例清单，不应被误排成章节大标题。 */
     const numberedCalloutMatch = line.match(/^(\d{1,2})[.、)]\s*(\S.*)$/);
     const previousIsNumberedCallout = /^\d{1,2}[.、)]\s*\S/.test(previousLine);
@@ -1756,7 +1096,10 @@ function createReadableDocument(text) {
       fragment.append(listItem);
       continue;
     }
-    if (isReadableHeading(line, !previousLine, !nextLine)) {
+    if (
+      matchesReadableChapterHeading(line, options.chapterTitle)
+      || isReadableHeading(line, !previousLine, !nextLine)
+    ) {
       flushParagraph();
       /** markdownHeading 是当前标题可能携带的 Markdown 层级标记。 */
       const markdownHeading = line.match(/^(#{1,4})\s+(.+)$/);
@@ -1931,9 +1274,9 @@ function parseDocumentChapterHeading(sourceLine) {
 function splitOversizedTextChapter(chapter) {
   if (getReadableTextLength(chapter.content) <= progressiveReadableChunkSize) return [chapter];
   return splitReadableTextIntoChunks(chapter.content).map((content, index, chunks) => ({
+    ...chapter,
     title: chunks.length === 1 ? chapter.title : `${chapter.title}（${index + 1}/${chunks.length}）`,
     content,
-    kind: "text",
   }));
 }
 
@@ -2048,6 +1391,7 @@ function createPdfOutlineDocumentChapters(text, pdfOutline) {
       title: boundary.title,
       content,
       kind: "text",
+      level: boundary.level,
     }));
   });
   return chapters.length >= 2 ? chapters : null;
@@ -2408,8 +1752,10 @@ function updateDocumentChapterNavigation() {
   const chapters = applicationState.documentChapters;
   const chapterIndex = applicationState.activeDocumentChapterIndex;
   const hasMultipleChapters = chapters.length > 1;
-  dom.documentChapterNavigation.hidden = !hasMultipleChapters;
-  dom.documentChapterFooter.hidden = !hasMultipleChapters;
+  /** PDF 使用连续正文流，目录只负责定位，不再出现上一章/下一章分页。 */
+  const usesContinuousPdfReading = dom.reader.classList.contains("is-pdf-reader");
+  dom.documentChapterNavigation.hidden = !hasMultipleChapters || usesContinuousPdfReading;
+  dom.documentChapterFooter.hidden = !hasMultipleChapters || usesContinuousPdfReading;
   if (!hasMultipleChapters) return;
   const chapter = chapters[chapterIndex];
   const counterText = `第 ${chapterIndex + 1} / ${chapters.length} 章`;
@@ -2430,18 +1776,129 @@ function updateDocumentChapterNavigation() {
 function buildDocumentChapterTableOfContents() {
   dom.readingToc.replaceChildren();
   dom.readingTocTitle.textContent = "文档章节";
-  applicationState.documentChapters.slice(0, 500).forEach((chapter, index) => {
+  const tocEntries = createDocumentChapterTocEntries(applicationState.documentChapters, 500);
+  tocEntries.forEach((entry) => {
     const tocButton = document.createElement("button");
     tocButton.type = "button";
     tocButton.className = "reading-toc-level-h2 document-chapter-toc-button";
-    tocButton.classList.toggle("is-active", index === applicationState.activeDocumentChapterIndex);
-    tocButton.setAttribute("aria-current", index === applicationState.activeDocumentChapterIndex ? "page" : "false");
-    tocButton.textContent = chapter.title.slice(0, 100);
+    tocButton.dataset.documentChapterStartIndex = String(entry.startIndex);
+    tocButton.dataset.documentChapterEndIndex = String(entry.endIndex);
+    const isActive = applicationState.activeDocumentChapterIndex >= entry.startIndex
+      && applicationState.activeDocumentChapterIndex <= entry.endIndex;
+    tocButton.classList.toggle("is-active", isActive);
+    tocButton.setAttribute("aria-current", isActive ? "page" : "false");
+    tocButton.textContent = entry.title.slice(0, 100);
     tocButton.addEventListener("click", () => {
-      void renderDocumentChapter(index, { scrollToTop: true, saveProgress: true });
+      /** continuousSection 存在时直接定位连续正文，不再重新加载单章。 */
+      const continuousSection = dom.readerContent.querySelector(
+        `[data-document-chapter-index="${entry.startIndex}"]`,
+      );
+      if (continuousSection) {
+        applicationState.activeDocumentChapterIndex = entry.startIndex;
+        updateContinuousDocumentTocState();
+        continuousSection.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      void renderDocumentChapter(entry.startIndex, { scrollToTop: true, saveProgress: true });
     });
     dom.readingToc.append(tocButton);
   });
+}
+
+/**
+ * 同步连续文档目录中的当前章节高亮。
+ *
+ * @returns {void}
+ */
+function updateContinuousDocumentTocState() {
+  const activeIndex = applicationState.activeDocumentChapterIndex;
+  Array.from(dom.readingToc.querySelectorAll(".document-chapter-toc-button"))
+    .forEach((button) => {
+      const startIndex = Number(button.dataset.documentChapterStartIndex);
+      const endIndex = Number(button.dataset.documentChapterEndIndex);
+      const isActive = activeIndex >= startIndex && activeIndex <= endIndex;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-current", isActive ? "page" : "false");
+    });
+}
+
+/**
+ * 根据当前滚动位置更新连续 PDF 的目录高亮。
+ *
+ * @returns {void}
+ */
+function updateContinuousDocumentActiveChapter() {
+  if (dom.reader.hidden || !dom.reader.classList.contains("is-pdf-reader")) return;
+  if (applicationState.documentVirtualScrollFrame) return;
+  applicationState.documentVirtualScrollFrame = window.requestAnimationFrame(() => {
+    applicationState.documentVirtualScrollFrame = null;
+    const sections = applicationState.documentContinuousIndex?.sections || [];
+    if (sections.length === 0) return;
+    const focusLine = Math.min(220, window.innerHeight * 0.28);
+    let lowerIndex = 0;
+    let upperIndex = sections.length - 1;
+    let activeIndex = 0;
+    /** 二分定位替代每次滚动扫描全部章节，超长目录也只需少量布局读取。 */
+    while (lowerIndex <= upperIndex) {
+      const middleIndex = Math.floor((lowerIndex + upperIndex) / 2);
+      if (sections[middleIndex].getBoundingClientRect().top <= focusLine) {
+        activeIndex = middleIndex;
+        lowerIndex = middleIndex + 1;
+      } else {
+        upperIndex = middleIndex - 1;
+      }
+    }
+    if (activeIndex === applicationState.activeDocumentChapterIndex) return;
+    applicationState.activeDocumentChapterIndex = activeIndex;
+    updateContinuousDocumentTocState();
+  });
+}
+
+/**
+ * 为只有标题的 PDF 大章生成可直接继续阅读的小节入口。
+ *
+ * @param {number} chapterIndex 当前章节下标。
+ * @returns {HTMLElement | null} 大章导览卡；普通章节返回空。
+ */
+function createDocumentSectionOverview(chapterIndex) {
+  const chapters = applicationState.documentChapters;
+  const chapter = chapters[chapterIndex];
+  if (!chapter || chapter.kind !== "text" || chapter.level !== 0) return null;
+  /** compactContent 排除页码标记和空白，用于判断大章是否只有标题。 */
+  const compactContent = String(chapter.content || "")
+    .replace(/\[\[ZHIXU_PDF_PAGE:\d{1,4}\]\]/g, "")
+    .normalize("NFKC")
+    .replace(/\s+/g, "");
+  const compactTitle = String(chapter.title || "").normalize("NFKC").replace(/\s+/g, "");
+  const remainingContent = compactContent.startsWith(compactTitle)
+    ? compactContent.slice(compactTitle.length)
+    : compactContent;
+  if (remainingContent.length > 24) return null;
+  /** childIndexes 只收集当前大章之后、下一个同级章之前的直接小节。 */
+  const childIndexes = [];
+  for (let index = chapterIndex + 1; index < chapters.length; index += 1) {
+    const candidate = chapters[index];
+    if (Number.isInteger(candidate.level) && candidate.level <= chapter.level) break;
+    if (candidate.level === chapter.level + 1) childIndexes.push(index);
+  }
+  if (childIndexes.length === 0) return null;
+  const overview = document.createElement("section");
+  overview.className = "document-section-overview";
+  overview.append(
+    createTextElement("p", "eyebrow", "CHAPTER CONTENTS"),
+    createTextElement("h3", "", "本章内容"),
+  );
+  const links = document.createElement("div");
+  childIndexes.forEach((index) => {
+    const button = createTextElement("button", "", chapters[index].title);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      void renderDocumentChapter(index, { scrollToTop: true, saveProgress: true });
+    });
+    links.append(button);
+  });
+  overview.append(links);
+  return overview;
 }
 
 /** codeKeywords 是基础语法着色共同识别的保留字。 */
@@ -2582,6 +2039,86 @@ function enhanceReadingSemantics(readingSurface) {
   }
 }
 
+/** 释放连续文档的滚动定位状态。 */
+function resetContinuousDocumentIndex() {
+  if (applicationState.documentVirtualScrollFrame) {
+    window.cancelAnimationFrame(applicationState.documentVirtualScrollFrame);
+  }
+  applicationState.documentContinuousIndex = null;
+  applicationState.documentVirtualScrollFrame = null;
+}
+
+/**
+ * 把 PDF 组织为稳定的连续正文。
+ * 章节分批创建以避免长任务阻塞；离屏章节交给浏览器原生 content-visibility 跳过绘制，
+ * 不再动态卸载或修改占位高度，避免滚动锚定把页面反复拉回。
+ *
+ * @param {{ scrollToTop?: boolean }} options 打开行为。
+ * @returns {Promise<boolean>} 是否成功建立连续虚拟阅读流。
+ */
+async function renderContinuousPdfDocument(options = {}) {
+  const chapters = applicationState.documentChapters;
+  if (chapters.length === 0) return false;
+  resetContinuousDocumentIndex();
+  const renderSequence = applicationState.documentRenderSequence + 1;
+  applicationState.documentRenderSequence = renderSequence;
+  applicationState.activeDocumentChapterIndex = 0;
+  dom.documentChapterNavigation.hidden = true;
+  dom.documentChapterFooter.hidden = true;
+  dom.readerContent.replaceChildren(
+    createTextElement("div", "readable-render-status", "正在建立连续阅读视图…"),
+  );
+  await yieldDocumentRendering();
+  if (renderSequence !== applicationState.documentRenderSequence) return false;
+  dom.readerContent.replaceChildren();
+  const sections = [];
+  for (let index = 0; index < chapters.length; index += 1) {
+    const chapter = chapters[index];
+    const section = document.createElement("section");
+    section.className = "document-continuous-section";
+    section.id = `document-chapter-${index + 1}`;
+    section.dataset.documentChapterIndex = String(index);
+    section.dataset.documentChapterLevel = String(
+      Number.isInteger(chapter.level) ? chapter.level : 1,
+    );
+    try {
+      const fragment = chapter.kind === "word"
+        ? createWordDocument(chapter.content)
+        : createReadableDocument(chapter.content, { chapterTitle: chapter.title });
+      section.append(fragment);
+    } catch (error) {
+      console.error("文档章节排版失败，已改用纯文本显示。", error);
+      const fallbackText = chapter.kind === "word"
+        ? new DOMParser().parseFromString(chapter.content, "text/html").body.textContent
+        : chapter.content;
+      section.append(
+        createTextElement("div", "readable-render-warning", "本节排版失败，已切换为纯文本阅读。"),
+        createTextElement("pre", "readable-plain-fallback", fallbackText || "本节没有可显示的正文。"),
+      );
+    }
+    enhanceReadingSemantics(section);
+    sections.push(section);
+    dom.readerContent.append(section);
+    if ((index + 1) % 6 === 0) {
+      await yieldDocumentRendering();
+      if (renderSequence !== applicationState.documentRenderSequence) return false;
+    }
+  }
+  applicationState.activeReadingSurface = dom.readerContent;
+  applicationState.documentContinuousIndex = { renderSequence, sections };
+
+  if (applicationState.readingWorkspace) {
+    buildDocumentChapterTableOfContents();
+    applyReadingHighlights();
+    renderReadingAnnotations();
+  }
+  if (options.scrollToTop) {
+    const readerTop = window.scrollY + dom.readerContent.getBoundingClientRect().top - 24;
+    window.scrollTo({ top: Math.max(0, readerTop), behavior: "auto" });
+  }
+  return true;
+}
+
 /**
  * 只渲染当前选中的一个文档章节。
  *
@@ -2608,7 +2145,7 @@ async function renderDocumentChapter(requestedIndex, options = {}) {
   try {
     fragment = chapter.kind === "word"
       ? createWordDocument(chapter.content)
-      : createReadableDocument(chapter.content);
+      : createReadableDocument(chapter.content, { chapterTitle: chapter.title });
   } catch (error) {
     console.error("文档章节排版失败，已改用纯文本显示。", error);
     /** fallbackText 是不经过复杂排版的章节正文。 */
@@ -2622,6 +2159,8 @@ async function renderDocumentChapter(requestedIndex, options = {}) {
     );
   }
   dom.readerContent.replaceChildren(fragment);
+  const sectionOverview = createDocumentSectionOverview(chapterIndex);
+  if (sectionOverview) dom.readerContent.append(sectionOverview);
   enhanceReadingSemantics(dom.readerContent);
   await yieldDocumentRendering();
   if (renderSequence !== applicationState.documentRenderSequence) return false;
@@ -2672,15 +2211,17 @@ function renderReadingProgress(progressPercent) {
  * @param {boolean} expanded 是否展开工作台。
  * @returns {void}
  */
-function setReadingWorkbenchExpanded(expanded) {
+function setReadingWorkbenchExpanded(expanded, persist = true) {
   dom.readingWorkbench.hidden = !expanded;
   dom.readingWorkbenchToggle.hidden = expanded;
   dom.readingWorkbenchToggle.setAttribute("aria-expanded", String(expanded));
   dom.readingWorkbenchClose.textContent = "⇥";
   document.body.classList.toggle("has-reading-workbench", expanded);
-  try {
-    window.localStorage.setItem("zhixu-reading-sidebar-expanded", String(expanded));
-  } catch (error) {}
+  if (persist) {
+    try {
+      window.localStorage.setItem("zhixu-reading-sidebar-expanded", String(expanded));
+    } catch (error) {}
+  }
 }
 
 /**
@@ -2689,7 +2230,7 @@ function setReadingWorkbenchExpanded(expanded) {
  * @param {boolean} expanded 是否完整显示文章目录。
  * @returns {void}
  */
-function setReadingTocExpanded(expanded) {
+function setReadingTocExpanded(expanded, persist = true) {
   applicationState.readingTocExpanded = Boolean(expanded);
   dom.readingTocSidebar.hidden = !expanded;
   dom.readingTocReopen.hidden = expanded;
@@ -2699,9 +2240,11 @@ function setReadingTocExpanded(expanded) {
   dom.readingTocToggle.setAttribute("aria-label", "收起文章目录");
   dom.readingTocToggle.title = "收起文章目录";
   document.body.classList.toggle("has-reading-toc", expanded);
-  try {
-    window.localStorage.setItem("zhixu-reading-toc-expanded", String(expanded));
-  } catch (error) {}
+  if (persist) {
+    try {
+      window.localStorage.setItem("zhixu-reading-toc-expanded", String(expanded));
+    } catch (error) {}
+  }
 }
 
 /** readingWorkbenchMinimumWidth 是桌面端侧栏允许的最小宽度。 */
@@ -2809,11 +2352,10 @@ function setReadingWorkbenchTab(tabName) {
   /** normalizedTab 是经过白名单确认的工作台页签。 */
   const normalizedTab = tabName === "ai" ? "ai" : "tools";
   dom.readingToolsPanel.hidden = normalizedTab !== "tools";
-  dom.readingAiPanel.hidden = normalizedTab !== "ai";
+  aiCenter?.setReadingPanelVisible(normalizedTab === "ai");
   for (const button of dom.readingWorkbenchTabs.querySelectorAll("button")) {
     button.classList.toggle("is-active", button.dataset.workbenchTab === normalizedTab);
   }
-  if (normalizedTab === "ai") dom.readingAiInput.focus();
 }
 
 /** 标记一次发生在阅读页内的有效交互。 */
@@ -2911,11 +2453,16 @@ async function startReadingActivitySession(targetType, targetId, progressPercent
 /**
  * 隐藏阅读工作台并清除当前阅读上下文。
  *
- * @returns {void}
+ * @returns {Promise<boolean> | null} 最后一次笔记保存；没有阅读上下文时为空。
  */
 function closeReadingWorkspace() {
+  readingNotesEditor?.close();
+  let noteSave = null;
   if (applicationState.readingWorkspace) {
-    void saveReadingState({ noteText: dom.readingNoteInput.value });
+    noteSave = saveReadingState(readingNotesEditor?.getContent() || {
+      noteHtml: dom.readingNoteInput.innerHTML,
+      noteText: dom.readingNoteInput.textContent || "",
+    });
     flushReadingActivitySession(true);
   }
   applicationState.readingActivitySequence += 1;
@@ -2929,8 +2476,8 @@ function closeReadingWorkspace() {
   applicationState.readingWorkspace = null;
   applicationState.activeReadingSurface = null;
   applicationState.pendingReadingSelection = null;
-  applicationState.readingAiSelection = null;
-  applicationState.readingAiConversationId = "";
+  aiCenter?.closeReading();
+  resetContinuousDocumentIndex();
   applicationState.documentChapters = [];
   applicationState.activeDocumentChapterIndex = 0;
   dom.documentChapterNavigation.hidden = true;
@@ -2944,14 +2491,11 @@ function closeReadingWorkspace() {
   dom.readingTagList.replaceChildren();
   dom.readingTopicList.replaceChildren();
   applicationState.contentOrganization = null;
-  dom.readingNoteInput.value = "";
-  dom.readingAiMessages.replaceChildren(
-    createTextElement("p", "reading-ai-empty", "你可以询问整篇内容，也可以先在正文中选择术语、句子或段落再提问。"),
-  );
-  dom.readingAiSelection.hidden = true;
+  readingNotesEditor?.clear();
   setReadingWorkbenchTab("tools");
   document.body.classList.remove("has-reading-workbench");
   document.body.classList.remove("has-reading-toc");
+  return noteSave;
 }
 
 /** readingFontMinimum 是允许的最小正文字号。 */
@@ -3271,7 +2815,11 @@ function calculateReadingProgress() {
   const localProgress = Math.min(100, Math.max(0, (currentDistance / readableDistance) * 100));
   /** chapters 仅在本地文档章节阅读模式中存在。 */
   const chapters = applicationState.documentChapters;
-  if (!dom.reader.hidden && chapters.length > 1) {
+  if (
+    !dom.reader.hidden
+    && chapters.length > 1
+    && !dom.reader.classList.contains("is-pdf-reader")
+  ) {
     return ((applicationState.activeDocumentChapterIndex + localProgress / 100) / chapters.length) * 100;
   }
   return localProgress;
@@ -3308,8 +2856,10 @@ async function saveReadingState(changes) {
       dom.readingStatusSelect.value = payload.state.status;
       renderReadingProgress(payload.state.progressPercent);
     }
+    return true;
   } catch (error) {
     showToast(error.message);
+    return false;
   }
 }
 
@@ -3351,7 +2901,9 @@ function restoreReadingProgress(progressPercent) {
   if (!readingSurface || normalizedProgress < 1) return;
   /** localProgress 把整本文档进度还原为当前章节内部进度。 */
   const chapters = applicationState.documentChapters;
-  const localProgress = !dom.reader.hidden && chapters.length > 1
+  const localProgress = !dom.reader.hidden
+    && chapters.length > 1
+    && !dom.reader.classList.contains("is-pdf-reader")
     ? Math.min(100, Math.max(0,
       (normalizedProgress / 100 * chapters.length - applicationState.activeDocumentChapterIndex) * 100,
     ))
@@ -3472,18 +3024,6 @@ function applyReadingHighlights() {
  *
  * @returns {void}
  */
-/**
- * 更新阅读内 AI 问答使用的选区提示。
- *
- * @returns {void}
- */
-function renderReadingAiSelection() {
-  /** selection 是当前作为 AI 提问重点的正文选区。 */
-  const selection = applicationState.readingAiSelection;
-  dom.readingAiSelection.hidden = !selection;
-  dom.readingAiSelectionText.textContent = selection?.quoteText || "";
-}
-
 function captureReadingSelection() {
   /** readingSurface 是当前允许选区高亮的正文根节点。 */
   const readingSurface = applicationState.activeReadingSurface;
@@ -3516,8 +3056,7 @@ function captureReadingSelection() {
   /** anchorEnd 是清除尾部空白后的正文字符终点。 */
   const anchorEnd = anchorStart + quoteText.length;
   applicationState.pendingReadingSelection = { quoteText, anchorStart, anchorEnd };
-  applicationState.readingAiSelection = { quoteText, anchorStart, anchorEnd };
-  renderReadingAiSelection();
+  aiCenter?.setReadingSelection({ quoteText, anchorStart, anchorEnd });
   dom.readingSelectionHint.textContent = `已选择 ${quoteText.length} 个字符，请选择高亮颜色。`;
 }
 
@@ -3711,119 +3250,6 @@ function getCurrentReadingTitle() {
     || "当前资料";
 }
 
-/**
- * 在指定容器内渲染一条完整本地 AI 会话。
- *
- * @param {HTMLElement} container 消息列表容器。
- * @param {Record<string, unknown>} conversation 完整会话。
- * @returns {void}
- */
-function renderAiConversationMessages(container, conversation) {
-  container.replaceChildren();
-  if (!conversation?.messages?.length) {
-    container.append(createTextElement("p", "reading-ai-empty", "还没有问答记录。"));
-    return;
-  }
-  for (const message of conversation.messages) {
-    /** messageCard 是单条用户问题或 AI 回答。 */
-    const messageCard = document.createElement("article");
-    messageCard.className = `ai-chat-message is-${message.role}`;
-    messageCard.append(createTextElement("span", "", message.role === "assistant" ? "AI" : "你"));
-    if (message.selectedQuote) {
-      messageCard.append(createTextElement("blockquote", "ai-chat-selected-quote", message.selectedQuote));
-    }
-    messageCard.append(createTextElement("p", "", message.content));
-    if (message.insufficientEvidence) {
-      messageCard.append(createTextElement("small", "ai-chat-warning", "证据不足，请结合原文判断。"));
-    }
-    if (Array.isArray(message.citations) && message.citations.length > 0) {
-      /** citationList 是该回答通过逐字核验的来源列表。 */
-      const citationList = document.createElement("div");
-      citationList.className = "ai-chat-citations";
-      for (const citation of message.citations) {
-        /** citationButton 是可返回站内原文的引文。 */
-        const citationButton = document.createElement("button");
-        citationButton.type = "button";
-        citationButton.textContent = `${citation.chunkId} · ${citation.quote}`;
-        citationButton.addEventListener("click", () =>
-          void openAiCitationSource(citation.targetType, citation.targetId, citation.quote),
-        );
-        citationList.append(citationButton);
-      }
-      messageCard.append(citationList);
-    }
-    container.append(messageCard);
-  }
-  container.scrollTop = container.scrollHeight;
-}
-
-/**
- * 读取当前资料最近一次问答，以便关闭后继续追问。
- *
- * @param {string} targetType 当前内容类型。
- * @param {string} targetId 当前内容 ID。
- * @returns {Promise<void>}
- */
-async function loadLatestReadingAiConversation(targetType, targetId) {
-  /** query 是按当前资料过滤历史的查询参数。 */
-  const query = new URLSearchParams({ targetType, targetId });
-  /** payload 是当前资料的历史会话摘要。 */
-  const payload = await requestJson(`/api/ai/conversations?${query}`);
-  /** latestConversation 是最近更新的一条会话。 */
-  const latestConversation = payload.conversations?.[0];
-  if (!latestConversation) {
-    applicationState.readingAiConversationId = "";
-    renderAiConversationMessages(dom.readingAiMessages, null);
-    return;
-  }
-  /** detailPayload 是包含全部消息的会话详情。 */
-  const detailPayload = await requestJson(`/api/ai/conversations/${encodeURIComponent(latestConversation.id)}`);
-  applicationState.readingAiConversationId = detailPayload.conversation.id;
-  renderAiConversationMessages(dom.readingAiMessages, detailPayload.conversation);
-}
-
-/**
- * 在当前阅读页提交问题，并把问答保存到本机历史。
- *
- * @returns {Promise<void>}
- */
-async function submitReadingAiQuestion() {
-  /** workspace 是当前阅读内容上下文。 */
-  const workspace = applicationState.readingWorkspace;
-  /** question 是用户本次阅读内问题。 */
-  const question = dom.readingAiInput.value.trim();
-  if (!workspace || !question) return;
-  dom.readingAiSubmit.disabled = true;
-  dom.readingAiSubmit.textContent = "正在检索原文…";
-  dom.readingAiStatus.textContent = "正在生成并核验引用，请稍候。";
-  try {
-    /** payload 是带完整本地会话的问答响应。 */
-    const payload = await requestJson("/api/ai/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        mode: "ask",
-        question,
-        conversationId: applicationState.readingAiConversationId || undefined,
-        selectedQuote: applicationState.readingAiSelection?.quoteText || "",
-        sources: [{ targetType: workspace.targetType, targetId: workspace.targetId }],
-      }),
-    });
-    applicationState.readingAiConversationId = payload.conversationId;
-    dom.readingAiInput.value = "";
-    applicationState.readingAiSelection = null;
-    renderReadingAiSelection();
-    renderAiConversationMessages(dom.readingAiMessages, payload.conversation);
-    dom.readingAiStatus.textContent = "已保存到本机问答记录。";
-  } catch (error) {
-    dom.readingAiStatus.textContent = error.message;
-    showToast(error.message);
-  } finally {
-    dom.readingAiSubmit.disabled = false;
-    dom.readingAiSubmit.textContent = "发送问题";
-  }
-}
-
 async function initializeReadingWorkspace(targetType, targetId, readingSurface) {
   try {
     /** query 是读取工作台状态所需的安全查询参数。 */
@@ -3833,16 +3259,16 @@ async function initializeReadingWorkspace(targetType, targetId, readingSurface) 
     applicationState.readingWorkspace = payload.workspace;
     applicationState.activeReadingSurface = readingSurface;
     applicationState.pendingReadingSelection = null;
-    applicationState.readingAiSelection = null;
-    applicationState.readingAiConversationId = "";
     readingSurface.classList.add("reading-surface");
     dom.readingStatusSelect.value = payload.workspace.state.status;
-    dom.readingNoteInput.value = payload.workspace.state.noteText;
+    readingNotesEditor?.setContent(
+      payload.workspace.state.noteHtml || "",
+      payload.workspace.state.noteText || "",
+    );
+    readingNotesEditor?.refresh();
     dom.readingNoteStatus.textContent = "自动保存到本地";
     dom.readingSelectionHint.textContent =
       "在正文中选中文字，然后选择一种高亮颜色。";
-    dom.readingAiSourceTitle.textContent = getCurrentReadingTitle();
-    renderReadingAiSelection();
     setReadingWorkbenchTab("tools");
     renderReadingProgress(payload.workspace.state.progressPercent);
     /** savedChapterIndex 把整本文档的历史进度定位到对应章节。 */
@@ -3856,7 +3282,8 @@ async function initializeReadingWorkspace(targetType, targetId, readingSurface) 
         chapterCount - 1,
         Math.floor((normalizedProgress / 100) * chapterCount),
       );
-      if (savedChapterIndex !== applicationState.activeDocumentChapterIndex) {
+      const usesContinuousPdfReading = dom.reader.classList.contains("is-pdf-reader");
+      if (!usesContinuousPdfReading && savedChapterIndex !== applicationState.activeDocumentChapterIndex) {
         await renderDocumentChapter(savedChapterIndex, { scrollToTop: false, saveProgress: false });
       }
       buildDocumentChapterTableOfContents();
@@ -3869,7 +3296,10 @@ async function initializeReadingWorkspace(targetType, targetId, readingSurface) 
     try {
       savedTocExpanded = window.localStorage.getItem("zhixu-reading-toc-expanded") !== "false";
     } catch (error) {}
-    setReadingTocExpanded(savedTocExpanded);
+    /** PDF 首先保证章节导航可见，不改写用户在其它阅读页的偏好。 */
+    const usesPdfReadingLayout =
+      targetType === "document" && dom.reader.classList.contains("is-pdf-reader");
+    setReadingTocExpanded(usesPdfReadingLayout ? true : savedTocExpanded, !usesPdfReadingLayout);
     applyReadingHighlights();
     renderReadingAnnotations();
     await loadContentOrganization();
@@ -3878,10 +3308,11 @@ async function initializeReadingWorkspace(targetType, targetId, readingSurface) 
     try {
       savedExpanded = window.localStorage.getItem("zhixu-reading-sidebar-expanded") !== "false";
     } catch (error) {}
-    setReadingWorkbenchExpanded(savedExpanded);
-    void loadLatestReadingAiConversation(targetType, targetId).catch((error) => {
-      dom.readingAiStatus.textContent = error.message;
-    });
+    /** PDF 进入时优先展示正文，阅读工作台仍可由右侧按钮随时打开。 */
+    setReadingWorkbenchExpanded(usesPdfReadingLayout ? false : savedExpanded, !usesPdfReadingLayout);
+    if (aiCenter) {
+      void aiCenter.initializeReading({ targetType, targetId, title: getCurrentReadingTitle() });
+    }
     restoreReadingProgress(payload.workspace.state.progressPercent);
     void startReadingActivitySession(
       targetType,
@@ -3892,318 +3323,6 @@ async function initializeReadingWorkspace(targetType, targetId, readingSurface) 
     closeReadingWorkspace();
     showToast(error.message);
   }
-}
-
-/**
- * 切换一级页面并更新导航。
- *
- * @param {string} viewName 目标页面名称。
- * @returns {void}
- */
-/**
- * 生成 AI 来源在浏览器状态中的稳定键。
- * @param {string} targetType 内容类型。
- * @param {string} targetId 本地内容 ID。
- * @returns {string} 类型与 ID 组合键。
- */
-function getAiSourceKey(targetType, targetId) {
-  return `${targetType}:${targetId}`;
-}
-
-/**
- * 更新已选资料计数，并同步提交按钮可用状态。
- * @returns {void}
- */
-function updateAiSelectionState() {
-  /** selectedCount 是当前已选资料数量。 */
-  const selectedCount = applicationState.selectedAiSourceKeys.size;
-  dom.aiSourceCount.textContent = `${selectedCount} / 6`;
-  dom.aiSubmitButton.disabled = !applicationState.aiConfigured || selectedCount === 0;
-}
-
-/**
- * 渲染可筛选、可多选的本地 AI 资料列表。
- * @returns {void}
- */
-function renderAiSources() {
-  /** query 是资料筛选输入的小写文本。 */
-  const query = dom.aiSourceSearch.value.trim().toLowerCase();
-  /** visibleSources 是标题、分类或类型命中的资料。 */
-  const visibleSources = applicationState.aiSources.filter((source) =>
-    `${source.title} ${source.category} ${source.targetType}`.toLowerCase().includes(query),
-  );
-  dom.aiSourceList.replaceChildren();
-  if (visibleSources.length === 0) {
-    dom.aiSourceList.append(createTextElement("p", "ai-source-empty", "没有匹配的资料。"));
-  }
-  /** typeLabels 是内部内容类型的中文显示名称。 */
-  const typeLabels = { document: "文档", article: "文章", paper: "论文" };
-  for (const source of visibleSources) {
-    /** sourceKey 是当前资料的稳定选择键。 */
-    const sourceKey = getAiSourceKey(source.targetType, source.targetId);
-    /** label 是整行可点击的资料选项。 */
-    const label = document.createElement("label");
-    label.className = "ai-source-option";
-    /** checkbox 是当前资料的选择控件。 */
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = applicationState.selectedAiSourceKeys.has(sourceKey);
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked && applicationState.selectedAiSourceKeys.size >= 6) {
-        checkbox.checked = false;
-        showToast("一次最多选择 6 份资料。");
-        return;
-      }
-      if (checkbox.checked) applicationState.selectedAiSourceKeys.add(sourceKey);
-      else applicationState.selectedAiSourceKeys.delete(sourceKey);
-      updateAiSelectionState();
-    });
-    /** copy 是资料标题、类型与摘要说明。 */
-    const copy = document.createElement("span");
-    copy.append(
-      createTextElement("strong", "", source.title),
-      createTextElement("small", "", `${typeLabels[source.targetType] || "资料"} · ${source.category || "未分类"}`),
-    );
-    label.append(checkbox, copy);
-    dom.aiSourceList.append(label);
-  }
-  updateAiSelectionState();
-}
-
-/**
- * 从本机服务读取 AI 配置状态和全部可选资料。
- * @returns {Promise<void>}
- */
-async function loadAiSources() {
-  /** payload 是不含密钥的配置状态与资料摘要。 */
-  const payload = await requestJson("/api/ai/sources");
-  applicationState.aiSources = payload.sources;
-  applicationState.aiConfigured = Boolean(payload.configured);
-  dom.aiStatusLabel.textContent = applicationState.aiConfigured
-    ? `DeepSeek 已就绪 · ${payload.model}`
-    : "尚未配置 DeepSeek API Key";
-  renderAiSources();
-}
-
-/**
- * 在问答中心渲染可搜索的本地会话摘要。
- *
- * @returns {void}
- */
-function renderAiConversationHistory() {
-  dom.aiHistoryList.replaceChildren();
-  if (applicationState.aiConversations.length === 0) {
-    dom.aiHistoryList.append(createTextElement("p", "ai-history-empty", "还没有匹配的问答记录。阅读任意资料时可以直接开始提问。"));
-    return;
-  }
-  for (const conversation of applicationState.aiConversations) {
-    /** button 是一条可打开的历史会话摘要。 */
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "ai-history-item";
-    button.append(
-      createTextElement("span", "", conversation.mode === "compare" ? "多资料比较" : "阅读追问"),
-      createTextElement("strong", "", conversation.title),
-      createTextElement("p", "", conversation.lastQuestion),
-      createTextElement("small", "", `${conversation.messageCount} 条消息 · ${formatDate(conversation.updatedAt)}`),
-    );
-    button.addEventListener("click", () => void openAiConversationHistory(conversation.id));
-    dom.aiHistoryList.append(button);
-  }
-}
-
-/**
- * 从本地 SQLite 查询问答历史。
- *
- * @returns {Promise<void>}
- */
-async function loadAiConversations() {
-  /** parameters 是可选历史搜索词。 */
-  const parameters = new URLSearchParams();
-  if (dom.aiHistorySearch.value.trim()) parameters.set("q", dom.aiHistorySearch.value.trim());
-  /** payload 是问答会话摘要列表。 */
-  const payload = await requestJson(`/api/ai/conversations?${parameters}`);
-  applicationState.aiConversations = payload.conversations;
-  renderAiConversationHistory();
-}
-
-/**
- * 在历史中心打开一条完整会话。
- *
- * @param {string} conversationId 会话 ID。
- * @returns {Promise<void>}
- */
-async function openAiConversationHistory(conversationId) {
-  /** payload 是包含消息和来源的完整会话。 */
-  const payload = await requestJson(`/api/ai/conversations/${encodeURIComponent(conversationId)}`);
-  /** conversation 是要展示的本地问答记录。 */
-  const conversation = payload.conversation;
-  dom.aiHistoryDetail.replaceChildren(
-    createTextElement("p", "eyebrow", conversation.mode === "compare" ? "MULTI-SOURCE" : "READING QUESTION"),
-    createTextElement("h3", "", conversation.title),
-  );
-  /** sourceBar 是会话关联资料的站内返回入口。 */
-  const sourceBar = document.createElement("div");
-  sourceBar.className = "ai-history-sources";
-  for (const source of conversation.sources) {
-    /** sourceButton 打开会话对应的原始资料。 */
-    const sourceButton = document.createElement("button");
-    sourceButton.type = "button";
-    sourceButton.textContent = `打开《${source.title || "原始资料"}》`;
-    sourceButton.addEventListener("click", () => void openAiCitationSource(source.targetType, source.targetId));
-    sourceBar.append(sourceButton);
-  }
-  dom.aiHistoryDetail.append(sourceBar);
-  /** messageList 是历史中心的完整消息列表。 */
-  const messageList = document.createElement("div");
-  messageList.className = "ai-history-messages";
-  dom.aiHistoryDetail.append(messageList);
-  renderAiConversationMessages(messageList, conversation);
-}
-
-/**
- * 在当前正文中定位一段已核验引文。
- *
- * @param {string} quote 引用原文。
- * @returns {boolean} 是否成功找到并聚焦正文位置。
- */
-function focusAiCitationInReadingSurface(quote) {
-  /** readingSurface 是当前文档、文章或论文的正文容器。 */
-  const readingSurface = applicationState.activeReadingSurface;
-  /** normalizedQuote 是忽略换行和连续空格后的引用文本。 */
-  const normalizedQuote = String(quote || "").replace(/\s+/g, " ").trim();
-  if (!readingSurface || !normalizedQuote) return false;
-  /** searchNeedle 是用于正文定位的引文开头，避免长引文跨越多个节点时无法匹配。 */
-  const searchNeedle = normalizedQuote.slice(0, Math.min(normalizedQuote.length, 72));
-  /** candidateElements 是具备稳定阅读位置的语义正文块。 */
-  const candidateElements = Array.from(readingSurface.querySelectorAll(
-    "p, li, blockquote, pre, td, th, h1, h2, h3, h4",
-  ));
-  /** matchedElement 是包含引文开头的第一个正文块。 */
-  const matchedElement = candidateElements.find((element) =>
-    String(element.textContent || "").replace(/\s+/g, " ").includes(searchNeedle),
-  );
-  if (!matchedElement) return false;
-  /** previousFocus 是上一次被引用定位高亮的正文块。 */
-  const previousFocus = readingSurface.querySelector(".is-ai-citation-focus");
-  previousFocus?.classList.remove("is-ai-citation-focus");
-  matchedElement.classList.add("is-ai-citation-focus");
-  matchedElement.scrollIntoView({ behavior: "smooth", block: "center" });
-  window.setTimeout(() => {
-    if (matchedElement.isConnected) matchedElement.classList.remove("is-ai-citation-focus");
-  }, 3200);
-  return true;
-}
-
-/**
- * 打开指定引用对应的站内原始内容；同一资料直接定位而不重新加载。
- *
- * @param {string} targetType 内容类型。
- * @param {string} targetId 内容 ID。
- * @param {string} [quote] 需要定位并短暂高亮的引用原文。
- * @returns {Promise<void>}
- */
-async function openAiCitationSource(targetType, targetId, quote = "") {
-  /** isCurrentSource 表示引文是否属于当前正在阅读的资料。 */
-  const isCurrentSource = applicationState.readingWorkspace?.targetType === targetType
-    && applicationState.readingWorkspace?.targetId === targetId;
-  if (isCurrentSource) {
-    setReadingWorkbenchExpanded(true);
-    setReadingWorkbenchTab("ai");
-    if (quote && !focusAiCitationInReadingSurface(quote)) {
-      showToast("已保持当前问答，但未在渲染正文中找到完全匹配的引文位置。");
-    }
-    return;
-  }
-  if (targetType === "document") await openDocument(targetId);
-  else if (targetType === "article") await openArticle(targetId);
-  else if (targetType === "paper") await openPaper(targetId);
-  if (applicationState.readingWorkspace) {
-    setReadingWorkbenchExpanded(true);
-    setReadingWorkbenchTab("ai");
-    if (quote && !focusAiCitationInReadingSurface(quote)) {
-      showToast("已打开引用资料，但未找到完全匹配的正文位置。");
-    }
-  }
-}
-
-/**
- * 渲染经过服务端原文核验的 AI 回答与引文。
- * @param {Record<string, unknown>} payload 问答接口响应。
- * @returns {void}
- */
-function renderAiAnswer(payload) {
-  dom.aiAnswerPanel.hidden = false;
-  dom.aiEvidenceWarning.hidden = !payload.insufficientEvidence;
-  dom.aiAnswerStats.textContent = `${payload.usedSourceCount} 份资料 · ${payload.usedChunkCount} 个相关片段 · ${payload.citations.length} 条已核验引用`;
-  dom.aiAnswerText.textContent = payload.answer;
-  dom.aiCitationList.replaceChildren();
-  for (const citation of payload.citations) {
-    /** card 是一条已由服务端逐字反查的来源证据。 */
-    const card = document.createElement("article");
-    card.className = "ai-citation-card";
-    /** openButton 返回该引文所属的站内原始内容。 */
-    const openButton = document.createElement("button");
-    openButton.type = "button";
-    openButton.className = "text-button";
-    openButton.textContent = `打开来源 · ${citation.chunkId}`;
-    openButton.addEventListener("click", () =>
-      void openAiCitationSource(citation.targetType, citation.targetId, citation.quote),
-    );
-    card.append(
-      createTextElement("strong", "", citation.title),
-      createTextElement("blockquote", "", citation.quote),
-      openButton,
-    );
-    dom.aiCitationList.append(card);
-  }
-  dom.aiAnswerPanel.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-/**
- * 提交当前问题和所选资料；正文由服务端从 SQLite 重新读取。
- * @returns {Promise<void>}
- */
-async function submitAiQuestion() {
-  /** selectedSources 是按资料列表顺序提交的类型和 ID。 */
-  const selectedSources = applicationState.aiSources
-    .filter((source) => applicationState.selectedAiSourceKeys.has(getAiSourceKey(source.targetType, source.targetId)))
-    .map((source) => ({ targetType: source.targetType, targetId: source.targetId }));
-  if (applicationState.aiMode === "compare" && selectedSources.length < 2) {
-    showToast("多资料对比至少需要选择 2 份资料。");
-    return;
-  }
-  dom.aiSubmitButton.disabled = true;
-  dom.aiSubmitButton.textContent = "正在检索并核验…";
-  try {
-    /** payload 是带本地已验证引用的 AI 回答。 */
-    const payload = await requestJson("/api/ai/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: applicationState.aiMode, question: dom.aiQuestionInput.value.trim(), sources: selectedSources }),
-    });
-    renderAiAnswer(payload);
-    await loadAiConversations();
-  } catch (error) {
-    showToast(error.message);
-  } finally {
-    dom.aiSubmitButton.textContent = "开始比较";
-    updateAiSelectionState();
-  }
-}
-
-/**
- * 从阅读页跳到资料问答，并预选当前内容。
- * @param {string} targetType 当前内容类型。
- * @param {string} targetId 当前内容 ID。
- * @returns {Promise<void>}
- */
-async function openAiWithSource(targetType, targetId) {
-  if (!applicationState.readingWorkspace
-    || applicationState.readingWorkspace.targetType !== targetType
-    || applicationState.readingWorkspace.targetId !== targetId) return;
-  setReadingWorkbenchExpanded(true);
-  setReadingWorkbenchTab("ai");
 }
 
 /**
@@ -4319,6 +3438,7 @@ async function returnToPreviousPage(fallbackView = "library") {
 /** importJobStageLabels 是后台阶段到中文状态的映射。 */
 const importJobStageLabels = Object.freeze({
   metadata: "正在读取论文信息",
+  waiting_retry: "来源暂时不可用，等待自动重试",
   extracting: "正在获取与提取全文",
   classifying: "正在分类",
   queued: "等待处理",
@@ -4438,7 +3558,10 @@ function renderImportJobs() {
   for (const job of visibleJobs) {
     /** item 是单项后台任务状态。 */
     const item = document.createElement("div");
-    item.className = `import-job-item is-${job.status}`;
+    item.className = `import-job-item is-${job.status}${job.stage === "waiting_retry" ? " is-waiting-retry" : ""}`;
+    const nextAttemptLabel = job.stage === "waiting_retry" && job.nextAttemptAt
+      ? ` · 预计 ${new Date(job.nextAttemptAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} 自动重试`
+      : "";
     /** copy 保存任务名称、阶段和错误信息。 */
     const copy = document.createElement("div");
     copy.append(
@@ -4446,7 +3569,7 @@ function renderImportJobs() {
       createTextElement(
         "small",
         "",
-        `${importJobStageLabels[job.stage] || job.stage} · ${Math.round(job.progressPercent || 0)}%`,
+        `${importJobStageLabels[job.stage] || job.stage} · ${Math.round(job.progressPercent || 0)}%${nextAttemptLabel}`,
       ),
     );
     if (job.location?.folderLabel) {
@@ -4454,7 +3577,7 @@ function renderImportJobs() {
         createTextElement("small", "import-job-location", `所在目录：${job.location.folderLabel}`),
       );
     }
-    if (job.errorMessage) copy.append(createTextElement("p", "", job.errorMessage));
+    if (job.errorMessage) copy.append(createTextElement("p", job.stage === "waiting_retry" ? "import-job-warning" : "", job.errorMessage));
     item.append(copy);
     if (job.stage === "awaiting_confirmation") {
       /** actions 提供重新检查、图文 PDF 和仅保存链接三个明确选择。 */
@@ -4710,7 +3833,6 @@ async function loadStorageStatus() {
 
 /** 从文档库进入导入页时，将当前目录同步为两种内容的默认保存位置。 */
 function openUploadFromCurrentLocation() {
-  void paperLibrary.prepareImport(applicationState.activeView === "papers");
   const folder = applicationState.activeView === "library"
     ? applicationState.folders.find((item) => item.id === applicationState.activeFolderId)
     : null;
@@ -4739,11 +3861,15 @@ function openUploadFromCurrentLocation() {
 }
 
 function showView(viewName) {
+  // Every upload entry (sidebar, header and library button) shares destination loading.
+  if (viewName === "upload") void paperLibrary.prepareImport(applicationState.activeView === "papers");
   if (viewName !== "storage") {
     window.clearTimeout(applicationState.importJobPollTimer);
   }
-  closeReadingWorkspace();
+  /** noteSave 保证从正文直接进入笔记库时，刚输入的内容先落盘再刷新列表。 */
+  const noteSave = closeReadingWorkspace();
   document.body.classList.remove("is-reading-page");
+  document.body.classList.remove("is-document-reader");
   applicationState.activeView = viewName;
   applicationState.selectedDocument = null;
   applicationState.selectedArticle = null;
@@ -4762,6 +3888,7 @@ function showView(viewName) {
   const viewTitles = {
     library: ["DOCUMENT LIBRARY", "我的文档库"],
     papers: ["PAPER LIBRARY", "我的论文库"],
+    notes: ["PERSONAL NOTES", "我的笔记"],
     activity: ["LEARNING ACTIVITY", "学习与资料统计"],
     topics: ["LEARNING PATHS", "我的专题"],
     cards: ["SOURCE CARDS", "卡片与今日复习"],
@@ -4779,13 +3906,15 @@ function showView(viewName) {
     void loadPapers();
     void checkWeeklyPaperReminder();
   }
-  if (viewName === "activity") void loadActivityDashboard().catch((error) => showToast(error.message));
-  if (viewName === "github") void loadGitHubProjects().catch((error) => showToast(error.message));
+  if (viewName === "activity") void activityDashboard?.load().catch((error) => showToast(error.message));
+  if (viewName === "notes") {
+    void Promise.resolve(noteSave).then(() => notesCenter.load()).catch((error) => showToast(error.message));
+  }
+  if (viewName === "github") void githubProjects?.load().catch((error) => showToast(error.message));
   if (viewName === "topics") void loadTopics();
   if (viewName === "cards") void loadKnowledgeCards();
   if (viewName === "ai") {
-    applicationState.aiMode = "compare";
-    void Promise.all([loadAiSources(), loadAiConversations()]).catch((error) => showToast(error.message));
+    void aiCenter?.load().catch((error) => showToast(error.message));
   }
   if (viewName === "storage") {
     void loadStorageOperations().catch((error) => showToast(error.message));
@@ -4912,6 +4041,33 @@ function removeLegacyArticlePromotionBlocks(root) {
   return removedCount;
 }
 
+/**
+ * 兼容旧文章中把 H1-H4 当作块级布局外壳或空白占位符的来源结构。
+ *
+ * @param {Element} root 隔离文章根节点。
+ * @returns {{ unwrapped: number, removedEmpty: number }} 结构修正数量。
+ */
+function normalizeLegacyArticleHeadingStructure(root) {
+  /** blockSelector 只匹配标题内容模型中不应出现的块级正文结构。 */
+  const blockSelector = "article, section, div, figure, table, ul, ol, blockquote, pre";
+  /** mediaSelector 防止把确实承载图片、表格或列表的无文字标题误删。 */
+  const mediaSelector = "img, video, iframe, table, pre, code, ul, ol";
+  let unwrapped = 0;
+  for (const heading of Array.from(root.querySelectorAll("h1, h2, h3, h4"))) {
+    if (!heading.querySelector(blockSelector)) continue;
+    heading.replaceWith(...Array.from(heading.childNodes));
+    unwrapped += 1;
+  }
+  let removedEmpty = 0;
+  for (const heading of Array.from(root.querySelectorAll("h1, h2, h3, h4"))) {
+    const text = (heading.textContent || "").replace(/\s+/g, " ").trim();
+    if (text || heading.querySelector(mediaSelector)) continue;
+    heading.remove();
+    removedEmpty += 1;
+  }
+  return { unwrapped, removedEmpty };
+}
+
 function createArticleOriginalContent(article) {
   /** parsedContent 是从服务端白名单 HTML 创建的隔离文档。 */
   const parsedContent = new DOMParser().parseFromString(
@@ -4928,6 +4084,8 @@ function createArticleOriginalContent(article) {
   }
   /** 旧记录在阅读时同样经过推广块识别，无需用户重新导入。 */
   removeLegacyArticlePromotionBlocks(safeArticleRoot);
+  /** 旧记录在阅读时拆掉错误标题外壳和纯空白标题，无需改写数据库。 */
+  normalizeLegacyArticleHeadingStructure(safeArticleRoot);
   /** emptyListItems 是旧文章记录中遗留的无文字、无媒体空项目。 */
   const emptyListItems = Array.from(safeArticleRoot.querySelectorAll("li")).filter(
     (listItem) =>
@@ -5350,6 +4508,7 @@ async function openArticle(articleId, options = {}) {
     dom.paperReader.hidden = true;
     dom.articleReader.hidden = false;
     document.body.classList.add("is-reading-page");
+    document.body.classList.remove("is-document-reader");
     updateFloatingReaderBackButton();
     dom.pageEyebrow.textContent = "ARTICLE READER";
     dom.pageTitle.textContent = "文章阅读";
@@ -7445,9 +6604,9 @@ function renderPapers() {
         createPaperLink("英文 PDF", paper.pdfUrl, "secondary-button"),
       );
     }
-    if (paper.extractionError) {
+    if (paper.extractionError && !hasActiveImport) {
       /** retryButton 是远程下载或 PDF 提取失败后的显式恢复操作。 */
-      const retryButton = createTextElement("button", "secondary-button", "重试解析");
+      const retryButton = createTextElement("button", "secondary-button paper-retry-button", "重试解析");
       retryButton.type = "button";
       retryButton.addEventListener("click", () => void retryPaperExtraction(paper, retryButton));
       footer.append(retryButton);
@@ -7481,8 +6640,13 @@ function renderPapers() {
       );
     }
     /** processingLabel 是论文从下载、解析到 Codex 翻译的当前可读状态。 */
+    const nextRetryTime = paper.importJob?.nextAttemptAt
+      ? new Date(paper.importJob.nextAttemptAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+      : "";
     const processingLabel = hasActiveImport
-      ? `${importJobStageLabels[paper.importJob.stage] || "正在导入"} · ${Math.round(paper.importJob.progressPercent)}% · 第 ${Math.max(1, paper.importJob.attemptCount)} 次`
+      ? paper.importJob.stage === "waiting_retry"
+        ? `${importJobStageLabels.waiting_retry}${nextRetryTime ? ` · 预计 ${nextRetryTime}` : ""} · 已尝试 ${Math.max(1, paper.importJob.attemptCount)} 次`
+        : `${importJobStageLabels[paper.importJob.stage] || "正在导入"} · ${Math.round(paper.importJob.progressPercent)}% · 第 ${Math.max(1, paper.importJob.attemptCount)} 次`
       : paper.extractionError
       ? `全文导入失败：${paper.extractionError}`
       : hasFullPaperTranslation
@@ -7832,6 +6996,7 @@ async function openPaper(paperId, options = {}) {
     dom.articleReader.hidden = true;
     dom.paperReader.hidden = false;
     document.body.classList.add("is-reading-page");
+    document.body.classList.remove("is-document-reader");
     updateFloatingReaderBackButton();
     dom.pageEyebrow.textContent = "PAPER READER";
     dom.pageTitle.textContent =
@@ -8121,7 +7286,9 @@ async function pollDocumentOcr(documentId) {
       documentItem.pdfOutline || [],
     );
     applicationState.activeDocumentChapterIndex = 0;
-    const rendered = await renderDocumentChapter(0, { scrollToTop: false, saveProgress: false });
+    const rendered = dom.reader.classList.contains("is-pdf-reader")
+      ? await renderContinuousPdfDocument({ scrollToTop: false })
+      : await renderDocumentChapter(0, { scrollToTop: false, saveProgress: false });
     if (!rendered) return;
     buildDocumentChapterTableOfContents();
     showToast("OCR 已完成，清爽阅读正文和全文索引已更新。");
@@ -8188,17 +7355,24 @@ async function openDocument(documentId, options = {}) {
     dom.articleReader.hidden = true;
     dom.paperReader.hidden = true;
     document.body.classList.add("is-reading-page");
+    document.body.classList.add("is-document-reader");
     updateFloatingReaderBackButton();
     dom.pageEyebrow.textContent = "DOCUMENT READER";
     dom.pageTitle.textContent = "文档阅读";
     dom.topUploadButton.hidden = true;
     dom.readerTitle.textContent = documentItem.title;
+    dom.readerDocumentName.textContent = documentItem.title;
+    dom.readerDocumentName.title = documentItem.title;
     dom.readerMeta.textContent = `${documentItem.category} · ${formatDate(documentItem.createdAt)}`;
     dom.readerSummary.textContent = documentItem.summary;
     /** isWordDocument 表示当前正文可采用保留结构的 Word HTML 视图。 */
     const isWordDocument =
       documentItem.extension === ".docx" && Boolean(documentItem.renderedHtml);
+    /** isPdfDocument 只控制 PDF 的语义章节阅读布局，原版仍可从顶部入口查看。 */
+    const isPdfDocument =
+      documentItem.extension === ".pdf" || documentItem.mimeType === "application/pdf";
     dom.reader.classList.toggle("is-word-reader", isWordDocument);
+    dom.reader.classList.toggle("is-pdf-reader", isPdfDocument);
     dom.readerContent.classList.toggle("is-word-document", isWordDocument);
     dom.readerContent.replaceChildren(
       createTextElement("div", "readable-render-status", "正在打开文档…"),
@@ -8230,7 +7404,9 @@ async function openDocument(documentId, options = {}) {
       ? createWordDocumentChapters(documentItem.renderedHtml)
       : createTextDocumentChapters(documentItem.extractedText || "", documentItem.pdfOutline || []);
     applicationState.activeDocumentChapterIndex = 0;
-    const rendered = await renderDocumentChapter(0, { scrollToTop: false, saveProgress: false });
+    const rendered = isPdfDocument
+      ? await renderContinuousPdfDocument({ scrollToTop: false })
+      : await renderDocumentChapter(0, { scrollToTop: false, saveProgress: false });
     if (!rendered) return;
     await initializeReadingWorkspace("document", documentItem.id, dom.readerContent);
     if (documentItem.ocrStatus === "queued" || documentItem.ocrStatus === "running") {
@@ -8776,7 +7952,55 @@ function setupPaperViewMode() {
 }
 
 async function initializeApplication() {
+  readingNotesEditor = mountReadingNotes({ document, getTitle: getCurrentReadingTitle });
+  notesCenter = mountNotesCenter({
+    document,
+    request: requestJson,
+    notify: showToast,
+    openSource: openActivityTarget,
+  });
   paperLibrary = createPaperLibrary({ request: requestJson, notify: showToast, reload: loadPapers });
+  githubProjects = mountGitHubProjects({
+    document,
+    request: requestJson,
+    notify: showToast,
+    formatDate,
+    onProjectAnalyzed: () => activityDashboard?.load(),
+  });
+  activityDashboard = mountActivityDashboard({
+    document,
+    request: requestJson,
+    notify: showToast,
+    formatDate,
+    formatReadingDuration,
+    openContent: openActivityTarget,
+    openGithub: (projectId) => {
+      githubProjects.select(projectId);
+      showView("github");
+    },
+  });
+  aiCenter = mountAiCenter({
+    document,
+    window,
+    request: requestJson,
+    notify: showToast,
+    formatDate,
+    getReadingContext: () => applicationState.readingWorkspace,
+    getReadingSurface: () => applicationState.activeReadingSurface,
+    getSelectedTargetId: (targetType) => {
+      if (targetType === "document") return applicationState.selectedDocument?.id || "";
+      if (targetType === "article") return applicationState.selectedArticle?.id || "";
+      if (targetType === "paper") return applicationState.selectedPaper?.id || "";
+      return "";
+    },
+    openContent: async (targetType, targetId) => {
+      if (targetType === "document") await openDocument(targetId);
+      else if (targetType === "article") await openArticle(targetId);
+      else if (targetType === "paper") await openPaper(targetId);
+    },
+    setReadingWorkbenchExpanded,
+    setReadingWorkbenchTab,
+  });
   setupThemeToggle();
   setupViewMode();
   setupPaperViewMode();
@@ -8800,59 +8024,8 @@ async function initializeApplication() {
   for (const button of document.querySelectorAll(".nav-item")) {
     button.addEventListener("click", () => showView(button.dataset.view));
   }
-  dom.githubProjectSearch.addEventListener("input", () => {
-    applicationState.githubProjectQuery = dom.githubProjectSearch.value;
-    applicationState.githubProjectPage = 1;
-    renderGitHubProjectList();
-    dom.githubProjectList.scrollTop = 0;
-  });
-  dom.githubProjectSort.addEventListener("change", () => {
-    applicationState.githubProjectSort = dom.githubProjectSort.value;
-    applicationState.githubProjectPage = 1;
-    renderGitHubProjectList();
-    dom.githubProjectList.scrollTop = 0;
-  });
-  for (const [button, delta] of [[dom.githubProjectPrevious, -1], [dom.githubProjectNext, 1]]) {
-    button.addEventListener("click", () => {
-      applicationState.githubProjectPage += delta;
-      renderGitHubProjectList();
-      dom.githubProjectList.scrollTop = 0;
-    });
-  }
-  dom.githubProjectForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void analyzeGitHubProject();
-  });
-  dom.aiSourceSearch.addEventListener("input", renderAiSources);
-  dom.aiHistorySearch.addEventListener("input", () => {
-    window.clearTimeout(applicationState.aiHistoryTimer);
-    applicationState.aiHistoryTimer = window.setTimeout(() => {
-      void loadAiConversations().catch((error) => showToast(error.message));
-    }, 300);
-  });
-  for (const button of dom.aiModeSwitch.querySelectorAll("button")) {
-    button.addEventListener("click", () => {
-      applicationState.aiMode = button.dataset.aiMode === "compare" ? "compare" : "ask";
-      for (const modeButton of dom.aiModeSwitch.querySelectorAll("button")) {
-        modeButton.classList.toggle("is-active", modeButton === button);
-      }
-    });
-  }
-  dom.aiQuestionForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void submitAiQuestion();
-  });
-  dom.documentAiButton.addEventListener("click", () => {
-    if (applicationState.selectedDocument) void openAiWithSource("document", applicationState.selectedDocument.id);
-  });
   dom.documentOcrButton.addEventListener("click", () => {
     void requestCurrentDocumentOcr();
-  });
-  dom.articleAiButton.addEventListener("click", () => {
-    if (applicationState.selectedArticle) void openAiWithSource("article", applicationState.selectedArticle.id);
-  });
-  dom.paperAiButton.addEventListener("click", () => {
-    if (applicationState.selectedPaper) void openAiWithSource("paper", applicationState.selectedPaper.id);
   });
   dom.paperQualityFilter.addEventListener("change", () => paperLibrary.changed());
   for (const button of dom.paperSourceTabs.querySelectorAll("button")) {
@@ -9165,14 +8338,6 @@ async function initializeApplication() {
   for (const button of dom.readingWorkbenchTabs.querySelectorAll("button")) {
     button.addEventListener("click", () => setReadingWorkbenchTab(button.dataset.workbenchTab));
   }
-  dom.readingAiClearSelection.addEventListener("click", () => {
-    applicationState.readingAiSelection = null;
-    renderReadingAiSelection();
-  });
-  dom.readingAiForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void submitReadingAiQuestion();
-  });
   dom.readingStatusSelect.addEventListener("change", () => {
     /** selectedStatus 是用户刚选择的阅读状态。 */
     const selectedStatus = dom.readingStatusSelect.value;
@@ -9191,9 +8356,12 @@ async function initializeApplication() {
     window.clearTimeout(applicationState.readingNoteTimer);
     applicationState.readingNoteTimer = window.setTimeout(async () => {
       dom.readingNoteStatus.textContent = "正在保存…";
-      await saveReadingState({ noteText: dom.readingNoteInput.value });
-      if (applicationState.readingWorkspace) {
-        dom.readingNoteStatus.textContent = "已保存到本地";
+      const workspace = applicationState.readingWorkspace;
+      const noteContent = readingNotesEditor.getContent();
+      const saved = await saveReadingState(noteContent);
+      const currentContent = readingNotesEditor.getContent();
+      if (applicationState.readingWorkspace === workspace && currentContent.noteHtml === noteContent.noteHtml) {
+        dom.readingNoteStatus.textContent = saved ? "已保存到本地" : "保存失败，内容仍保留在编辑框；继续编辑可重试。";
       }
     }, 700);
   });
@@ -9238,19 +8406,6 @@ async function initializeApplication() {
       void createReadingHighlight(colorButton.dataset.highlightColor);
     });
   }
-  dom.activityRangeForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const requestedDays = Math.round(Number(dom.activityRangeDaysInput.value));
-    applicationState.activityRangeDays = Number.isFinite(requestedDays)
-      ? Math.min(365, Math.max(1, requestedDays))
-      : 30;
-    dom.activityRangeDaysInput.value = String(applicationState.activityRangeDays);
-    void loadActivityDashboard().catch((error) => showToast(error.message));
-  });
-  dom.activitySecondaryToggle.addEventListener("click", () => {
-    applicationState.activityShowSecondaryFolders = !applicationState.activityShowSecondaryFolders;
-    renderLibraryCompositionChart(applicationState.activityDashboard?.libraryComposition);
-  });
   document.addEventListener("mouseup", captureReadingSelection);
   document.addEventListener("keyup", captureReadingSelection);
   document.addEventListener("pointerdown", markReadingActivity, { passive: true });
@@ -9272,11 +8427,12 @@ async function initializeApplication() {
   });
   window.addEventListener("scroll", () => {
     markReadingActivity();
+    updateContinuousDocumentActiveChapter();
     scheduleReadingProgressSave();
   }, { passive: true });
   await loadLibrary();
   await loadPapers();
-  await loadActivityDashboard();
+  await activityDashboard.load();
   await loadTopics();
   await loadKnowledgeCards();
   /** reminderIntervalMilliseconds 是网页打开期间的论文提醒检查间隔。 */

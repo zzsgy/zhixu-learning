@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@mozilla/readability": "0.6.0",
+    "docx": "9.7.1",
     "jszip": "3.10.1",
     "katex": "0.18.4",
     "linkedom": "0.18.13",

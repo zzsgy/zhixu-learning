@@ -6,6 +6,7 @@ import { parseAndClassifyArticle } from "./article-parser.mjs";
 import { preparePaperFullText, preparePaperWebSource } from "./paper-fulltext.mjs";
 import { classifyDocument } from "./classifier.mjs";
 import { triggerCodexPaperTranslationWorker } from "./codex-paper-translator.mjs";
+import { asRetryableImportError } from "./import-retry.mjs";
 
 export function createPaperImportHandler(dependencies = {}) {
   const readArxiv = dependencies.fetchArxivPaperByUrl || fetchArxivPaperByUrl;
@@ -41,8 +42,19 @@ export function createPaperImportHandler(dependencies = {}) {
       Promise.resolve().then(() => triggerTranslation()).catch(error => console.warn(`论文已保存，翻译唤醒稍后重试：${error.message}`));
       return { targetType: "paper", targetId: paper.id, title: paper.title, wordCount: paper.sourceTextWordCount };
     } catch (error) {
-      if (getPaperById(paperId)) markPaperExtractionFailed(paperId, error.message);
-      throw error;
+      const retryableError = asRetryableImportError(error, { maxAttempts: 5 });
+      if (getPaperById(paperId)) {
+        const willRetry = retryableError && job.retryCount < retryableError.maxAttempts - 1;
+        markPaperExtractionFailed(
+          paperId,
+          willRetry
+            ? `${retryableError.message} 系统将自动重试。`
+            : retryableError
+              ? `${retryableError.message} 已达到自动重试上限，可手动重试。`
+              : error.message,
+        );
+      }
+      throw retryableError || error;
     }
   };
 }

@@ -5,6 +5,14 @@ import test from "node:test";
 
 const source = fs.readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
 
+test("论文保存目录位于导入表单内，沿用表单留白而非卡片边缘", () => {
+  const controller = fs.readFileSync(new URL("../public/paper-library.js", import.meta.url), "utf8");
+  assert.match(controller, /\$\("paper-import-form"\)\.prepend\(importDestination\)/);
+  assert.doesNotMatch(controller, /\$\("paper-import-form"\)\.before\(/);
+  const styles = fs.readFileSync(new URL("../public/paper-library.css", import.meta.url), "utf8");
+  assert.match(styles, /#upload-view \.paper-import-destination/);
+});
+
 test("轻量搜索缺少大小或字数字段时不显示NaN和伪造零字数", () => {
   assert.match(source, /Number\.isFinite\(documentItem\.wordCount\)/);
   assert.match(source, /Number\.isFinite\(documentItem\.sizeBytes\)/);

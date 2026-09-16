@@ -16,14 +16,58 @@ import {
   mergeArticleImagesByBlockPosition,
   normalizeLegacyHtmlImages,
   normalizeArticleMath,
+  normalizeArticleHeadingStructure,
   normalizeMisusedArticleHeadings,
   parseAndClassifyCapturedArticle,
   persistEmbeddedArticleImages,
   readNetworkErrorCode,
   restoreReadableFigureImages,
+  restoreOmittedSiblingArticleSections,
   restoreMarkedArticleImages,
   sanitizeArticleHtml,
 } from "../lib/article-parser.mjs";
+
+test("补回 Readability 因同级长章节评分而遗漏的第一章和结论", () => {
+  const { document } = parseHTML(`
+    <main><div class="report-sections">
+      <section><h2>1. Introduction</h2><p>${"Opening context and purpose. ".repeat(20)}</p></section>
+      <section><h3>1.1 The Landscape</h3><p>${"Landscape evidence and observations. ".repeat(20)}</p></section>
+      <section><h2>2. Guiding Principles</h2><p>${"Principles and details. ".repeat(35)}</p></section>
+      <section><h2>3. Recommendations</h2><p>${"Recommendations and implementation. ".repeat(45)}</p></section>
+      <section><h2>4. Conclusion</h2><p>${"Closing findings and next steps. ".repeat(20)}</p></section>
+    </div></main>
+  `);
+  const readableHtml = `<h2>2. Guiding Principles</h2><p>${"Principles and details. ".repeat(35)}</p>
+    <h2>3. Recommendations</h2><p>${"Recommendations and implementation. ".repeat(45)}</p>`;
+  const restored = restoreOmittedSiblingArticleSections(readableHtml, document);
+  assert.ok(restored.indexOf("1. Introduction") < restored.indexOf("2. Guiding Principles"));
+  assert.ok(restored.indexOf("1.1 The Landscape") < restored.indexOf("2. Guiding Principles"));
+  assert.ok(restored.indexOf("4. Conclusion") > restored.indexOf("3. Recommendations"));
+  assert.equal((restored.match(/2\. Guiding Principles/g) || []).length, 1);
+});
+
+test("正文已经从第一章开始时不重复补章", () => {
+  const { document } = parseHTML(`
+    <main><div><section><h2>1. Introduction</h2><p>${"Opening body. ".repeat(20)}</p></section>
+      <section><h2>2. Methods</h2><p>${"Method body. ".repeat(30)}</p></section></div></main>
+  `);
+  const readableHtml = `<h2>1. Introduction</h2><p>${"Opening body. ".repeat(20)}</p>
+    <h2>2. Methods</h2><p>${"Method body. ".repeat(30)}</p>`;
+  const restored = restoreOmittedSiblingArticleSections(readableHtml, document);
+  assert.equal(restored, readableHtml);
+  assert.equal((restored.match(/1\. Introduction/g) || []).length, 1);
+});
+
+test("不把导航栏中的编号标题补进正文", () => {
+  const { document } = parseHTML(`
+    <body><nav><h2>1. Start here</h2><p>${"Navigation copy. ".repeat(30)}</p></nav>
+      <main><article><h2>2. Independent article</h2><p>${"Article body. ".repeat(40)}</p></article></main></body>
+  `);
+  const readableHtml = `<h2>2. Independent article</h2><p>${"Article body. ".repeat(40)}</p>`;
+  const restored = restoreOmittedSiblingArticleSections(readableHtml, document);
+  assert.equal(restored, readableHtml);
+  assert.doesNotMatch(restored, /Start here/);
+});
 
 test("补回 Readability 丢失的出版商正文主图并保留图注位置", () => {
   const { document: originalDocument } = parseHTML(`
@@ -209,6 +253,34 @@ test("保留正常短标题并只降级正文形状的错误标题", () => {
   assert.equal(root.querySelectorAll("h2").length, 1);
   assert.equal(root.querySelectorAll("h1").length, 0);
   assert.equal(root.querySelectorAll("p").length, 1);
+});
+
+test("删除空白占位标题并拆掉包裹块级正文的标题外壳", () => {
+  const { document } = parseHTML(`<article>
+    <h2><span><br></span></h2>
+    <h2 class="layout-shell"><span><section><h3>1.1 真实章节</h3><p>正文保持原位。</p></section></span></h2>
+    <h2>正常短标题</h2>
+    <h2><img src="/diagram.png" alt="架构图"></h2>
+  </article>`);
+  const root = document.querySelector("article");
+  const result = normalizeArticleHeadingStructure(root);
+  assert.deepEqual(result, { unwrapped: 1, removedEmpty: 1 });
+  assert.equal(root.querySelectorAll("h2").length, 2);
+  assert.equal(root.querySelector("h3")?.textContent, "1.1 真实章节");
+  assert.equal(root.querySelector("section p")?.textContent, "正文保持原位。");
+  assert.equal(root.querySelector('h2 img[alt="架构图"]')?.getAttribute("src"), "/diagram.png");
+  assert.match(root.textContent || "", /正常短标题/);
+});
+
+test("文章清洗不会把空标题和块级标题外壳写入新记录", () => {
+  const result = sanitizeArticleHtml(
+    `<h2><span><br></span></h2>
+     <h2><span><section><h3>2.1 核心目标</h3><p>需要保留的正文。</p></section></span></h2>`,
+    new URL("https://example.com/article"),
+  );
+  assert.doesNotMatch(result.html, /<h2/);
+  assert.match(result.html, /<h3>2\.1 核心目标<\/h3>/);
+  assert.match(result.html, /需要保留的正文/);
 });
 
 /**
